@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # sgt — Simple GitHub Gastown
-# Lightweight orchestration: GitHub Issues + Claude Code + tmux
+# Lightweight orchestration: GitHub Issues + (Claude Code or Codex) + tmux
 # Feature-compatible with Gas Town, powered by GitHub instead of beads
 
 SGT_VERSION="0.5.0"
@@ -21,6 +21,66 @@ SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 # Review queue removed in v0.5.0 — refinery handles review inline
+
+# ─── AI Backend Selection ─────────────────────────────────────────────
+# Default backend is Claude Code, but SGT can also run on Codex CLI.
+#
+# Selection order:
+#   1) SGT_BACKEND env var (claude|codex)
+#   2) $SGT_CONFIG/backend file (claude|codex)
+#   3) default: claude
+SGT_BACKEND_FILE="$SGT_CONFIG/backend"
+
+_sgt_backend() {
+  local b="${SGT_BACKEND:-}"
+  if [[ -z "$b" && -f "$SGT_BACKEND_FILE" ]]; then
+    b="$(cat "$SGT_BACKEND_FILE" 2>/dev/null || true)"
+  fi
+  [[ -n "$b" ]] || b="claude"
+  case "$b" in
+    claude|codex) echo "$b" ;;
+    *) echo "claude" ;;
+  esac
+}
+
+_set_backend() {
+  local b="${1:-}"
+  case "$b" in
+    claude|codex) ;;
+    *) die "backend must be claude|codex" ;;
+  esac
+  ensure_init
+  echo "$b" > "$SGT_BACKEND_FILE"
+  log_event "BACKEND_SET $b"
+  info "backend set: $b"
+}
+
+# Return a shell command that runs the agent for a prompt (non-interactive).
+_ai_cmd_exec() {
+  local prompt="$1"
+  case "$(_sgt_backend)" in
+    codex)
+      # codex exec exits when done, which is ideal for tmux workers.
+      printf 'codex exec -s danger-full-access -a on-failure %q' "$prompt"
+      ;;
+    claude|*)
+      printf 'claude %q --dangerously-skip-permissions' "$prompt"
+      ;;
+  esac
+}
+
+# Return a shell command that prints response to stdout (for reviews/mayor loops).
+_ai_cmd_prompt() {
+  local prompt="$1"
+  case "$(_sgt_backend)" in
+    codex)
+      printf 'codex exec -s danger-full-access -a on-failure %q' "$prompt"
+      ;;
+    claude|*)
+      printf 'claude -p %q --dangerously-skip-permissions' "$prompt"
+      ;;
+  esac
+}
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
@@ -105,6 +165,23 @@ polecat_name() {
 # List all rig names
 list_rigs() {
   ls -1 "$SGT_RIGS" 2>/dev/null || true
+}
+
+cmd_backend() {
+  local sub="${1:-get}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    get)
+      ensure_init
+      echo "$(_sgt_backend)"
+      ;;
+    set)
+      _set_backend "${1:-}"
+      ;;
+    *)
+      die "usage: sgt backend get|set <claude|codex>"
+      ;;
+  esac
 }
 
 # ─── Init ─────────────────────────────────────────────────────────────
@@ -293,10 +370,12 @@ CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
-  # ── 5. Spawn Claude Code in tmux ──
+  # ── 5. Spawn AI worker in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
+  local polecat_prompt
+  polecat_prompt="Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd_exec "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
@@ -980,8 +1059,11 @@ CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
+  local polecat_prompt
+  polecat_prompt="Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
+
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd_exec "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -1091,9 +1173,7 @@ If rejecting, explain what's missing in 2-3 sentences before the verdict.
 REVIEWMD
 
   local review_output
-  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
-    'Read review-prompt.md. Review the PR. Be strict — only approve complete implementations.' \
-    --dangerously-skip-permissions" </dev/null 2>&1 || true)
+  review_output=$(timeout 120 bash -c "cd '$review_dir' && $( _ai_cmd_prompt 'Read review-prompt.md. Review the PR. Be strict — only approve complete implementations.' )" </dev/null 2>&1 || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] PR #$pr APPROVED"
@@ -1178,9 +1258,7 @@ If rejecting, explain what's missing in 2-3 sentences before the verdict.
 REVIEWMD
 
   local review_output
-  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
-    'Read dog-review-prompt.md. Review the research output quality.' \
-    --dangerously-skip-permissions" </dev/null 2>&1 || true)
+  review_output=$(timeout 120 bash -c "cd '$review_dir' && $( _ai_cmd_prompt 'Read dog-review-prompt.md. Review the research output quality.' )" </dev/null 2>&1 || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] dog $dname APPROVED"
@@ -1461,7 +1539,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "claude \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
+              "$( _ai_cmd_exec \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
 
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
@@ -2077,8 +2155,7 @@ Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
 After deciding, report your actions: sgt mayor notify "<summary of what you did>"
 MAYORMD
 
-      if timeout 300 bash -c "cd '$mayor_workspace' && claude --dangerously-skip-permissions -p \
-        'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" \
+      if timeout 300 bash -c "cd '$mayor_workspace' && $( _ai_cmd_prompt 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.' )" \
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
@@ -2275,8 +2352,10 @@ DSTATE
 
   # Spawn in tmux
   info "spawning dog $dname..."
+  local dog_prompt
+  dog_prompt="Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "claude \"Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd_exec "$dog_prompt" ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
 
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
@@ -2469,8 +2548,10 @@ cmd_crew_wake() {
     return
   fi
 
+  local crew_prompt
+  crew_prompt="Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes."
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "claude \"Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes.\" --dangerously-skip-permissions; echo '[SGT] crew exited'"
+    "$( _ai_cmd_exec "$crew_prompt" ); echo '[SGT] crew exited'"
 
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
@@ -3023,6 +3104,11 @@ Environment:
   SGT_ROOT              Workspace root (default: ~/sgt)
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
+  SGT_BACKEND           AI backend (claude|codex). Overrides $SGT_CONFIG/backend
+
+Backend:
+  backend get           Show current backend
+  backend set <name>    Set backend (claude|codex)
 
 Examples:
   sgt init
@@ -3186,6 +3272,7 @@ main() {
         *)     die "unknown escalation command: $sub (try: init, show)" ;;
       esac
       ;;
+    backend)        cmd_backend "$@" ;;
     nudge)          cmd_nudge "$@" ;;
     mail)
       local sub="${1:-}"
