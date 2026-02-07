@@ -25,6 +25,9 @@ Environment variables:
 ## Features
 
 - **Dashboard** — Live agent status, polecat overview, merge queue summary
+- **Higher density mode** — Toggle compact layout (`c`) and collapsible cards (persisted in localStorage)
+- **Keyboard shortcuts** — `1..7` switch panels, `c` toggles compact, `Esc` closes peek modal
+- **Realtime robustness** — WS heartbeat (ping/pong), exponential reconnect backoff + stale indicators + last-updated timestamps
 - **Polecats panel** — All active polecats with status, rig, issue, branch, PR info. Click to peek at tmux output
 - **Dogs panel** — Active dogs with status
 - **Rigs** — Registered rigs with repo links, witness/refinery status, polecat counts
@@ -32,11 +35,16 @@ Environment variables:
 - **Log viewer** — Real-time tailing of sgt.log with auto-scroll
 - **Merge Queue** — Pending PRs in refinery queue
 
+## Screenshots
+
+- Before: `web/screenshots/before-dashboard.png`
+- After:  `web/screenshots/after-dashboard.png`
+
 ## Architecture
 
 - **Backend**: Node.js + Express. Reads SGT state from `~/.sgt/` directory and shells out to `sgt` CLI for actions.
-- **Frontend**: Single HTML page with vanilla JS. Dark theme, monospace design.
-- **Real-time**: WebSocket connection pushes status updates (polled every 3s) and new log lines (file watcher).
+- **Frontend**: Single HTML page with vanilla JS (no framework).
+- **Real-time**: WebSocket pushes status updates (polled every 3s) and new log lines (file watcher), with heartbeat + reconnect/backoff.
 
 ## API Endpoints
 

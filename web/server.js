@@ -245,13 +245,18 @@ app.get('/api/logs', (req, res) => {
 // --- WebSocket: Real-time updates ---
 
 const WS_INTERVAL = 3000; // poll every 3 seconds
+const WS_PING_INTERVAL = 15000;
+const WS_PONG_GRACE = 35000; // if no pong for this long, terminate
 
 wss.on('connection', (ws) => {
   let alive = true;
   let logWatcher = null;
   let statusInterval = null;
+  let pingInterval = null;
+  let lastPongAt = Date.now();
 
-  // Send initial status
+  // hello + initial status
+  safeSend(ws, { type: 'hello', serverTime: new Date().toISOString() });
   sendStatus(ws);
 
   // Poll status on interval
@@ -259,7 +264,19 @@ wss.on('connection', (ws) => {
     if (alive) sendStatus(ws);
   }, WS_INTERVAL);
 
-  // Watch log file for changes
+  // WS heartbeat (robustness)
+  ws.on('pong', () => { lastPongAt = Date.now(); });
+  pingInterval = setInterval(() => {
+    if (ws.readyState !== 1) return;
+    const age = Date.now() - lastPongAt;
+    if (age > WS_PONG_GRACE) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    try { ws.ping(); } catch {}
+  }, WS_PING_INTERVAL);
+
+  // Watch log file for changes (handle truncation/rotation)
   try {
     let lastSize = 0;
     try { lastSize = fs.statSync(SGT_LOG).size; } catch {}
@@ -267,14 +284,22 @@ wss.on('connection', (ws) => {
     logWatcher = fs.watchFile(SGT_LOG, { interval: 1000 }, () => {
       try {
         const stat = fs.statSync(SGT_LOG);
+
+        // truncation / rotation
+        if (stat.size < lastSize) {
+          lastSize = 0;
+          safeSend(ws, { type: 'log_reset' });
+          return;
+        }
+
         if (stat.size > lastSize) {
           const fd = fs.openSync(SGT_LOG, 'r');
           const buf = Buffer.alloc(stat.size - lastSize);
           fs.readSync(fd, buf, 0, buf.length, lastSize);
           fs.closeSync(fd);
           const newLines = buf.toString('utf8').split('\n').filter(l => l.trim());
-          if (newLines.length > 0 && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'log', lines: newLines }));
+          if (newLines.length > 0) {
+            safeSend(ws, { type: 'log', lines: newLines });
           }
           lastSize = stat.size;
         }
@@ -285,6 +310,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     alive = false;
     if (statusInterval) clearInterval(statusInterval);
+    if (pingInterval) clearInterval(pingInterval);
     if (logWatcher) fs.unwatchFile(SGT_LOG);
   });
 
@@ -293,11 +319,16 @@ wss.on('connection', (ws) => {
   });
 });
 
+function safeSend(ws, obj) {
+  if (ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify(obj)); } catch {}
+}
+
 async function sendStatus(ws) {
   if (ws.readyState !== 1) return;
   try {
     const output = await runSgt(['status']);
-    ws.send(JSON.stringify({ type: 'status', raw: output, parsed: parseStatus(output) }));
+    safeSend(ws, { type: 'status', raw: output, parsed: parseStatus(output), serverTime: new Date().toISOString() });
   } catch {}
 }
 
