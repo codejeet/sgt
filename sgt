@@ -28,6 +28,77 @@ die()  { echo "sgt: $*" >&2; exit 1; }
 info() { echo "» $*"; }
 warn() { echo "⚠ $*" >&2; }
 
+# ─── UI helpers (color + layout) ──────────────────────────────────────
+
+# Disable color via NO_COLOR=1 or when stdout is not a TTY.
+_ui_color_enabled() {
+  [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]
+}
+
+_c() {
+  # Usage: _c "1;32"  (SGR code)
+  _ui_color_enabled || return 0
+  printf "\033[%sm" "$1"
+}
+
+_reset() { _c "0"; }
+_bold()  { _c "1"; }
+_dim()   { _c "2"; }
+
+_fg_gray()   { _c "90"; }
+_fg_red()    { _c "31"; }
+_fg_green()  { _c "32"; }
+_fg_yellow() { _c "33"; }
+_fg_blue()   { _c "34"; }
+_fg_mag()    { _c "35"; }
+_fg_cyan()   { _c "36"; }
+
+_term_cols() {
+  local cols="${COLUMNS:-}"
+  if [[ -z "$cols" ]]; then
+    cols=$(tput cols 2>/dev/null || echo 80)
+  fi
+  # Guardrails
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  (( cols < 40 )) && cols=40
+  echo "$cols"
+}
+
+_repeat() {
+  local ch="$1" n="$2"
+  (( n <= 0 )) && return 0
+  local out=""
+  local i
+  for (( i=0; i<n; i++ )); do
+    out+="$ch"
+  done
+  printf "%s" "$out"
+}
+
+_section() {
+  # Rounded box header line (single line, compact)
+  local title="$1"
+  local cols fill
+  cols=$(_term_cols)
+  # "╭─ " + title + " " + fill + "╮"
+  fill=$(( cols - ${#title} - 6 ))
+  (( fill < 0 )) && fill=0
+  printf "%s%s╭─ %s %s╮%s\n" "$(_bold)" "$(_fg_cyan)" "$title" "$(_repeat "─" "$fill")" "$(_reset)"
+}
+
+_status_badge() {
+  # Usage: _status_badge on|off|alive|dead|open|merged|closed|unknown
+  local s="$1"
+  case "$s" in
+    on|alive|OPEN|MERGED)
+      printf "%s%s%s%s" "$(_bold)" "$(_fg_green)" "$s" "$(_reset)" ;;
+    off|dead|CLOSED)
+      printf "%s%s%s%s" "$(_bold)" "$(_fg_red)" "$s" "$(_reset)" ;;
+    *)
+      printf "%s%s%s%s" "$(_bold)" "$(_fg_yellow)" "$s" "$(_reset)" ;;
+  esac
+}
+
 log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
 }
@@ -314,21 +385,26 @@ PSTATE
 cmd_status() {
   ensure_init
 
-  # Show agent status
-  echo "=== Agents ==="
-  local daemon_alive="off"
+  _section "Agents"
+
+  local daemon_alive="off" daemon_pid=""
   if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
-    daemon_alive="on (pid $(cat "$SGT_DAEMON_PID"))"
+    daemon_alive="on"
+    daemon_pid="$(cat "$SGT_DAEMON_PID")"
   fi
-  echo "  daemon:  $daemon_alive"
+  if [[ -n "$daemon_pid" ]]; then
+    printf "  %-16s %s  %s(pid %s)%s\n" "daemon" "$(_status_badge "$daemon_alive")" "$(_fg_gray)" "$daemon_pid" "$(_reset)"
+  else
+    printf "  %-16s %s\n" "daemon" "$(_status_badge "$daemon_alive")"
+  fi
 
   local deacon_alive="off"
   tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_alive="on"
-  echo "  deacon:  $deacon_alive"
+  printf "  %-16s %s\n" "deacon" "$(_status_badge "$deacon_alive")"
   if [[ -f "$SGT_DEACON_HEARTBEAT" ]]; then
     local last_beat
-    last_beat=$(python3 -c "import json,sys; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp','?'))" 2>/dev/null || echo "?")
-    echo "    last heartbeat: $last_beat"
+    last_beat=$(python3 -c "import json; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp','?'))" 2>/dev/null || echo "?")
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $last_beat" "$(_reset)"
   fi
 
   for rig_file in "$SGT_RIGS"/*; do
@@ -338,17 +414,15 @@ cmd_status() {
     local w_alive="off" r_alive="off"
     tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null && w_alive="on"
     tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null && r_alive="on"
-    echo "  witness/$rig_name:  $w_alive"
-    echo "  refinery/$rig_name: $r_alive"
+    printf "  %-16s %s\n" "witness/$rig_name"  "$(_status_badge "$w_alive")"
+    printf "  %-16s %s\n" "refinery/$rig_name" "$(_status_badge "$r_alive")"
   done
 
-  # Mayor
   local mayor_alive="off"
   tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
-  echo "  mayor:   $mayor_alive"
+  printf "  %-16s %s\n" "mayor" "$(_status_badge "$mayor_alive")"
 
-  echo ""
-  echo "=== Dogs ==="
+  _section "Dogs"
   local dog_count=0
   if [[ -d "$SGT_CONFIG/dogs" ]]; then
     for df in "$SGT_CONFIG/dogs"/*; do
@@ -360,14 +434,13 @@ cmd_status() {
         source "$df"
         local alive="dead"
         tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
-        echo "  $dname [$alive] — #$ISSUE"
+        printf "  %-16s %s  %s#%s%s\n" "$dname" "$(_status_badge "$alive")" "$(_fg_gray)" "$ISSUE" "$(_reset)"
       )
     done
   fi
-  [[ "$dog_count" -eq 0 ]] && info "no dogs"
+  [[ "$dog_count" -eq 0 ]] && printf "  %s%s%s\n" "$(_dim)" "none" "$(_reset)"
 
-  echo ""
-  echo "=== Crew ==="
+  _section "Crew"
   local crew_count=0
   if [[ -d "$SGT_CONFIG/crew" ]]; then
     for cf in "$SGT_CONFIG/crew"/*; do
@@ -379,14 +452,13 @@ cmd_status() {
         source "$cf"
         local alive="asleep"
         tmux has-session -t "$SESSION" 2>/dev/null && alive="awake"
-        echo "  $cname [$alive] — $ROLE ($RIG)"
+        printf "  %-16s %s  %s(%s/%s)%s\n" "$cname" "$(_status_badge "$alive")" "$(_fg_gray)" "$ROLE" "$RIG" "$(_reset)"
       )
     done
   fi
-  [[ "$crew_count" -eq 0 ]] && info "no crew"
+  [[ "$crew_count" -eq 0 ]] && printf "  %s%s%s\n" "$(_dim)" "none" "$(_reset)"
 
-  echo ""
-  echo "=== Merge Queue (Refinery — reviews + merges) ==="
+  _section "Merge Queue"
   local mq_count=0
   if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
     for mqf in "$SGT_CONFIG/merge-queue"/*; do
@@ -394,14 +466,13 @@ cmd_status() {
       mq_count=$((mq_count + 1))
       (
         source "$mqf"
-        echo "  $(basename "$mqf") — PR #${PR:-?} on ${RIG:-?}"
+        printf "  %-16s %sPR#%s%s  %s%s%s\n" "$(basename "$mqf")" "$(_fg_gray)" "${PR:-?}" "$(_reset)" "$(_dim)" "${RIG:-?}" "$(_reset)"
       )
     done
   fi
-  [[ "$mq_count" -eq 0 ]] && info "merge queue empty"
+  [[ "$mq_count" -eq 0 ]] && printf "  %s%s%s\n" "$(_dim)" "empty" "$(_reset)"
 
-  echo ""
-  echo "=== Polecats ==="
+  _section "Polecats"
   local count=0
   for f in "$SGT_POLECATS"/*; do
     [[ -f "$f" ]] || continue
@@ -409,31 +480,41 @@ cmd_status() {
 
     local pname
     pname="$(basename "$f")"
-    # Use subshell to avoid polluting namespace
     (
       source "$f"
       local alive="dead"
       tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
-      local pr_status=""
-      pr_status=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number,state,title --jq '.[0] | "\(.state) PR #\(.number): \(.title)"' 2>/dev/null || true)
 
-      echo "  $pname [$alive]"
-      echo "    rig:    $RIG"
-      echo "    issue:  #$ISSUE ($ISSUE_URL)"
-      echo "    branch: $BRANCH"
-      if [[ -n "$pr_status" ]]; then
-        echo "    pr:     $pr_status"
+      local pr_number pr_state pr_title
+      pr_number=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
+      pr_state=$(gh pr list --repo "$REPO" --head "$BRANCH" --json state --jq '.[0].state' 2>/dev/null || true)
+      pr_title=$(gh pr list --repo "$REPO" --head "$BRANCH" --json title --jq '.[0].title' 2>/dev/null || true)
+
+      local pr_chunk=""
+      if [[ -n "$pr_number" ]]; then
+        pr_chunk="  PR#${pr_number} ${pr_state}"
       fi
-      echo ""
+
+      printf "  %s%-14s%s %s  %s#%s%s  %s%s%s\n" \
+        "$(_bold)" "$pname" "$(_reset)" \
+        "$(_status_badge "$alive")" \
+        "$(_fg_gray)" "$ISSUE" "$(_reset)" \
+        "$(_dim)" "$BRANCH$pr_chunk" "$(_reset)"
+
+      # Optional: show PR title as a second dense line (only if present)
+      if [[ -n "$pr_title" ]]; then
+        printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:$((_term_cols()-10))}" "$(_reset)"
+      fi
     )
   done
 
   if [[ "$count" -eq 0 ]]; then
-    info "no active polecats"
+    printf "  %s%s%s\n" "$(_dim)" "none" "$(_reset)"
   else
-    info "$count polecat(s) tracked"
+    printf "\n%s%s%s\n" "$(_fg_gray)" "$count polecat(s) tracked" "$(_reset)"
   fi
 }
+
 
 # ─── Peek ─────────────────────────────────────────────────────────────
 
@@ -442,65 +523,28 @@ cmd_peek() {
   [[ -n "$target" ]] || die "usage: sgt peek <polecat|witness/<rig>|refinery/<rig>|deacon>"
   ensure_init
 
+  local session=""
+
   # Allow peeking at agents too
   case "$target" in
-    deacon)
-      if tmux has-session -t "sgt-deacon" 2>/dev/null; then
-        tmux capture-pane -t "sgt-deacon" -p -S -50
-      else
-        warn "deacon session is dead"
-      fi
-      return
-      ;;
-    witness/*)
-      local rig="${target#witness/}"
-      local session="sgt-witness-${rig}"
-      if tmux has-session -t "$session" 2>/dev/null; then
-        tmux capture-pane -t "$session" -p -S -50
-      else
-        warn "witness/$rig session is dead"
-      fi
-      return
-      ;;
-    refinery/*)
-      local rig="${target#refinery/}"
-      local session="sgt-refinery-${rig}"
-      if tmux has-session -t "$session" 2>/dev/null; then
-        tmux capture-pane -t "$session" -p -S -50
-      else
-        warn "refinery/$rig session is dead"
-      fi
-      return
-      ;;
-    mayor)
-      if tmux has-session -t "sgt-mayor" 2>/dev/null; then
-        tmux capture-pane -t "sgt-mayor" -p -S -50
-      else
-        warn "mayor session is dead"
-      fi
-      return
-      ;;
-    dog/*)
-      local dname="${target#dog/}"
-      local session="sgt-${dname}"
-      if tmux has-session -t "$session" 2>/dev/null; then
-        tmux capture-pane -t "$session" -p -S -50
-      else
-        warn "dog/$dname session is dead"
-      fi
-      return
-      ;;
-    crew/*)
-      local cname="${target#crew/}"
-      local session="sgt-crew-${cname}"
-      if tmux has-session -t "$session" 2>/dev/null; then
-        tmux capture-pane -t "$session" -p -S -50
-      else
-        warn "crew/$cname session is dead"
-      fi
-      return
-      ;;
+    deacon)       session="sgt-deacon" ;;
+    witness/*)    session="sgt-witness-${target#witness/}" ;;
+    refinery/*)   session="sgt-refinery-${target#refinery/}" ;;
+    mayor)        session="sgt-mayor" ;;
+    dog/*)        session="sgt-${target#dog/}" ;;
+    crew/*)       session="sgt-crew-${target#crew/}" ;;
+    *)            session="" ;;
   esac
+
+  if [[ -n "$session" ]]; then
+    if tmux has-session -t "$session" 2>/dev/null; then
+      _section "peek: $target"
+      tmux capture-pane -t "$session" -p -S -200
+    else
+      warn "$target session is dead"
+    fi
+    return
+  fi
 
   # Polecat peek
   local pfile="$SGT_POLECATS/$target"
@@ -508,22 +552,27 @@ cmd_peek() {
 
   (
     source "$pfile"
+    _section "peek: polecat/$target (#$ISSUE)"
+
     if tmux has-session -t "$SESSION" 2>/dev/null; then
-      tmux capture-pane -t "$SESSION" -p -S -50
-    else
-      warn "session $SESSION is dead"
-      if [[ -d "$WORKTREE" ]]; then
-        info "last commits on $BRANCH:"
-        git -C "$WORKTREE" log --oneline -5 2>/dev/null || true
-      fi
-      local pr
-      pr=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number,state,url --jq '.[0] | "#\(.number) [\(.state)] \(.url)"' 2>/dev/null || true)
-      if [[ -n "$pr" ]]; then
-        info "PR: $pr"
-      fi
+      tmux capture-pane -t "$SESSION" -p -S -200
+      return
+    fi
+
+    warn "session $SESSION is dead"
+    if [[ -d "$WORKTREE" ]]; then
+      printf "%s%s%s\n" "$(_dim)" "last commits on $BRANCH:" "$(_reset)"
+      git -C "$WORKTREE" log --oneline -5 2>/dev/null || true
+    fi
+
+    local pr
+    pr=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number,state,url --jq '.[0] | "#\(.number) [\(.state)] \(.url)"' 2>/dev/null || true)
+    if [[ -n "$pr" ]]; then
+      printf "%s%sPR:%s %s\n" "$(_bold)" "$(_fg_mag)" "$(_reset)" "$pr"
     fi
   )
 }
+
 
 # ─── Nuke ─────────────────────────────────────────────────────────────
 

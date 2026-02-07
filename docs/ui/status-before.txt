@@ -1,0 +1,21 @@
+=== Agents ===
+  daemon:  on (pid 2718371)
+  deacon:  on
+    last heartbeat: 2026-02-06T22:57:10-08:00
+  witness/research-agent:  on
+  refinery/research-agent: on
+  witness/sgt:  on
+  refinery/sgt: on
+  mayor:   on
+
+=== Dogs ===
+» no dogs
+
+=== Crew ===
+» no crew
+
+=== Merge Queue (Refinery — reviews + merges) ===
+» merge queue empty
+
+=== Polecats ===
+» no active polecats
