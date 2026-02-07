@@ -20,6 +20,7 @@ SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
+SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
 # AI backend (claude|codex)
@@ -105,6 +106,94 @@ _status_badge() {
 
 log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
+}
+
+# Notify via OpenClaw (delivered) if configured. No-op if missing.
+_notify_openclaw() {
+  local message="${1:-}"
+  [[ -n "$message" ]] || return 0
+  command -v openclaw &>/dev/null || return 0
+  [[ -f "$SGT_NOTIFY" ]] || return 0
+
+  local channel="" to="" reply_to=""
+  local notify_out=""
+
+  if command -v python3 &>/dev/null; then
+    notify_out=$(python3 - "$SGT_NOTIFY" <<'PY' 2>/dev/null) || return 0
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+def get(keys):
+    for k in keys:
+        v = data.get(k)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return ""
+
+channel = get(["channel"])
+to = get(["to"])
+reply_to = get(["reply_to", "reply-to", "replyTo"])
+print(channel)
+print(to)
+print(reply_to)
+PY
+  elif command -v python &>/dev/null; then
+    notify_out=$(python - "$SGT_NOTIFY" <<'PY' 2>/dev/null) || return 0
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+def get(keys):
+    for k in keys:
+        v = data.get(k)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return ""
+
+channel = get(["channel"])
+to = get(["to"])
+reply_to = get(["reply_to", "reply-to", "replyTo"])
+print(channel)
+print(to)
+print(reply_to)
+PY
+  else
+    return 0
+  fi
+
+  local fields=()
+  while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
+  channel="${fields[0]:-}"
+  to="${fields[1]:-}"
+  reply_to="${fields[2]:-}"
+  [[ -n "$channel" ]] || channel="last"
+
+  local cmd=(openclaw agent --agent gastown --deliver --message "$message" --channel "$channel")
+  [[ -n "$to" ]] && cmd+=(--to "$to")
+  [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
+
+  "${cmd[@]}" &>/dev/null &
+  disown 2>/dev/null
+  log_event "OPENCLAW_NOTIFY channel=$channel to=$to reply_to=$reply_to message=$message"
 }
 
 # Wake the mayor via FIFO (non-blocking, fire-and-forget)
@@ -1240,6 +1329,7 @@ REVIEWMD
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] PR #$pr APPROVED"
     log_event "REFINERY_REVIEW_APPROVED pr=#$pr"
+    _notify_openclaw "[SGT Refinery] review approved rig=$rig pr=#$pr issue=#$issue"
     gh pr comment "$pr" --repo "$repo" \
       --body "[sgt-refinery] **APPROVED** — reviewed and cleared for merge." 2>/dev/null || true
     return 0
@@ -1248,6 +1338,9 @@ REVIEWMD
     reject_reason=$(echo "$review_output" | grep -B5 "VERDICT: REJECT" | grep -v "VERDICT:" | tail -3)
     echo "[refinery/$rig] PR #$pr REJECTED: $reject_reason"
     log_event "REFINERY_REVIEW_REJECTED pr=#$pr reason=$reject_reason"
+    local reject_summary
+    reject_summary=$(echo "$reject_reason" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g' | cut -c1-160)
+    _notify_openclaw "[SGT Refinery] review rejected rig=$rig pr=#$pr issue=#$issue reason=$reject_summary"
 
     gh pr comment "$pr" --repo "$repo" \
       --body "[sgt-refinery] **REJECTED** — Implementation incomplete.
@@ -1472,6 +1565,7 @@ _refinery_loop() {
         if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch 2>&1); then
           echo "[refinery/$rig] PR #$mq_pr merged successfully"
           log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
+          _notify_openclaw "[SGT Refinery] merged rig=$rig pr=#$mq_pr issue=#$mq_issue"
           _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig"
           rm -f "$f"
         else
@@ -2238,10 +2332,8 @@ MAYORMD
 # Notify Rigger agent via OpenClaw messaging (fire-and-forget)
 _mayor_notify_rigger() {
   local message="$1"
-  # Use openclaw agent messaging if available
-  if command -v openclaw &>/dev/null; then
-    openclaw agent --agent gastown --message "[SGT Mayor] $message" &>/dev/null &
-    disown 2>/dev/null
+  if command -v openclaw &>/dev/null && [[ -f "$SGT_NOTIFY" ]]; then
+    _notify_openclaw "[SGT Mayor] $message"
     echo "[mayor] notified Rigger: $message"
     log_event "MAYOR_NOTIFY_RIGGER $message"
   fi
