@@ -1,0 +1,14 @@
+name: bugfix
+description: Bug investigation and fix with regression tests
+steps:
+  - task: "Investigate and diagnose: {description}"
+    type: dog
+    label: investigation
+  - task: "Fix bug: {description}"
+    type: polecat
+    depends_on: [0]
+    label: fix
+  - task: "Write regression tests for: {description}"
+    type: polecat
+    depends_on: [1]
+    label: regression-test

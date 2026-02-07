@@ -1,0 +1,18 @@
+name: feature
+description: Full feature implementation with spec, code, tests, and docs
+steps:
+  - task: "Write technical spec for: {description}"
+    type: dog
+    label: spec
+  - task: "Implement: {description}"
+    type: polecat
+    depends_on: [0]
+    label: implementation
+  - task: "Write tests for: {description}"
+    type: polecat
+    depends_on: [1]
+    label: tests
+  - task: "Write documentation for: {description}"
+    type: dog
+    depends_on: [1]
+    label: docs

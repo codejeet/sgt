@@ -1,0 +1,3082 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# sgt — Simple GitHub Gastown
+# Lightweight orchestration: GitHub Issues + Claude Code + tmux
+# Feature-compatible with Gas Town, powered by GitHub instead of beads
+
+SGT_VERSION="0.5.0"
+SGT_ROOT="${SGT_ROOT:-$HOME/sgt}"
+SGT_CONFIG="$SGT_ROOT/.sgt"
+SGT_RIGS="$SGT_CONFIG/rigs"
+SGT_POLECATS="$SGT_CONFIG/polecats"
+SGT_AGENTS="$SGT_CONFIG/agents"
+SGT_LOG="$SGT_ROOT/sgt.log"
+SGT_DAEMON_PID="$SGT_CONFIG/daemon.pid"
+SGT_DAEMON_LOCK="$SGT_CONFIG/daemon.lock"
+SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
+SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
+SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
+SGT_MOLECULES="$SGT_ROOT/molecules"
+SGT_ESCALATION="$SGT_CONFIG/escalation.json"
+SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
+# Review queue removed in v0.5.0 — refinery handles review inline
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+
+die()  { echo "sgt: $*" >&2; exit 1; }
+info() { echo "» $*"; }
+warn() { echo "⚠ $*" >&2; }
+
+log_event() {
+  echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
+}
+
+# Wake the mayor via FIFO (non-blocking, fire-and-forget)
+_wake_mayor() {
+  local reason="${1:-unknown}"
+  if [[ -p "$SGT_MAYOR_FIFO" ]]; then
+    # Non-blocking write — don't hang if nobody's reading
+    echo "$reason" > "$SGT_MAYOR_FIFO" &
+    disown 2>/dev/null
+  fi
+}
+
+# Wake a rig's refinery via FIFO (non-blocking)
+_wake_refinery() {
+  local rig="$1"
+  local reason="${2:-unknown}"
+  local fifo="$SGT_CONFIG/refinery-${rig}.fifo"
+  if [[ -p "$fifo" ]]; then
+    echo "$reason" > "$fifo" &
+    disown 2>/dev/null
+  fi
+}
+
+ensure_init() {
+  [[ -d "$SGT_CONFIG" ]] || die "not initialized — run: sgt init"
+}
+
+ensure_rig() {
+  local name="$1"
+  [[ -f "$SGT_RIGS/$name" ]] || die "rig '$name' not found — run: sgt rig list"
+}
+
+rig_repo() {
+  local name="$1"
+  cat "$SGT_RIGS/$name"
+}
+
+rig_owner_repo() {
+  local name="$1"
+  local repo
+  repo="$(rig_repo "$name")"
+  echo "${repo#https://github.com/}"
+}
+
+rig_path() {
+  local name="$1"
+  echo "$SGT_ROOT/rigs/$name"
+}
+
+# Generate polecat name: <rig>-<short-id>
+polecat_name() {
+  local rig="$1"
+  echo "${rig}-$(head -c4 /dev/urandom | xxd -p)"
+}
+
+# List all rig names
+list_rigs() {
+  ls -1 "$SGT_RIGS" 2>/dev/null || true
+}
+
+# ─── Init ─────────────────────────────────────────────────────────────
+
+cmd_init() {
+  mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs"
+  touch "$SGT_LOG"
+  log_event "INIT sgt workspace at $SGT_ROOT"
+  info "initialized sgt at $SGT_ROOT"
+}
+
+# ─── Rig Commands ─────────────────────────────────────────────────────
+
+cmd_rig_add() {
+  local name="${1:-}" repo="${2:-}"
+  [[ -n "$name" ]] || die "usage: sgt rig add <name> <github-repo>"
+  [[ -n "$repo" ]] || die "usage: sgt rig add <name> <github-repo>"
+  ensure_init
+
+  if [[ "$repo" =~ ^https?:// ]]; then
+    repo="$repo"
+  elif [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  else
+    die "repo must be 'owner/repo' or a full URL"
+  fi
+
+  echo "$repo" > "$SGT_RIGS/$name"
+
+  local rpath
+  rpath="$(rig_path "$name")"
+  if [[ ! -d "$rpath" ]]; then
+    info "cloning $repo → $rpath"
+    git clone "$repo" "$rpath"
+  else
+    info "rig directory exists, pulling latest"
+    git -C "$rpath" pull --ff-only 2>/dev/null || true
+  fi
+
+  _write_claude_md "$rpath"
+  log_event "RIG_ADD $name $repo"
+  info "rig '$name' added ($repo)"
+}
+
+cmd_rig_list() {
+  ensure_init
+  if [[ -z "$(ls -A "$SGT_RIGS" 2>/dev/null)" ]]; then
+    info "no rigs — run: sgt rig add <name> <repo>"
+    return
+  fi
+  for f in "$SGT_RIGS"/*; do
+    local name repo
+    name="$(basename "$f")"
+    repo="$(cat "$f")"
+    local active
+    active=$(find "$SGT_POLECATS" -name "${name}-*" 2>/dev/null | wc -l)
+    local witness_alive="off"
+    tmux has-session -t "sgt-witness-${name}" 2>/dev/null && witness_alive="on"
+    local refinery_alive="off"
+    tmux has-session -t "sgt-refinery-${name}" 2>/dev/null && refinery_alive="on"
+    echo "  $name  $repo"
+    echo "    polecats: $active  witness: $witness_alive  refinery: $refinery_alive"
+  done
+}
+
+cmd_rig_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: sgt rig remove <name>"
+  ensure_init
+  ensure_rig "$name"
+
+  local active
+  active=$(find "$SGT_POLECATS" -name "${name}-*" 2>/dev/null | wc -l)
+  if [[ "$active" -gt 0 ]]; then
+    die "rig '$name' has $active active polecats — nuke them first"
+  fi
+
+  rm -f "$SGT_RIGS/$name"
+  log_event "RIG_REMOVE $name"
+  info "rig '$name' removed (repo directory kept at $(rig_path "$name"))"
+}
+
+# ─── Sling (Dispatch Work) ────────────────────────────────────────────
+
+cmd_sling() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt sling <rig> <task description> [--convoy <milestone>] [--label <label>]"
+  shift
+
+  local task="" convoy="" labels=() branch_prefix="sgt" auto_merge=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --convoy)  convoy="$2"; shift 2 ;;
+      --label)   labels+=("$2"); shift 2 ;;
+      --auto-merge) auto_merge=true; shift ;;
+      *)         task="${task:+$task }$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$task" ]] || die "no task description provided"
+  ensure_init
+  ensure_rig "$rig"
+
+  local repo rpath pname branch session_name
+  repo="$(rig_repo "$rig")"
+  rpath="$(rig_path "$rig")"
+  pname="$(polecat_name "$rig")"
+  branch="${branch_prefix}/${pname}"
+  session_name="sgt-${pname}"
+
+  # ── 1. Create GitHub Issue ──
+  info "creating issue on $(basename "$repo")..."
+  local label_args=""
+  for l in "${labels[@]+"${labels[@]}"}"; do
+    label_args="$label_args --label $l"
+  done
+
+  local issue_url issue_number
+  issue_url=$(gh issue create \
+    --repo "$repo" \
+    --title "$task" \
+    --body "$(cat <<EOF
+## Task
+
+$task
+
+---
+
+*Created by sgt — polecat: \`$pname\`*
+*Branch: \`$branch\`*
+EOF
+)" \
+    $label_args 2>&1) || die "failed to create issue: $issue_url"
+
+  issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
+  info "issue #$issue_number created: $issue_url"
+
+  # ── 2. Add to milestone if convoy specified ──
+  if [[ -n "$convoy" ]]; then
+    local owner_repo="${repo#https://github.com/}"
+    local ms_number
+    ms_number=$(gh api "repos/$owner_repo/milestones" --jq ".[] | select(.title==\"$convoy\") | .number" 2>/dev/null || true)
+    if [[ -z "$ms_number" ]]; then
+      ms_number=$(gh api "repos/$owner_repo/milestones" \
+        -f title="$convoy" -f state=open \
+        --jq '.number' 2>/dev/null) || warn "couldn't create milestone"
+    fi
+    if [[ -n "$ms_number" ]]; then
+      gh issue edit "$issue_number" --repo "$repo" --milestone "$convoy" 2>/dev/null || true
+      info "added to convoy (milestone): $convoy"
+    fi
+  fi
+
+  # ── 3. Create branch + worktree ──
+  info "setting up branch $branch..."
+  git -C "$rpath" fetch origin 2>/dev/null || true
+  local default_branch
+  default_branch=$(git -C "$rpath" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+  local worktree="$SGT_ROOT/polecats/$pname"
+  mkdir -p "$SGT_ROOT/polecats"
+  git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
+    || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
+
+  if [[ -f "$rpath/CLAUDE.md" ]]; then
+    cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
+  fi
+  _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "$auto_merge"
+
+  # ── 4. Save polecat state ──
+  cat > "$SGT_POLECATS/$pname" <<PSTATE
+RIG=$rig
+REPO=$repo
+ISSUE=$issue_number
+ISSUE_URL=$issue_url
+BRANCH=$branch
+WORKTREE=$worktree
+SESSION=$session_name
+DEFAULT_BRANCH=$default_branch
+AUTO_MERGE=$auto_merge
+CREATED=$(date -Iseconds)
+STATUS=running
+PSTATE
+
+  # ── 5. Spawn Claude Code in tmux ──
+  info "spawning polecat $pname in tmux session $session_name..."
+  tmux new-session -d -s "$session_name" -c "$worktree" \
+    "claude -p \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+
+  log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
+  _wake_refinery "$rig" "sling:$pname:#$issue_number"
+
+  info ""
+  info "polecat $pname dispatched"
+  info "  issue:   $issue_url"
+  info "  branch:  $branch"
+  info "  session: $session_name"
+  info "  peek:    sgt peek $pname"
+}
+
+# ─── Status ───────────────────────────────────────────────────────────
+
+cmd_status() {
+  ensure_init
+
+  # Show agent status
+  echo "=== Agents ==="
+  local daemon_alive="off"
+  if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
+    daemon_alive="on (pid $(cat "$SGT_DAEMON_PID"))"
+  fi
+  echo "  daemon:  $daemon_alive"
+
+  local deacon_alive="off"
+  tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_alive="on"
+  echo "  deacon:  $deacon_alive"
+  if [[ -f "$SGT_DEACON_HEARTBEAT" ]]; then
+    local last_beat
+    last_beat=$(python3 -c "import json,sys; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp','?'))" 2>/dev/null || echo "?")
+    echo "    last heartbeat: $last_beat"
+  fi
+
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local rig_name
+    rig_name="$(basename "$rig_file")"
+    local w_alive="off" r_alive="off"
+    tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null && w_alive="on"
+    tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null && r_alive="on"
+    echo "  witness/$rig_name:  $w_alive"
+    echo "  refinery/$rig_name: $r_alive"
+  done
+
+  # Mayor
+  local mayor_alive="off"
+  tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
+  echo "  mayor:   $mayor_alive"
+
+  echo ""
+  echo "=== Dogs ==="
+  local dog_count=0
+  if [[ -d "$SGT_CONFIG/dogs" ]]; then
+    for df in "$SGT_CONFIG/dogs"/*; do
+      [[ -f "$df" ]] || continue
+      dog_count=$((dog_count + 1))
+      local dname
+      dname="$(basename "$df")"
+      (
+        source "$df"
+        local alive="dead"
+        tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
+        echo "  $dname [$alive] — #$ISSUE"
+      )
+    done
+  fi
+  [[ "$dog_count" -eq 0 ]] && info "no dogs"
+
+  echo ""
+  echo "=== Crew ==="
+  local crew_count=0
+  if [[ -d "$SGT_CONFIG/crew" ]]; then
+    for cf in "$SGT_CONFIG/crew"/*; do
+      [[ -f "$cf" ]] || continue
+      crew_count=$((crew_count + 1))
+      local cname
+      cname="$(basename "$cf")"
+      (
+        source "$cf"
+        local alive="asleep"
+        tmux has-session -t "$SESSION" 2>/dev/null && alive="awake"
+        echo "  $cname [$alive] — $ROLE ($RIG)"
+      )
+    done
+  fi
+  [[ "$crew_count" -eq 0 ]] && info "no crew"
+
+  echo ""
+  echo "=== Merge Queue (Refinery — reviews + merges) ==="
+  local mq_count=0
+  if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
+    for mqf in "$SGT_CONFIG/merge-queue"/*; do
+      [[ -f "$mqf" ]] || continue
+      mq_count=$((mq_count + 1))
+      (
+        source "$mqf"
+        echo "  $(basename "$mqf") — PR #${PR:-?} on ${RIG:-?}"
+      )
+    done
+  fi
+  [[ "$mq_count" -eq 0 ]] && info "merge queue empty"
+
+  echo ""
+  echo "=== Polecats ==="
+  local count=0
+  for f in "$SGT_POLECATS"/*; do
+    [[ -f "$f" ]] || continue
+    count=$((count + 1))
+
+    local pname
+    pname="$(basename "$f")"
+    # Use subshell to avoid polluting namespace
+    (
+      source "$f"
+      local alive="dead"
+      tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
+      local pr_status=""
+      pr_status=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number,state,title --jq '.[0] | "\(.state) PR #\(.number): \(.title)"' 2>/dev/null || true)
+
+      echo "  $pname [$alive]"
+      echo "    rig:    $RIG"
+      echo "    issue:  #$ISSUE ($ISSUE_URL)"
+      echo "    branch: $BRANCH"
+      if [[ -n "$pr_status" ]]; then
+        echo "    pr:     $pr_status"
+      fi
+      echo ""
+    )
+  done
+
+  if [[ "$count" -eq 0 ]]; then
+    info "no active polecats"
+  else
+    info "$count polecat(s) tracked"
+  fi
+}
+
+# ─── Peek ─────────────────────────────────────────────────────────────
+
+cmd_peek() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || die "usage: sgt peek <polecat|witness/<rig>|refinery/<rig>|deacon>"
+  ensure_init
+
+  # Allow peeking at agents too
+  case "$target" in
+    deacon)
+      if tmux has-session -t "sgt-deacon" 2>/dev/null; then
+        tmux capture-pane -t "sgt-deacon" -p -S -50
+      else
+        warn "deacon session is dead"
+      fi
+      return
+      ;;
+    witness/*)
+      local rig="${target#witness/}"
+      local session="sgt-witness-${rig}"
+      if tmux has-session -t "$session" 2>/dev/null; then
+        tmux capture-pane -t "$session" -p -S -50
+      else
+        warn "witness/$rig session is dead"
+      fi
+      return
+      ;;
+    refinery/*)
+      local rig="${target#refinery/}"
+      local session="sgt-refinery-${rig}"
+      if tmux has-session -t "$session" 2>/dev/null; then
+        tmux capture-pane -t "$session" -p -S -50
+      else
+        warn "refinery/$rig session is dead"
+      fi
+      return
+      ;;
+    mayor)
+      if tmux has-session -t "sgt-mayor" 2>/dev/null; then
+        tmux capture-pane -t "sgt-mayor" -p -S -50
+      else
+        warn "mayor session is dead"
+      fi
+      return
+      ;;
+    dog/*)
+      local dname="${target#dog/}"
+      local session="sgt-${dname}"
+      if tmux has-session -t "$session" 2>/dev/null; then
+        tmux capture-pane -t "$session" -p -S -50
+      else
+        warn "dog/$dname session is dead"
+      fi
+      return
+      ;;
+    crew/*)
+      local cname="${target#crew/}"
+      local session="sgt-crew-${cname}"
+      if tmux has-session -t "$session" 2>/dev/null; then
+        tmux capture-pane -t "$session" -p -S -50
+      else
+        warn "crew/$cname session is dead"
+      fi
+      return
+      ;;
+  esac
+
+  # Polecat peek
+  local pfile="$SGT_POLECATS/$target"
+  [[ -f "$pfile" ]] || die "polecat '$target' not found"
+
+  (
+    source "$pfile"
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux capture-pane -t "$SESSION" -p -S -50
+    else
+      warn "session $SESSION is dead"
+      if [[ -d "$WORKTREE" ]]; then
+        info "last commits on $BRANCH:"
+        git -C "$WORKTREE" log --oneline -5 2>/dev/null || true
+      fi
+      local pr
+      pr=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number,state,url --jq '.[0] | "#\(.number) [\(.state)] \(.url)"' 2>/dev/null || true)
+      if [[ -n "$pr" ]]; then
+        info "PR: $pr"
+      fi
+    fi
+  )
+}
+
+# ─── Nuke ─────────────────────────────────────────────────────────────
+
+cmd_nuke() {
+  local pname="${1:-}"
+  [[ -n "$pname" ]] || die "usage: sgt nuke <polecat>"
+  ensure_init
+
+  local pfile="$SGT_POLECATS/$pname"
+  [[ -f "$pfile" ]] || die "polecat '$pname' not found"
+
+  (
+    source "$pfile"
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux kill-session -t "$SESSION"
+      info "killed session $SESSION"
+    fi
+    if [[ -d "$WORKTREE" ]]; then
+      local rpath
+      rpath="$(rig_path "$RIG")"
+      git -C "$rpath" worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
+      info "removed worktree $WORKTREE"
+    fi
+    git -C "$(rig_path "$RIG")" push origin --delete "$BRANCH" 2>/dev/null && info "deleted remote branch $BRANCH" || true
+  )
+
+  rm -f "$pfile"
+  log_event "NUKE $pname"
+  info "polecat $pname nuked"
+}
+
+# ─── Sweep ────────────────────────────────────────────────────────────
+
+cmd_sweep() {
+  ensure_init
+  local cleaned=0
+  for f in "$SGT_POLECATS"/*; do
+    [[ -f "$f" ]] || continue
+    local pname
+    pname="$(basename "$f")"
+    (
+      source "$f"
+      if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        local pr_state
+        pr_state=$(gh pr list --repo "$REPO" --head "$BRANCH" --json state --jq '.[0].state' 2>/dev/null || true)
+
+        if [[ "$pr_state" == "OPEN" || "$pr_state" == "MERGED" ]]; then
+          info "polecat $pname completed (PR $pr_state) — cleaning up"
+          if [[ -d "$WORKTREE" ]]; then
+            local rpath
+            rpath="$(rig_path "$RIG")"
+            git -C "$rpath" worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
+          fi
+          # Signal to parent to clean
+          echo "CLEAN"
+        else
+          warn "polecat $pname is dead but no PR found — use 'sgt nuke $pname' to clean up"
+          echo "SKIP"
+        fi
+      else
+        echo "SKIP"
+      fi
+    ) | {
+      read -r action
+      if [[ "$action" == "CLEAN" ]]; then
+        rm -f "$f"
+        cleaned=$((cleaned + 1))
+        log_event "SWEEP $pname"
+      fi
+    }
+  done
+
+  if [[ "$cleaned" -eq 0 ]]; then
+    info "nothing to sweep"
+  else
+    info "swept $cleaned completed polecat(s)"
+  fi
+}
+
+# ─── Convoy (Milestones) ──────────────────────────────────────────────
+
+cmd_convoy_create() {
+  local name="${1:-}" repo="${2:-}"
+  [[ -n "$name" ]] || die "usage: sgt convoy create <name> <repo>"
+  [[ -n "$repo" ]] || die "usage: sgt convoy create <name> <repo>"
+  ensure_init
+
+  if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  fi
+
+  local owner_repo="${repo#https://github.com/}"
+  local ms_number
+  ms_number=$(gh api "repos/$owner_repo/milestones" \
+    -f title="$name" -f state=open \
+    --jq '.number') || die "failed to create milestone"
+
+  log_event "CONVOY_CREATE $name $owner_repo milestone=#$ms_number"
+  info "convoy '$name' created (milestone #$ms_number)"
+}
+
+cmd_convoy_status() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "usage: sgt convoy status <repo>"
+  ensure_init
+
+  if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  fi
+  local owner_repo="${repo#https://github.com/}"
+
+  gh api "repos/$owner_repo/milestones" --jq '.[] | "  \(.title): \(.open_issues) open / \(.closed_issues) closed [\(.state)]"' 2>/dev/null || info "no milestones"
+}
+
+# ─── Nudge (Send message to tmux session) ─────────────────────────────
+
+cmd_nudge() {
+  local target="${1:-}" message="${2:-}"
+  [[ -n "$target" ]] || die "usage: sgt nudge <target> <message>"
+  [[ -n "$message" ]] || die "usage: sgt nudge <target> <message>"
+  ensure_init
+
+  local session=""
+  case "$target" in
+    deacon)        session="sgt-deacon" ;;
+    witness/*)     session="sgt-witness-${target#witness/}" ;;
+    refinery/*)    session="sgt-refinery-${target#refinery/}" ;;
+    *)             session="sgt-${target}" ;;
+  esac
+
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    die "session $session is not running"
+  fi
+
+  # Send message in literal mode, then Enter
+  tmux send-keys -t "$session" -l "$message"
+  sleep 0.5
+  tmux send-keys -t "$session" Enter
+
+  log_event "NUDGE $target: $message"
+  info "nudged $target"
+}
+
+# ─── Mail (GitHub Issue Comments as async messages) ────────────────────
+
+cmd_mail_send() {
+  local repo="${1:-}" issue="${2:-}" message="${3:-}"
+  [[ -n "$repo" && -n "$issue" && -n "$message" ]] || die "usage: sgt mail send <repo> <issue#> <message>"
+
+  if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  fi
+
+  gh issue comment "$issue" --repo "$repo" --body "$message" 2>/dev/null \
+    || die "failed to comment on issue #$issue"
+
+  log_event "MAIL issue=#$issue: $message"
+  info "mail sent to issue #$issue"
+}
+
+cmd_mail_check() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "usage: sgt mail check <repo>"
+
+  if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  fi
+  local owner_repo="${repo#https://github.com/}"
+
+  # Show recent issue comments (last 10)
+  gh api "repos/$owner_repo/issues/comments?sort=created&direction=desc&per_page=10" \
+    --jq '.[] | "  #\(.issue_url | split("/") | last) [\(.created_at | split("T")[0])]: \(.body | split("\n")[0] | .[0:80])"' 2>/dev/null \
+    || info "no recent messages"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# AGENT LAYER — Witness, Refinery, Deacon, Boot, Daemon
+# ═══════════════════════════════════════════════════════════════════════
+
+# ─── Witness (per-rig polecat lifecycle manager) ──────────────────────
+#
+# The Witness monitors polecats for a single rig:
+# - Detects stalled/zombie polecats (session dead, no PR)
+# - Detects completed polecats (session dead, PR open)
+# - Auto-sweeps completed polecats
+# - Signals Refinery when PRs are ready for merge
+# - Respawns stalled polecats (re-slings the issue)
+# - Runs as a bash loop in tmux, no AI needed
+
+_witness_loop() {
+  local rig="$1"
+  local repo
+  repo="$(rig_repo "$rig")"
+  local owner_repo="${repo#https://github.com/}"
+
+  log_event "WITNESS_START rig=$rig"
+  echo "[witness/$rig] started — monitoring polecats"
+
+  while true; do
+    local now
+    now=$(date +%s)
+
+    for f in "$SGT_POLECATS"/${rig}-*; do
+      [[ -f "$f" ]] || continue
+      local pname
+      pname="$(basename "$f")"
+
+      # Source in subshell to avoid polluting
+      local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge
+      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE)=' "$f")"
+      p_session="$SESSION"
+      p_branch="$BRANCH"
+      p_issue="$ISSUE"
+      p_worktree="$WORKTREE"
+      p_created="$CREATED"
+      p_repo="$REPO"
+      p_auto_merge="${AUTO_MERGE:-false}"
+
+      local alive=false
+      tmux has-session -t "$p_session" 2>/dev/null && alive=true
+
+      if $alive; then
+        # Check if Claude Code is idle (finished but tmux still alive)
+        local pane_output
+        pane_output=$(tmux capture-pane -t "$p_session" -p 2>/dev/null || true)
+        # Detect: [SGT] exit marker OR Claude Code idle at ❯ with no recent activity
+        local is_idle=false
+        if echo "$pane_output" | grep -qE '^\[SGT\] polecat exited'; then
+          is_idle=true
+        elif echo "$pane_output" | grep -qP '\x{276f}'; then
+          # Check if a PR was already opened (work is done)
+          local has_pr
+          has_pr=$(gh pr list --repo "$p_repo" --head "$p_branch" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [[ -n "$has_pr" ]]; then
+            is_idle=true
+          fi
+        fi
+        if $is_idle; then
+          echo "[witness/$rig] $pname Claude Code finished (idle/exited) — treating as complete"
+          log_event "WITNESS_IDLE_DETECTED $pname"
+          # Kill the tmux session so the dead-session handler below picks it up
+          tmux kill-session -t "$p_session" 2>/dev/null || true
+          alive=false
+        fi
+
+        if $alive; then
+          # Polecat is running — check if it's been running too long (>30 min)
+          local created_ts
+          created_ts=$(date -d "$p_created" +%s 2>/dev/null || echo "0")
+          local age=$(( now - created_ts ))
+          if [[ "$age" -gt 1800 ]]; then
+            echo "[witness/$rig] $pname has been running for $((age/60))m — still alive"
+            log_event "WITNESS_LONG_RUNNING $pname age=${age}s"
+          fi
+        fi
+      fi
+
+      if ! $alive; then
+        # Polecat session is dead — check what happened
+        local pr_state pr_number
+        pr_state=$(gh pr list --repo "$p_repo" --head "$p_branch" --json state,number --jq '.[0].state' 2>/dev/null || true)
+        pr_number=$(gh pr list --repo "$p_repo" --head "$p_branch" --json number --jq '.[0].number' 2>/dev/null || true)
+
+        if [[ "$pr_state" == "OPEN" ]]; then
+          # PR is open — send to merge queue for refinery (refinery reviews + merges)
+          echo "[witness/$rig] $pname completed — PR #$pr_number OPEN, queuing for refinery"
+          log_event "WITNESS_PR_READY $pname pr=#$pr_number"
+
+          mkdir -p "$SGT_CONFIG/merge-queue"
+          cat > "$SGT_CONFIG/merge-queue/$pname" <<MQSTATE
+POLECAT=$pname
+RIG=$rig
+REPO=$p_repo
+BRANCH=$p_branch
+ISSUE=$p_issue
+PR=$pr_number
+AUTO_MERGE=$p_auto_merge
+TYPE=polecat
+QUEUED=$(date -Iseconds)
+MQSTATE
+
+          _wake_refinery "$rig" "pr-ready:$pname:#$pr_number"
+
+          # Clean up polecat worktree + state
+          if [[ -d "$p_worktree" ]]; then
+            local rpath
+            rpath="$(rig_path "$rig")"
+            git -C "$rpath" worktree remove --force "$p_worktree" 2>/dev/null || rm -rf "$p_worktree"
+          fi
+          rm -f "$f"
+
+        elif [[ "$pr_state" == "MERGED" ]]; then
+          # Already merged — just clean up
+          echo "[witness/$rig] $pname already merged — cleaning up"
+          log_event "WITNESS_MERGED $pname"
+          if [[ -d "$p_worktree" ]]; then
+            local rpath
+            rpath="$(rig_path "$rig")"
+            git -C "$rpath" worktree remove --force "$p_worktree" 2>/dev/null || rm -rf "$p_worktree"
+          fi
+          git -C "$(rig_path "$rig")" push origin --delete "$p_branch" 2>/dev/null || true
+          rm -f "$f"
+
+        else
+          # Dead with no PR — stalled/zombie
+          echo "[witness/$rig] $pname is STALLED (dead, no PR)"
+          log_event "WITNESS_STALLED $pname issue=#$p_issue"
+          _wake_refinery "$rig" "stalled:$pname:#$p_issue"
+
+          # Comment on the issue about the stall
+          gh issue comment "$p_issue" --repo "$p_repo" \
+            --body "[sgt-witness] Polecat \`$pname\` stalled — session died without opening a PR. Cleaning up and re-slinging." 2>/dev/null || true
+
+          # Clean up the dead polecat
+          if [[ -d "$p_worktree" ]]; then
+            local rpath
+            rpath="$(rig_path "$rig")"
+            git -C "$rpath" worktree remove --force "$p_worktree" 2>/dev/null || rm -rf "$p_worktree"
+          fi
+          git -C "$(rig_path "$rig")" push origin --delete "$p_branch" 2>/dev/null || true
+          rm -f "$f"
+
+          # Re-sling: get the issue title and re-dispatch
+          local issue_title
+          issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+          if [[ -n "$issue_title" ]]; then
+            echo "[witness/$rig] re-slinging issue #$p_issue: $issue_title"
+            log_event "WITNESS_RESLING $pname issue=#$p_issue"
+
+            # Re-sling with a new polecat (reuse existing issue — don't create a new one)
+            _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo"
+          fi
+        fi
+      fi
+    done
+
+    # ── Orphaned PR scan ──
+    # Catch PRs on sgt/* branches that have no polecat state file
+    # (e.g., polecat completed and was swept before witness could queue it)
+    local orphan_prs
+    orphan_prs=$(gh pr list --repo "$repo" --json number,headRefName,state \
+      --jq '.[] | select(.headRefName | startswith("sgt/")) | "\(.number) \(.headRefName)"' 2>/dev/null || true)
+
+    if [[ -n "$orphan_prs" ]]; then
+      while IFS=' ' read -r pr_num pr_branch; do
+        [[ -n "$pr_num" ]] || continue
+
+        # Check if any polecat state file references this branch
+        local tracked=false
+        for pf in "$SGT_POLECATS"/${rig}-*; do
+          [[ -f "$pf" ]] || continue
+          if grep -q "BRANCH=$pr_branch" "$pf" 2>/dev/null; then
+            tracked=true
+            break
+          fi
+        done
+
+        # Check if already in merge queue
+        if [[ "$tracked" == "false" ]]; then
+          for mqf in "$SGT_CONFIG/merge-queue"/${rig}-*; do
+            [[ -f "$mqf" ]] || continue
+            if grep -q "BRANCH=$pr_branch" "$mqf" 2>/dev/null; then
+              tracked=true
+              break
+            fi
+          done
+        fi
+
+        if [[ "$tracked" == "false" ]]; then
+          echo "[witness/$rig] orphaned PR #$pr_num on branch $pr_branch — queuing for refinery"
+          log_event "WITNESS_ORPHAN_PR pr=#$pr_num branch=$pr_branch"
+
+          local orphan_pname="${pr_branch#sgt/}"
+          local orphan_issue
+          orphan_issue=$(gh pr view "$pr_num" --repo "$repo" --json body --jq '.body' 2>/dev/null | grep -oP 'Closes #\K[0-9]+' || true)
+
+          mkdir -p "$SGT_CONFIG/merge-queue"
+          cat > "$SGT_CONFIG/merge-queue/$orphan_pname" <<MQSTATE
+POLECAT=$orphan_pname
+RIG=$rig
+REPO=$repo
+BRANCH=$pr_branch
+ISSUE=${orphan_issue:-0}
+PR=$pr_num
+AUTO_MERGE=true
+TYPE=polecat
+QUEUED=$(date -Iseconds)
+MQSTATE
+
+          _wake_refinery "$rig" "orphan-pr:$orphan_pname:#$pr_num"
+        fi
+      done <<< "$orphan_prs"
+    fi
+
+    sleep 30
+  done
+}
+
+# Re-sling an existing issue (don't create a new one)
+_resling_existing_issue() {
+  local rig="$1" issue_number="$2" task="$3" repo="$4"
+
+  local rpath pname branch session_name
+  rpath="$(rig_path "$rig")"
+  pname="$(polecat_name "$rig")"
+  branch="sgt/${pname}"
+  session_name="sgt-${pname}"
+
+  git -C "$rpath" fetch origin 2>/dev/null || true
+  local default_branch
+  default_branch=$(git -C "$rpath" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+
+  local worktree="$SGT_ROOT/polecats/$pname"
+  mkdir -p "$SGT_ROOT/polecats"
+  git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
+    || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
+
+  if [[ -f "$rpath/CLAUDE.md" ]]; then
+    cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
+  fi
+  _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
+
+  cat > "$SGT_POLECATS/$pname" <<PSTATE
+RIG=$rig
+REPO=$repo
+ISSUE=$issue_number
+ISSUE_URL=https://github.com/${repo#https://github.com/}/issues/$issue_number
+BRANCH=$branch
+WORKTREE=$worktree
+SESSION=$session_name
+DEFAULT_BRANCH=$default_branch
+AUTO_MERGE=false
+CREATED=$(date -Iseconds)
+STATUS=running
+PSTATE
+
+  tmux new-session -d -s "$session_name" -c "$worktree" \
+    "claude -p \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+
+  log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
+}
+
+cmd_witness_start() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt witness start <rig>"
+  ensure_init
+  ensure_rig "$rig"
+
+  local session="sgt-witness-${rig}"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    info "witness/$rig already running"
+    return
+  fi
+
+  tmux new-session -d -s "$session" \
+    "SGT_ROOT='$SGT_ROOT' sgt _witness '$rig'"
+
+  log_event "WITNESS_SPAWN rig=$rig"
+  info "witness/$rig started (session: $session)"
+}
+
+cmd_witness_stop() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt witness stop <rig>"
+
+  local session="sgt-witness-${rig}"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    log_event "WITNESS_STOP rig=$rig"
+    info "witness/$rig stopped"
+  else
+    info "witness/$rig not running"
+  fi
+}
+
+# ─── Refinery (per-rig review + merge processor) ─────────────────────
+#
+# The Refinery is the quality gate for all worker output:
+# - Workers (polecats/dogs) notify the refinery when done
+# - Refinery reviews PR diffs (polecats) or issue comments (dogs) via AI
+# - On PASS: merges PR / closes issue, notifies mayor
+# - On REJECT: closes PR / reopens issue, dispatches second iteration with feedback
+# - No mayor involvement on rejections — refinery handles rework autonomously
+
+# AI review: check PR diff against issue spec
+_refinery_review_pr() {
+  local repo="$1" pr="$2" issue="$3" rig="$4"
+
+  echo "[refinery/$rig] reviewing PR #$pr..."
+
+  local diff
+  diff=$(gh pr diff "$pr" --repo "$repo" 2>/dev/null || true)
+  if [[ -z "$diff" ]]; then
+    echo "[refinery/$rig] PR #$pr — no diff, skipping review"
+    return 0  # treat as pass (merged/closed already)
+  fi
+
+  local issue_title="" issue_body=""
+  if [[ "$issue" != "0" && -n "$issue" ]]; then
+    issue_title=$(gh issue view "$issue" --repo "$repo" --json title --jq '.title' 2>/dev/null || true)
+    issue_body=$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>/dev/null || true)
+  fi
+
+  local pr_title pr_body
+  pr_title=$(gh pr view "$pr" --repo "$repo" --json title --jq '.title' 2>/dev/null || true)
+  pr_body=$(gh pr view "$pr" --repo "$repo" --json body --jq '.body' 2>/dev/null || true)
+
+  # Truncate diff if too large
+  local diff_truncated="$diff"
+  local diff_lines
+  diff_lines=$(echo "$diff" | wc -l)
+  if [[ "$diff_lines" -gt 500 ]]; then
+    diff_truncated="$(echo "$diff" | head -500)"
+    diff_truncated+=$'\n\n[... truncated, '"$diff_lines"' total lines ...]'
+  fi
+
+  local review_dir="$SGT_CONFIG/refinery-review"
+  mkdir -p "$review_dir"
+
+  cat > "$review_dir/review-prompt.md" <<REVIEWMD
+# PR Review
+
+Review this PR for completeness. Does it implement what the issue requested?
+
+## Issue #$issue
+**Title:** $issue_title
+**Description:** $issue_body
+
+## PR #$pr
+**Title:** $pr_title
+**Body:** $pr_body
+
+## Diff
+\`\`\`diff
+$diff_truncated
+\`\`\`
+
+## Verdict
+
+End with exactly one of:
+- VERDICT: APPROVE — if complete and functional
+- VERDICT: REJECT — if incomplete, stub, or doesn't match spec
+
+If rejecting, explain what's missing in 2-3 sentences before the verdict.
+REVIEWMD
+
+  local review_output
+  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
+    'Read review-prompt.md. Review the PR. Be strict — only approve complete implementations.' \
+    --dangerously-skip-permissions" 2>&1 || true)
+
+  if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
+    echo "[refinery/$rig] PR #$pr APPROVED"
+    log_event "REFINERY_REVIEW_APPROVED pr=#$pr"
+    gh pr comment "$pr" --repo "$repo" \
+      --body "[sgt-refinery] **APPROVED** — reviewed and cleared for merge." 2>/dev/null || true
+    return 0
+  elif echo "$review_output" | grep -q "VERDICT: REJECT"; then
+    local reject_reason
+    reject_reason=$(echo "$review_output" | grep -B5 "VERDICT: REJECT" | grep -v "VERDICT:" | tail -3)
+    echo "[refinery/$rig] PR #$pr REJECTED: $reject_reason"
+    log_event "REFINERY_REVIEW_REJECTED pr=#$pr reason=$reject_reason"
+
+    gh pr comment "$pr" --repo "$repo" \
+      --body "[sgt-refinery] **REJECTED** — Implementation incomplete.
+
+**Feedback:** $reject_reason
+
+Closing PR and dispatching rework." 2>/dev/null || true
+    # Return 1 = rejected, caller handles rework
+    REFINERY_REJECT_REASON="$reject_reason"
+    return 1
+  else
+    echo "[refinery/$rig] PR #$pr — review inconclusive, treating as APPROVE"
+    log_event "REFINERY_REVIEW_UNCLEAR pr=#$pr"
+    return 0
+  fi
+}
+
+# AI review: check dog output quality against issue spec
+_refinery_review_dog() {
+  local repo="$1" issue="$2" rig="$3" dname="$4"
+
+  echo "[refinery/$rig] reviewing dog $dname output on issue #$issue..."
+
+  local issue_title issue_body
+  issue_title=$(gh issue view "$issue" --repo "$repo" --json title --jq '.title' 2>/dev/null || true)
+  issue_body=$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>/dev/null || true)
+
+  # Get the dog's posted comments
+  local comments
+  comments=$(gh issue view "$issue" --repo "$repo" --json comments \
+    --jq '[.comments[] | select(.author.login != "github-actions[bot]")] | .[-3:] | .[].body' 2>/dev/null || true)
+
+  if [[ -z "$comments" ]]; then
+    echo "[refinery/$rig] dog $dname — no comments posted, treating as incomplete"
+    REFINERY_REJECT_REASON="Dog posted no findings to the issue."
+    return 1
+  fi
+
+  # Truncate if too large
+  local comments_truncated="$comments"
+  local comment_lines
+  comment_lines=$(echo "$comments" | wc -l)
+  if [[ "$comment_lines" -gt 300 ]]; then
+    comments_truncated="$(echo "$comments" | head -300)"
+    comments_truncated+=$'\n\n[... truncated ...]'
+  fi
+
+  local review_dir="$SGT_CONFIG/refinery-review"
+  mkdir -p "$review_dir"
+
+  cat > "$review_dir/dog-review-prompt.md" <<REVIEWMD
+# Dog Output Review
+
+Review whether this research/analysis task was completed thoroughly.
+
+## Task (Issue #$issue)
+**Title:** $issue_title
+**Description:** $issue_body
+
+## Dog Output (issue comments)
+$comments_truncated
+
+## Verdict
+
+End with exactly one of:
+- VERDICT: APPROVE — if research is thorough and addresses the task
+- VERDICT: REJECT — if output is thin, off-topic, or missing key deliverables
+
+If rejecting, explain what's missing in 2-3 sentences before the verdict.
+REVIEWMD
+
+  local review_output
+  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
+    'Read dog-review-prompt.md. Review the research output quality.' \
+    --dangerously-skip-permissions" 2>&1 || true)
+
+  if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
+    echo "[refinery/$rig] dog $dname APPROVED"
+    log_event "REFINERY_DOG_APPROVED dog=$dname issue=#$issue"
+    gh issue comment "$issue" --repo "$repo" \
+      --body "[sgt-refinery] **APPROVED** — research output reviewed and accepted." 2>/dev/null || true
+    return 0
+  elif echo "$review_output" | grep -q "VERDICT: REJECT"; then
+    local reject_reason
+    reject_reason=$(echo "$review_output" | grep -B5 "VERDICT: REJECT" | grep -v "VERDICT:" | tail -3)
+    echo "[refinery/$rig] dog $dname REJECTED: $reject_reason"
+    log_event "REFINERY_DOG_REJECTED dog=$dname issue=#$issue reason=$reject_reason"
+    gh issue comment "$issue" --repo "$repo" \
+      --body "[sgt-refinery] **REJECTED** — Research output insufficient.
+
+**Feedback:** $reject_reason
+
+Dispatching second iteration." 2>/dev/null || true
+    REFINERY_REJECT_REASON="$reject_reason"
+    return 1
+  else
+    echo "[refinery/$rig] dog $dname — review inconclusive, treating as APPROVE"
+    log_event "REFINERY_DOG_REVIEW_UNCLEAR dog=$dname issue=#$issue"
+    return 0
+  fi
+}
+
+_refinery_loop() {
+  local rig="$1"
+  local repo
+  repo="$(rig_repo "$rig")"
+
+  log_event "REFINERY_START rig=$rig"
+
+  # Set up FIFO for event-driven wake
+  local fifo="$SGT_CONFIG/refinery-${rig}.fifo"
+  [[ -p "$fifo" ]] || mkfifo "$fifo"
+  exec 4<>"$fifo"
+  echo "[refinery/$rig] started — event-driven (fallback every 30s)"
+
+  while true; do
+    # Block on FIFO with timeout — wakes on event OR periodic scan
+    local wake_reason=""
+    read -t 30 -u 4 wake_reason 2>/dev/null || true
+    if [[ -n "$wake_reason" ]]; then
+      echo "[refinery/$rig] woken: $wake_reason"
+      # Drain queued events
+      local extra=""
+      while read -t 0.1 -u 4 extra 2>/dev/null; do :; done
+    fi
+
+    local merge_dir="$SGT_CONFIG/merge-queue"
+    mkdir -p "$merge_dir"
+
+    # ── Process PR queue (polecats) ──
+    for f in "$merge_dir"/${rig}-*; do
+      [[ -f "$f" ]] || continue
+      local mqname
+      mqname="$(basename "$f")"
+
+      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE)=' "$f")"
+      mq_pr="${PR:-}"
+      mq_repo="${REPO:-$repo}"
+      mq_branch="${BRANCH:-}"
+      mq_issue="${ISSUE:-0}"
+      mq_polecat="${POLECAT:-$mqname}"
+      mq_auto_merge="${AUTO_MERGE:-false}"
+      mq_type="${TYPE:-polecat}"
+
+      echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
+
+      # Check PR state
+      local pr_state
+      pr_state=$(gh pr view "$mq_pr" --repo "$mq_repo" --json state --jq '.state' 2>/dev/null || true)
+
+      if [[ "$pr_state" == "MERGED" ]]; then
+        echo "[refinery/$rig] PR #$mq_pr already merged — cleaning up"
+        git -C "$(rig_path "$rig")" push origin --delete "$mq_branch" 2>/dev/null || true
+        rm -f "$f"
+        log_event "REFINERY_ALREADY_MERGED pr=#$mq_pr"
+        continue
+      fi
+
+      if [[ "$pr_state" == "CLOSED" ]]; then
+        echo "[refinery/$rig] PR #$mq_pr was closed — removing from queue"
+        rm -f "$f"
+        log_event "REFINERY_CLOSED pr=#$mq_pr"
+        continue
+      fi
+
+      if [[ "$pr_state" != "OPEN" ]]; then
+        echo "[refinery/$rig] PR #$mq_pr state unknown: $pr_state — skipping"
+        continue
+      fi
+
+      # Check CI
+      local check_status
+      check_status=$(gh pr checks "$mq_pr" --repo "$mq_repo" 2>&1 || true)
+      if echo "$check_status" | grep -qiE "fail|error"; then
+        echo "[refinery/$rig] PR #$mq_pr — CI failing, waiting..."
+        continue
+      fi
+
+      # Check mergeability
+      local pr_mergeable
+      pr_mergeable=$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable' 2>/dev/null || true)
+      if [[ "$pr_mergeable" == "CONFLICTING" ]]; then
+        echo "[refinery/$rig] PR #$mq_pr has merge conflicts — requesting rework"
+        log_event "REFINERY_CONFLICT pr=#$mq_pr"
+        gh pr comment "$mq_pr" --repo "$mq_repo" \
+          --body "[sgt-refinery] Merge conflict detected. Closing and re-dispatching." 2>/dev/null || true
+        gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
+        rm -f "$f"
+        # Re-sling
+        if [[ "$mq_issue" != "0" && -n "$mq_issue" ]]; then
+          gh issue reopen "$mq_issue" --repo "$mq_repo" 2>/dev/null || true
+          gh issue comment "$mq_issue" --repo "$mq_repo" \
+            --body "[sgt-refinery] Merge conflict on PR #$mq_pr. Re-dispatching." 2>/dev/null || true
+          local issue_title_resling
+          issue_title_resling=$(gh issue view "$mq_issue" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
+          [[ -n "$issue_title_resling" ]] && _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo"
+        fi
+        continue
+      fi
+
+      # === AI REVIEW ===
+      REFINERY_REJECT_REASON=""
+      if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig"; then
+        # APPROVED — merge
+        echo "[refinery/$rig] merging PR #$mq_pr..."
+        local merge_result
+        if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch 2>&1); then
+          echo "[refinery/$rig] PR #$mq_pr merged successfully"
+          log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
+          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig"
+          rm -f "$f"
+        else
+          echo "[refinery/$rig] merge failed: $merge_result"
+          log_event "REFINERY_MERGE_FAILED pr=#$mq_pr: $merge_result"
+          gh pr comment "$mq_pr" --repo "$mq_repo" \
+            --body "[sgt-refinery] Auto-merge failed: \`$merge_result\`" 2>/dev/null || true
+        fi
+      else
+        # REJECTED — close PR, re-dispatch with feedback
+        echo "[refinery/$rig] PR #$mq_pr rejected — dispatching rework"
+        gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
+        rm -f "$f"
+
+        if [[ "$mq_issue" != "0" && -n "$mq_issue" ]]; then
+          gh issue reopen "$mq_issue" --repo "$mq_repo" 2>/dev/null || true
+          gh issue comment "$mq_issue" --repo "$mq_repo" \
+            --body "[sgt-refinery] Previous attempt rejected. Feedback:
+
+$REFINERY_REJECT_REASON
+
+Please address the feedback in the next iteration." 2>/dev/null || true
+          local issue_title_resling
+          issue_title_resling=$(gh issue view "$mq_issue" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
+          if [[ -n "$issue_title_resling" ]]; then
+            echo "[refinery/$rig] re-slinging issue #$mq_issue"
+            _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo"
+          fi
+        fi
+      fi
+    done
+
+    # ── Process dog queue (check for completed dogs) ──
+    if [[ -d "$SGT_CONFIG/dogs" ]]; then
+      for df in "$SGT_CONFIG/dogs"/*; do
+        [[ -f "$df" ]] || continue
+        local dname
+        dname="$(basename "$df")"
+
+        local d_session="" d_repo="" d_issue="" d_rig=""
+        eval "$(grep -E '^(SESSION|REPO|ISSUE|RIG)=' "$df")"
+        d_session="${SESSION:-}"
+        d_repo="${REPO:-$repo}"
+        d_issue="${ISSUE:-0}"
+        d_rig="${RIG:-$rig}"
+
+        # Only process dogs for this rig
+        [[ "$d_rig" == "$rig" ]] || continue
+
+        # Check if dog is still alive
+        if tmux has-session -t "$d_session" 2>/dev/null; then
+          continue  # Still running
+        fi
+
+        echo "[refinery/$rig] dog $dname finished — reviewing output"
+
+        REFINERY_REJECT_REASON=""
+        if _refinery_review_dog "$d_repo" "$d_issue" "$rig" "$dname"; then
+          # APPROVED — close issue, notify mayor
+          gh issue close "$d_issue" --repo "$d_repo" 2>/dev/null || true
+          echo "[refinery/$rig] dog $dname approved and issue #$d_issue closed"
+          log_event "REFINERY_DOG_COMPLETE dog=$dname issue=#$d_issue"
+          _wake_mayor "dog-approved:$dname:#$d_issue:$rig"
+          # Clean up dog state + workspace
+          local d_ws=""
+          d_ws=$(grep '^WORKSPACE=' "$df" 2>/dev/null | cut -d= -f2)
+          [[ -d "$d_ws" ]] && rm -rf "$d_ws"
+          rm -f "$df"
+        else
+          # REJECTED — re-dispatch dog with feedback
+          echo "[refinery/$rig] dog $dname rejected — dispatching second iteration"
+          log_event "REFINERY_DOG_REWORK dog=$dname issue=#$d_issue"
+
+          # Clean up old dog
+          local d_ws=""
+          d_ws=$(grep '^WORKSPACE=' "$df" 2>/dev/null | cut -d= -f2)
+          [[ -d "$d_ws" ]] && rm -rf "$d_ws"
+          rm -f "$df"
+
+          # Re-dispatch dog on same issue
+          local issue_title_dog
+          issue_title_dog=$(gh issue view "$d_issue" --repo "$d_repo" --json title --jq '.title' 2>/dev/null || true)
+          issue_title_dog="${issue_title_dog#\[Dog\] }"
+          if [[ -n "$issue_title_dog" ]]; then
+            local new_dname="dog-$(head -c4 /dev/urandom | xxd -p)"
+            local new_session="sgt-${new_dname}"
+            local dog_workspace="$SGT_ROOT/dogs/$new_dname"
+            mkdir -p "$dog_workspace"
+
+            cat > "$dog_workspace/CLAUDE.md" <<DOGMD
+# Dog Task — $new_dname (REWORK)
+
+You are a research/analysis agent. A previous attempt was insufficient.
+
+## Task
+$issue_title_dog
+
+## Previous Feedback
+$REFINERY_REJECT_REASON
+
+## Instructions
+1. Read the previous comments on issue #$d_issue for context
+2. Address the feedback above
+3. Post improved findings as a comment on issue #$d_issue:
+   \`gh issue comment $d_issue --repo $d_repo --body "<your findings>"\`
+4. Do NOT close the issue — the refinery will review again
+5. Exit
+DOGMD
+
+            mkdir -p "$SGT_CONFIG/dogs"
+            cat > "$SGT_CONFIG/dogs/$new_dname" <<DSTATE
+RIG=$rig
+REPO=$d_repo
+ISSUE=$d_issue
+SESSION=$new_session
+WORKSPACE=$dog_workspace
+CREATED=$(date -Iseconds)
+STATUS=running
+REWORK=true
+DSTATE
+
+            tmux new-session -d -s "$new_session" -c "$dog_workspace" \
+              "claude -p \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
+
+            echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
+            log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
+          fi
+        fi
+      done
+    fi
+  done
+}
+
+cmd_refinery_start() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt refinery start <rig>"
+  ensure_init
+  ensure_rig "$rig"
+
+  local session="sgt-refinery-${rig}"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    info "refinery/$rig already running"
+    return
+  fi
+
+  mkdir -p "$SGT_CONFIG/merge-queue"
+  local fifo="$SGT_CONFIG/refinery-${rig}.fifo"
+  [[ -p "$fifo" ]] || mkfifo "$fifo"
+
+  tmux new-session -d -s "$session" \
+    "SGT_ROOT='$SGT_ROOT' sgt _refinery '$rig'"
+
+  log_event "REFINERY_SPAWN rig=$rig"
+  info "refinery/$rig started (session: $session)"
+}
+
+cmd_refinery_stop() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt refinery stop <rig>"
+
+  local session="sgt-refinery-${rig}"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    log_event "REFINERY_STOP rig=$rig"
+    info "refinery/$rig stopped"
+  else
+    info "refinery/$rig not running"
+  fi
+}
+
+# ─── Deacon (health monitor) ──────────────────────────────────────────
+#
+# The Deacon patrols the entire sgt system:
+# - Checks that Witnesses are running for each rig
+# - Checks that Refineries are running for each rig
+# - Restarts dead agents
+# - Writes heartbeat for Boot to check
+# - Runs as a bash loop (no AI needed)
+
+_deacon_loop() {
+  log_event "DEACON_START"
+  echo "[deacon] started — patrolling sgt system"
+  local cycle=0
+
+  while true; do
+    cycle=$((cycle + 1))
+    local now
+    now=$(date -Iseconds)
+    local actions=0
+
+    # Write heartbeat
+    cat > "$SGT_DEACON_HEARTBEAT" <<HEARTBEAT
+{
+  "timestamp": "$now",
+  "cycle": $cycle,
+  "pid": $$
+}
+HEARTBEAT
+
+    echo "[deacon] patrol cycle $cycle at $now"
+
+    # Ensure witnesses for all rigs
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rig_name
+      rig_name="$(basename "$rig_file")"
+
+      # Check witness
+      if ! tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null; then
+        echo "[deacon] witness/$rig_name is down — restarting"
+        log_event "DEACON_RESTART_WITNESS rig=$rig_name"
+        cmd_witness_start "$rig_name"
+        actions=$((actions + 1))
+      fi
+
+      # Check refinery
+      if ! tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null; then
+        echo "[deacon] refinery/$rig_name is down — restarting"
+        log_event "DEACON_RESTART_REFINERY rig=$rig_name"
+        cmd_refinery_start "$rig_name"
+        actions=$((actions + 1))
+      fi
+    done
+
+    # Check for orphaned polecats (no matching rig)
+    for f in "$SGT_POLECATS"/*; do
+      [[ -f "$f" ]] || continue
+      local pname
+      pname="$(basename "$f")"
+      local p_rig
+      p_rig=$(grep '^RIG=' "$f" | cut -d= -f2)
+      if [[ ! -f "$SGT_RIGS/$p_rig" ]]; then
+        echo "[deacon] orphaned polecat $pname (rig '$p_rig' no longer exists)"
+        log_event "DEACON_ORPHAN $pname rig=$p_rig"
+      fi
+    done
+
+    if [[ "$actions" -eq 0 ]]; then
+      echo "[deacon] all agents healthy"
+    else
+      echo "[deacon] restarted $actions agent(s)"
+    fi
+
+    sleep 60
+  done
+}
+
+cmd_deacon_start() {
+  ensure_init
+
+  local session="sgt-deacon"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    info "deacon already running"
+    return
+  fi
+
+  tmux new-session -d -s "$session" \
+    "SGT_ROOT='$SGT_ROOT' sgt _deacon"
+
+  log_event "DEACON_SPAWN"
+  info "deacon started (session: $session)"
+}
+
+cmd_deacon_stop() {
+  local session="sgt-deacon"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    log_event "DEACON_STOP"
+    info "deacon stopped"
+  else
+    info "deacon not running"
+  fi
+}
+
+# ─── Boot (ephemeral deacon triage) ──────────────────────────────────
+#
+# Boot is a quick check: is the Deacon alive?
+# If deacon heartbeat is stale (>5 min), restart it.
+# Runs once and exits — called by the Daemon every tick.
+
+_boot_check() {
+  if ! tmux has-session -t "sgt-deacon" 2>/dev/null; then
+    echo "[boot] deacon session missing — restarting"
+    log_event "BOOT_RESTART_DEACON reason=session_missing"
+    cmd_deacon_start
+    return
+  fi
+
+  if [[ ! -f "$SGT_DEACON_HEARTBEAT" ]]; then
+    echo "[boot] no deacon heartbeat file — restarting"
+    log_event "BOOT_RESTART_DEACON reason=no_heartbeat"
+    tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+    cmd_deacon_start
+    return
+  fi
+
+  local last_ts
+  last_ts=$(python3 -c "
+import json, sys, datetime
+d = json.load(open('$SGT_DEACON_HEARTBEAT'))
+ts = d.get('timestamp', '')
+try:
+    dt = datetime.datetime.fromisoformat(ts)
+    print(int(dt.timestamp()))
+except:
+    print(0)
+" 2>/dev/null || echo "0")
+
+  local now
+  now=$(date +%s)
+  local age=$((now - last_ts))
+
+  if [[ "$age" -gt 300 ]]; then
+    echo "[boot] deacon heartbeat stale (${age}s) — restarting"
+    log_event "BOOT_RESTART_DEACON reason=stale_heartbeat age=${age}s"
+    tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+    cmd_deacon_start
+  else
+    echo "[boot] deacon healthy (heartbeat ${age}s ago)"
+  fi
+}
+
+# ─── Daemon (mechanical watchdog) ─────────────────────────────────────
+#
+# The Daemon is the outermost loop — pure bash, no AI:
+# - Runs every SGT_DAEMON_INTERVAL seconds (default 3 min)
+# - Calls Boot to check Deacon
+# - Writes its own PID for management
+# - Can be stopped with: sgt daemon stop
+
+_daemon_loop() {
+  local pid=$$
+  echo "$pid" > "$SGT_DAEMON_PID"
+  log_event "DAEMON_START pid=$pid interval=${SGT_DAEMON_INTERVAL}s"
+  echo "[daemon] started (pid $pid, interval ${SGT_DAEMON_INTERVAL}s)"
+
+  # Acquire lock
+  exec 200>"$SGT_DAEMON_LOCK"
+  if ! flock -n 200; then
+    die "another daemon is already running"
+  fi
+
+  trap '_daemon_cleanup' EXIT INT TERM
+
+  while true; do
+    echo "[daemon] tick at $(date -Iseconds)"
+
+    # Run Boot check
+    _boot_check
+
+    sleep "$SGT_DAEMON_INTERVAL"
+  done
+}
+
+_daemon_cleanup() {
+  rm -f "$SGT_DAEMON_PID"
+  log_event "DAEMON_STOP"
+  echo "[daemon] stopped"
+}
+
+cmd_daemon_start() {
+  ensure_init
+
+  if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
+    info "daemon already running (pid $(cat "$SGT_DAEMON_PID"))"
+    return
+  fi
+
+  # Start in background tmux session
+  tmux new-session -d -s "sgt-daemon" \
+    "SGT_ROOT='$SGT_ROOT' SGT_DAEMON_INTERVAL='$SGT_DAEMON_INTERVAL' sgt _daemon"
+
+  info "daemon started in tmux session sgt-daemon"
+}
+
+cmd_daemon_stop() {
+  if [[ -f "$SGT_DAEMON_PID" ]]; then
+    local pid
+    pid=$(cat "$SGT_DAEMON_PID")
+    if kill -0 "$pid" 2>/dev/null; then
+      # Kill the tmux session which will trigger cleanup
+      tmux kill-session -t "sgt-daemon" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      rm -f "$SGT_DAEMON_PID"
+      info "daemon stopped"
+    else
+      rm -f "$SGT_DAEMON_PID"
+      info "daemon was not running (stale pid)"
+    fi
+  else
+    # Try killing tmux session directly
+    if tmux has-session -t "sgt-daemon" 2>/dev/null; then
+      tmux kill-session -t "sgt-daemon"
+      info "daemon stopped"
+    else
+      info "daemon not running"
+    fi
+  fi
+}
+
+cmd_daemon_status() {
+  if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
+    info "daemon running (pid $(cat "$SGT_DAEMON_PID"))"
+  else
+    info "daemon not running"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# MAYOR — AI-powered global coordinator
+# ═══════════════════════════════════════════════════════════════════════
+#
+# The Mayor is the brain of SGT. Unlike other agents (pure bash loops),
+# the Mayor runs Claude Code periodically to make strategic decisions:
+# - Cross-rig coordination (dependencies between issues)
+# - Re-prioritize stalled work
+# - Dispatch new tasks from a backlog
+# - Escalation decisions
+# - System health analysis
+#
+# Runs in tmux, wakes every SGT_MAYOR_INTERVAL seconds.
+
+_mayor_build_briefing() {
+  local briefing="$SGT_CONFIG/mayor-briefing.md"
+
+  cat > "$briefing" <<'HEADER'
+# SGT System Briefing
+
+You are the Mayor — the global coordinator for SGT (Simple GitHub Gastown).
+Review this briefing and take action.
+
+HEADER
+
+  # System status
+  echo "## System Status" >> "$briefing"
+  echo '```' >> "$briefing"
+  cmd_status 2>&1 >> "$briefing"
+  echo '```' >> "$briefing"
+  echo "" >> "$briefing"
+
+  # Recent log
+  echo "## Recent Activity (last 30 events)" >> "$briefing"
+  echo '```' >> "$briefing"
+  tail -30 "$SGT_LOG" 2>/dev/null >> "$briefing" || echo "no log" >> "$briefing"
+  echo '```' >> "$briefing"
+  echo "" >> "$briefing"
+
+  # Merge queue (refinery handles review + merge)
+  echo "## Merge Queue (pending refinery review + merge)" >> "$briefing"
+  local mq_count=0
+  if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
+    for mqf in "$SGT_CONFIG/merge-queue"/*; do
+      [[ -f "$mqf" ]] || continue
+      mq_count=$((mq_count + 1))
+      echo "- $(basename "$mqf"): $(grep '^PR=' "$mqf" | cut -d= -f2)" >> "$briefing"
+    done
+  fi
+  [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$briefing"
+  echo "" >> "$briefing"
+
+  # Open issues across all rigs
+  echo "## Open Issues (all rigs)" >> "$briefing"
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local rname repo
+    rname="$(basename "$rig_file")"
+    repo="$(cat "$rig_file")"
+    echo "### $rname ($repo)" >> "$briefing"
+    gh issue list --repo "$repo" --state open --json number,title,labels,milestone \
+      --jq '.[] | "- #\(.number): \(.title) [\(.labels | map(.name) | join(","))] \(if .milestone then "(" + .milestone.title + ")" else "" end)"' \
+      2>/dev/null >> "$briefing" || echo "  (couldn't fetch)" >> "$briefing"
+    echo "" >> "$briefing"
+  done
+
+  # Open PRs across all rigs
+  echo "## Open PRs (all rigs)" >> "$briefing"
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local rname repo
+    rname="$(basename "$rig_file")"
+    repo="$(cat "$rig_file")"
+    echo "### $rname" >> "$briefing"
+    gh pr list --repo "$repo" --state open --json number,title,headRefName,mergeable \
+      --jq '.[] | "- PR #\(.number): \(.title) [\(.headRefName)] mergeable=\(.mergeable)"' \
+      2>/dev/null >> "$briefing" || echo "  (couldn't fetch)" >> "$briefing"
+    echo "" >> "$briefing"
+  done
+
+  # Escalation config
+  if [[ -f "$SGT_ESCALATION" ]]; then
+    echo "## Escalation Rules" >> "$briefing"
+    echo '```json' >> "$briefing"
+    cat "$SGT_ESCALATION" >> "$briefing"
+    echo '```' >> "$briefing"
+    echo "" >> "$briefing"
+  fi
+
+  # Mayor history (last decisions)
+  if [[ -f "$SGT_CONFIG/mayor-decisions.log" ]]; then
+    echo "## Recent Mayor Decisions" >> "$briefing"
+    echo '```' >> "$briefing"
+    tail -20 "$SGT_CONFIG/mayor-decisions.log" >> "$briefing"
+    echo '```' >> "$briefing"
+    echo "" >> "$briefing"
+  fi
+
+  echo "$briefing"
+}
+
+_mayor_loop() {
+  set +e  # Mayor loop must never exit on errors
+  log_event "MAYOR_START"
+
+  # Set up FIFO for event-driven wake
+  [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
+  # Open FIFO read-write on fd 3 to prevent blocking on open()
+  exec 3<>"$SGT_MAYOR_FIFO"
+  echo "[mayor] started — event-driven (fallback every ${SGT_MAYOR_INTERVAL}s)"
+
+  while true; do
+    # Block on fd 3 with timeout — wakes on event OR periodic check
+    local wake_reason=""
+    read -t "$SGT_MAYOR_INTERVAL" -u 3 wake_reason 2>/dev/null || true
+    if [[ -n "$wake_reason" ]]; then
+      echo "[mayor] woken by event: $wake_reason"
+      # Drain any queued events (coalesce rapid-fire wakes)
+      local extra=""
+      while read -t 0.1 -u 3 extra 2>/dev/null; do
+        echo "[mayor] coalescing event: $extra"
+      done
+    else
+      echo "[mayor] periodic check at $(date -Iseconds)"
+      wake_reason="periodic"
+    fi
+
+    local needs_ai=false
+    local issues_found=""
+    local actions_taken=""
+    local notify_rigger=""
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # === 1. Check agent health ===
+    for agent in daemon deacon; do
+      if ! tmux has-session -t "sgt-$agent" 2>/dev/null; then
+        issues_found+="  - $agent is DOWN\n"
+        echo "[mayor] restarting $agent..."
+        sgt "$agent" start 2>/dev/null
+        actions_taken+="  - restarted $agent\n"
+      fi
+    done
+
+    # Check witnesses and refineries
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rname
+      rname="$(basename "$rig_file")"
+      if ! tmux has-session -t "sgt-witness-$rname" 2>/dev/null; then
+        issues_found+="  - witness/$rname is DOWN\n"
+        sgt witness start "$rname" 2>/dev/null
+        actions_taken+="  - restarted witness/$rname\n"
+      fi
+      if ! tmux has-session -t "sgt-refinery-$rname" 2>/dev/null; then
+        issues_found+="  - refinery/$rname is DOWN\n"
+        sgt refinery start "$rname" 2>/dev/null
+        actions_taken+="  - restarted refinery/$rname\n"
+      fi
+    done
+
+    # === 2. Check merge queue (refinery handles review + merge) ===
+    local mq_count=0
+    if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
+      for mqf in "$SGT_CONFIG/merge-queue"/*; do
+        [[ -f "$mqf" ]] || continue
+        mq_count=$((mq_count + 1))
+      done
+    fi
+    if [[ "$mq_count" -gt 0 ]]; then
+      issues_found+="  - merge queue has $mq_count item(s)\n"
+    fi
+
+    # === 3. Check for stale polecats (running > 30min) ===
+    for pf in "$SGT_CONFIG/polecats"/*; do
+      [[ -f "$pf" ]] || continue
+      local pname started_at now_epoch started_epoch age_min
+      pname="$(basename "$pf")"
+      started_at="$(grep '^STARTED=' "$pf" 2>/dev/null | cut -d= -f2)"
+      if [[ -n "$started_at" ]]; then
+        now_epoch=$(date +%s)
+        started_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo 0)
+        if [[ "$started_epoch" -gt 0 ]]; then
+          age_min=$(( (now_epoch - started_epoch) / 60 ))
+          if [[ "$age_min" -gt 30 ]]; then
+            issues_found+="  - polecat $pname running for ${age_min}m (stale?)\n"
+            needs_ai=true
+          fi
+        fi
+      fi
+    done
+
+    # === 4. Check for open issues with critical/high labels ===
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rname repo critical_issues
+      rname="$(basename "$rig_file")"
+      repo="$(cat "$rig_file")"
+      critical_issues=$(gh issue list --repo "$repo" --state open --label critical,high \
+        --json number,title --jq '.[].title' 2>/dev/null | head -5)
+      if [[ -n "$critical_issues" ]]; then
+        issues_found+="  - critical/high issues on $rname:\n"
+        while IFS= read -r line; do
+          issues_found+="    - $line\n"
+        done <<< "$critical_issues"
+        needs_ai=true
+      fi
+    done
+
+    # === 5. Check for orphaned PRs (open PRs on sgt/* branches with no polecat) ===
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rname repo
+      rname="$(basename "$rig_file")"
+      repo="$(cat "$rig_file")"
+      local orphan_prs
+      orphan_prs=$(gh pr list --repo "$repo" --state open \
+        --json number,headRefName --jq '.[] | select(.headRefName | startswith("sgt/")) | "#\(.number) [\(.headRefName)]"' 2>/dev/null)
+      if [[ -n "$orphan_prs" ]]; then
+        while IFS= read -r pr_info; do
+          local pr_branch
+          pr_branch=$(echo "$pr_info" | grep -oP '\[.*?\]' | tr -d '[]')
+          local has_polecat=false
+          for pf in "$SGT_CONFIG/polecats"/*; do
+            [[ -f "$pf" ]] || continue
+            if grep -q "BRANCH=$pr_branch" "$pf" 2>/dev/null; then
+              has_polecat=true
+              break
+            fi
+          done
+          if [[ "$has_polecat" == "false" ]]; then
+            local pr_num
+            pr_num=$(echo "$pr_info" | grep -oP '#\d+' | tr -d '#')
+            local mergeable
+            mergeable=$(gh pr view "$pr_num" --repo "$repo" --json mergeable --jq '.mergeable' 2>/dev/null)
+            if [[ "$mergeable" == "MERGEABLE" ]]; then
+              local mqf="$SGT_CONFIG/merge-queue/${rname}-pr${pr_num}"
+              if [[ ! -f "$mqf" ]]; then
+                mkdir -p "$SGT_CONFIG/merge-queue"
+                cat > "$mqf" <<MQORPHAN
+RIG=$rname
+REPO=$repo
+PR=$pr_num
+BRANCH=$pr_branch
+ISSUE=0
+TYPE=polecat
+AUTO_MERGE=true
+QUEUED=$(date -Iseconds)
+MQORPHAN
+                actions_taken+="  - queued orphaned PR #$pr_num ($rname) for refinery\n"
+                _wake_refinery "$rname" "orphan-pr:#$pr_num"
+              fi
+            fi
+          fi
+        done <<< "$orphan_prs"
+      fi
+    done
+
+    # === Decision & Log ===
+    if [[ -z "$issues_found" && -z "$actions_taken" ]]; then
+      # Only log periodic all-clears, not event-triggered ones
+      if [[ "$wake_reason" == "periodic" ]]; then
+        echo "[$ts] all clear" >> "$SGT_CONFIG/mayor-decisions.log"
+      fi
+      echo "[mayor] all clear"
+    else
+      {
+        echo "[$ts] MAYOR CYCLE (trigger: $wake_reason)"
+        [[ -n "$issues_found" ]] && echo -e "  Issues:\n$issues_found"
+        [[ -n "$actions_taken" ]] && echo -e "  Actions:\n$actions_taken"
+      } >> "$SGT_CONFIG/mayor-decisions.log"
+      echo "[mayor] logged issues/actions"
+
+      # Notify Rigger of significant actions via OpenClaw
+      if [[ -n "$notify_rigger" ]]; then
+        _mayor_notify_rigger "$notify_rigger"
+      fi
+    fi
+
+    # === AI escalation (only when needed) ===
+    if [[ "$needs_ai" == "true" ]]; then
+      echo "[mayor] complex issues detected — invoking AI decision..."
+      local mayor_workspace="$SGT_CONFIG/mayor-workspace"
+      mkdir -p "$mayor_workspace"
+
+      local briefing
+      briefing=$(_mayor_build_briefing)
+
+      cat > "$mayor_workspace/CLAUDE.md" <<MAYORMD
+# Mayor — Emergency Decision
+
+Issues requiring your judgment:
+$(echo -e "$issues_found")
+
+Recent actions already taken:
+$(echo -e "$actions_taken")
+
+## System State
+$(cat "$briefing")
+
+## Commands
+- \`sgt sling <rig> "<task>"\` — Dispatch work
+- \`sgt nuke <polecat>\` — Kill stuck worker
+- \`sgt sweep\` — Clean finished workers
+- \`gh pr merge <pr#> --repo <repo> --squash --delete-branch\` — Merge PR
+
+Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
+After deciding, report your actions: sgt mayor notify "<summary of what you did>"
+MAYORMD
+
+      if timeout 300 bash -c "cd '$mayor_workspace' && claude --dangerously-skip-permissions -p \
+        'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" \
+        2>&1 | tail -5; then
+        log_event "MAYOR_AI_CYCLE completed"
+        echo "[mayor] AI decision cycle complete"
+      else
+        echo "[mayor] AI cycle timed out — will retry next loop"
+        log_event "MAYOR_AI_CYCLE timeout"
+      fi
+    fi
+
+    log_event "MAYOR_CYCLE completed (trigger: $wake_reason)"
+  done
+}
+
+# Notify Rigger agent via OpenClaw messaging (fire-and-forget)
+_mayor_notify_rigger() {
+  local message="$1"
+  # Use openclaw agent messaging if available
+  if command -v openclaw &>/dev/null; then
+    openclaw agent --agent gastown --message "[SGT Mayor] $message" &>/dev/null &
+    disown 2>/dev/null
+    echo "[mayor] notified Rigger: $message"
+    log_event "MAYOR_NOTIFY_RIGGER $message"
+  fi
+}
+
+# Public command: sgt mayor notify "<message>" — lets AI mayor report to Rigger
+cmd_mayor_notify() {
+  local message="${1:?usage: sgt mayor notify \"<message>\"}"
+  _mayor_notify_rigger "$message"
+}
+
+cmd_mayor_start() {
+  ensure_init
+
+  local session="sgt-mayor"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    info "mayor already running"
+    return
+  fi
+
+  # Create FIFO for event-driven wake
+  [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
+
+  tmux new-session -d -s "$session" \
+    "SGT_ROOT='$SGT_ROOT' SGT_MAYOR_INTERVAL='$SGT_MAYOR_INTERVAL' sgt _mayor"
+
+  log_event "MAYOR_SPAWN"
+  info "mayor started (session: $session, event-driven + fallback every ${SGT_MAYOR_INTERVAL}s)"
+}
+
+cmd_mayor_stop() {
+  local session="sgt-mayor"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    log_event "MAYOR_STOP"
+    info "mayor stopped"
+  else
+    info "mayor not running"
+  fi
+  # Clean up FIFO
+  [[ -p "$SGT_MAYOR_FIFO" ]] && rm -f "$SGT_MAYOR_FIFO"
+}
+
+# Public command: wake the mayor on demand
+cmd_wake_mayor() {
+  local reason="${1:-manual}"
+  if ! tmux has-session -t "sgt-mayor" 2>/dev/null; then
+    warn "mayor is not running — starting it"
+    cmd_mayor_start
+    return
+  fi
+  _wake_mayor "$reason"
+  info "mayor woken: $reason"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# DOGS — Lightweight helper pool for non-coding tasks
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Dogs are ephemeral agents like polecats, but for non-coding tasks:
+# - Research, analysis, web scraping
+# - Document generation, summarization
+# - Data collection and formatting
+#
+# Key difference from polecats:
+# - No branch/worktree — they work in a temp directory
+# - No PR — they post results as issue comments
+# - Lighter weight, faster to spawn
+
+cmd_dog() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt dog <rig> <task description>"
+  shift
+
+  local task=""
+  while [[ $# -gt 0 ]]; do
+    task="${task:+$task }$1"; shift
+  done
+
+  [[ -n "$task" ]] || die "no task description provided"
+  ensure_init
+  ensure_rig "$rig"
+
+  local repo rpath dname session_name
+  repo="$(rig_repo "$rig")"
+  rpath="$(rig_path "$rig")"
+  dname="dog-$(head -c4 /dev/urandom | xxd -p)"
+  session_name="sgt-${dname}"
+
+  # Create issue for tracking
+  info "creating issue for dog task..."
+  local issue_url issue_number
+  issue_url=$(gh issue create \
+    --repo "$repo" \
+    --title "[Dog] $task" \
+    --body "$(cat <<EOF
+## Research/Analysis Task
+
+$task
+
+---
+
+*Created by sgt — dog: \`$dname\`*
+*Type: non-coding (results posted as comments)*
+EOF
+)" \
+    --label "dog" 2>&1) || {
+    # Label might not exist, try without
+    issue_url=$(gh issue create \
+      --repo "$repo" \
+      --title "[Dog] $task" \
+      --body "$(cat <<EOF
+## Research/Analysis Task
+
+$task
+
+---
+
+*Created by sgt — dog: \`$dname\`*
+*Type: non-coding (results posted as comments)*
+EOF
+)" 2>&1) || die "failed to create issue: $issue_url"
+  }
+
+  issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
+  info "issue #$issue_number created: $issue_url"
+
+  # Create temp workspace
+  local dog_workspace="$SGT_ROOT/dogs/$dname"
+  mkdir -p "$dog_workspace"
+
+  # Write instructions
+  cat > "$dog_workspace/CLAUDE.md" <<DOGMD
+# Dog Task — $dname
+
+You are a research/analysis agent. Your job is NOT to write code.
+Instead, research the topic and post your findings.
+
+## Task
+
+$task
+
+## Instructions
+
+1. Research the topic thoroughly using available tools
+2. Compile your findings into a clear, well-structured report
+3. Post your findings as a comment on issue #$issue_number:
+   \`gh issue comment $issue_number --repo $repo --body "<your findings>"\`
+4. Do NOT close the issue — the refinery will review your work first
+5. Exit
+
+## Rules
+
+- Focus on research and analysis, not code
+- Be thorough but concise
+- Include sources when possible
+- If you can't find good information, say so honestly
+DOGMD
+
+  # Save dog state
+  mkdir -p "$SGT_CONFIG/dogs"
+  cat > "$SGT_CONFIG/dogs/$dname" <<DSTATE
+RIG=$rig
+REPO=$repo
+ISSUE=$issue_number
+ISSUE_URL=$issue_url
+SESSION=$session_name
+WORKSPACE=$dog_workspace
+CREATED=$(date -Iseconds)
+STATUS=running
+DSTATE
+
+  # Spawn in tmux
+  info "spawning dog $dname..."
+  tmux new-session -d -s "$session_name" -c "$dog_workspace" \
+    "claude -p \"Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
+
+  log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
+  _wake_refinery "$rig" "dog:$dname:#$issue_number"
+
+  info ""
+  info "dog $dname dispatched"
+  info "  issue:   $issue_url"
+  info "  session: $session_name"
+  info "  peek:    sgt peek dog/$dname"
+}
+
+cmd_dog_list() {
+  ensure_init
+  mkdir -p "$SGT_CONFIG/dogs"
+  local count=0
+  for f in "$SGT_CONFIG/dogs"/*; do
+    [[ -f "$f" ]] || continue
+    count=$((count + 1))
+    local dname
+    dname="$(basename "$f")"
+    (
+      source "$f"
+      local alive="dead"
+      tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
+      echo "  $dname [$alive]"
+      echo "    rig:   $RIG"
+      echo "    issue: #$ISSUE ($ISSUE_URL)"
+    )
+  done
+  if [[ "$count" -eq 0 ]]; then
+    info "no dogs"
+  else
+    info "$count dog(s)"
+  fi
+}
+
+cmd_dog_sweep() {
+  ensure_init
+  mkdir -p "$SGT_CONFIG/dogs"
+  local cleaned=0
+  for f in "$SGT_CONFIG/dogs"/*; do
+    [[ -f "$f" ]] || continue
+    local dname
+    dname="$(basename "$f")"
+    (
+      source "$f"
+      if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+        echo "CLEAN"
+      else
+        echo "SKIP"
+      fi
+    ) | {
+      read -r action
+      if [[ "$action" == "CLEAN" ]]; then
+        # Clean up workspace
+        local ws
+        ws=$(grep '^WORKSPACE=' "$f" | cut -d= -f2)
+        [[ -d "$ws" ]] && rm -rf "$ws"
+        rm -f "$f"
+        cleaned=$((cleaned + 1))
+        log_event "DOG_SWEEP $dname"
+        info "swept dog $dname"
+      fi
+    }
+  done
+  [[ "$cleaned" -eq 0 ]] && info "no dogs to sweep"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# CREW — Persistent workspace agents
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Crew members are long-running agents that hold project context.
+# Unlike ephemeral polecats (spawn, work, die), crew members persist
+# across multiple tasks. They're good for:
+# - Ongoing maintenance of a codebase
+# - Code review (watches for new PRs)
+# - Project management (tracks issues, updates docs)
+#
+# Each crew member has a persistent workspace and identity.
+
+cmd_crew_add() {
+  local name="${1:-}" rig="${2:-}" role="${3:-general}"
+  [[ -n "$name" ]] || die "usage: sgt crew add <name> <rig> [role]"
+  [[ -n "$rig" ]] || die "usage: sgt crew add <name> <rig> [role]"
+  ensure_init
+  ensure_rig "$rig"
+
+  local repo
+  repo="$(rig_repo "$rig")"
+  local crew_dir="$SGT_ROOT/crew/$name"
+  local session_name="sgt-crew-${name}"
+
+  if [[ -f "$SGT_CONFIG/crew/$name" ]]; then
+    die "crew member '$name' already exists"
+  fi
+
+  # Clone rig into crew workspace
+  mkdir -p "$crew_dir"
+  git clone "$repo" "$crew_dir/repo" 2>/dev/null || {
+    if [[ -d "$crew_dir/repo" ]]; then
+      git -C "$crew_dir/repo" pull --ff-only 2>/dev/null || true
+    else
+      die "failed to clone $repo"
+    fi
+  }
+
+  # Write crew member identity
+  cat > "$crew_dir/CLAUDE.md" <<CREWMD
+# Crew Member: $name
+
+You are a persistent crew member for the $rig project.
+
+## Role: $role
+
+## Your Workspace
+
+Your working directory is $crew_dir/repo — a full clone of the project.
+You have your own notes directory at $crew_dir/notes/ — use it to persist context.
+
+## Responsibilities
+
+Based on your role ($role), you should:
+
+### If role = "reviewer"
+- Watch for new PRs: \`gh pr list --repo $repo --state open\`
+- Review code changes and leave comments
+- Approve good PRs, request changes on problematic ones
+
+### If role = "maintainer"
+- Keep the repo healthy (dependencies updated, docs current)
+- Triage new issues
+- Fix small bugs directly (create branch, commit, PR)
+
+### If role = "general"
+- Be a knowledgeable project resource
+- Answer questions about the codebase
+- Help debug issues
+- Maintain project documentation
+
+## Persistence
+
+Your notes/ directory persists between sessions. Save important context there:
+- \`notes/context.md\` — Current project state, recent changes
+- \`notes/decisions.md\` — Architecture decisions, trade-offs
+- \`notes/todos.md\` — Things to follow up on
+
+## Commands
+
+- Check PRs: \`gh pr list --repo $repo\`
+- Check issues: \`gh issue list --repo $repo\`
+- Create PR: \`gh pr create --repo $repo --title "..." --body "..."\`
+- Comment: \`gh issue comment <#> --repo $repo --body "..."\`
+
+When you have nothing to do, update your notes and exit. You'll be woken up again.
+CREWMD
+
+  mkdir -p "$crew_dir/notes" "$SGT_CONFIG/crew"
+
+  # Save crew state
+  cat > "$SGT_CONFIG/crew/$name" <<CSTATE
+NAME=$name
+RIG=$rig
+REPO=$repo
+ROLE=$role
+WORKSPACE=$crew_dir
+SESSION=$session_name
+CREATED=$(date -Iseconds)
+CSTATE
+
+  log_event "CREW_ADD $name rig=$rig role=$role"
+  info "crew member '$name' added (role: $role, rig: $rig)"
+}
+
+cmd_crew_wake() {
+  local name="${1:-}" task="${2:-Check for new work. Review any open PRs or issues. Update your notes.}"
+  [[ -n "$name" ]] || die "usage: sgt crew wake <name> [task]"
+  ensure_init
+
+  local cfile="$SGT_CONFIG/crew/$name"
+  [[ -f "$cfile" ]] || die "crew member '$name' not found"
+
+  local c_session c_workspace
+  eval "$(grep -E '^(SESSION|WORKSPACE)=' "$cfile")"
+  c_session="$SESSION"
+  c_workspace="$WORKSPACE"
+
+  if tmux has-session -t "$c_session" 2>/dev/null; then
+    info "crew member '$name' is already awake"
+    return
+  fi
+
+  tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
+    "claude -p \"Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes.\" --dangerously-skip-permissions; echo '[SGT] crew exited'"
+
+  log_event "CREW_WAKE $name task=\"$task\""
+  info "crew member '$name' is awake (session: $c_session)"
+}
+
+cmd_crew_list() {
+  ensure_init
+  mkdir -p "$SGT_CONFIG/crew"
+  local count=0
+  for f in "$SGT_CONFIG/crew"/*; do
+    [[ -f "$f" ]] || continue
+    count=$((count + 1))
+    local cname
+    cname="$(basename "$f")"
+    (
+      source "$f"
+      local alive="asleep"
+      tmux has-session -t "$SESSION" 2>/dev/null && alive="awake"
+      echo "  $cname [$alive]"
+      echo "    rig:  $RIG"
+      echo "    role: $ROLE"
+    )
+  done
+  if [[ "$count" -eq 0 ]]; then
+    info "no crew members"
+  else
+    info "$count crew member(s)"
+  fi
+}
+
+cmd_crew_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: sgt crew remove <name>"
+  ensure_init
+
+  local cfile="$SGT_CONFIG/crew/$name"
+  [[ -f "$cfile" ]] || die "crew member '$name' not found"
+
+  local c_session c_workspace
+  eval "$(grep -E '^(SESSION|WORKSPACE)=' "$cfile")"
+  c_session="$SESSION"
+  c_workspace="$WORKSPACE"
+
+  # Kill session if running
+  tmux has-session -t "$c_session" 2>/dev/null && tmux kill-session -t "$c_session"
+
+  rm -f "$cfile"
+  log_event "CREW_REMOVE $name"
+  info "crew member '$name' removed (workspace kept at $c_workspace)"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# MOLECULES / FORMULAS — Multi-step workflow templates
+# ═══════════════════════════════════════════════════════════════════════
+#
+# A molecule is a YAML file defining a sequence of tasks (a formula).
+# When executed, each step becomes a sling with dependency tracking.
+#
+# Example molecule (saved as molecules/feature.yml):
+#   name: feature
+#   description: Full feature implementation
+#   steps:
+#     - task: "Write technical spec for: {description}"
+#       type: dog
+#     - task: "Implement: {description}"
+#       type: polecat
+#       depends_on: [0]
+#     - task: "Write tests for: {description}"
+#       type: polecat
+#       depends_on: [1]
+#     - task: "Write documentation for: {description}"
+#       type: dog
+#       depends_on: [1]
+
+cmd_molecule_init() {
+  ensure_init
+  mkdir -p "$SGT_MOLECULES"
+
+  # Write example molecules
+  cat > "$SGT_MOLECULES/feature.yml" <<'MOLML'
+name: feature
+description: Full feature implementation with spec, code, tests, and docs
+steps:
+  - task: "Write technical spec for: {description}"
+    type: dog
+    label: spec
+  - task: "Implement: {description}"
+    type: polecat
+    depends_on: [0]
+    label: implementation
+  - task: "Write tests for: {description}"
+    type: polecat
+    depends_on: [1]
+    label: tests
+  - task: "Write documentation for: {description}"
+    type: dog
+    depends_on: [1]
+    label: docs
+MOLML
+
+  cat > "$SGT_MOLECULES/bugfix.yml" <<'MOLML'
+name: bugfix
+description: Bug investigation and fix with regression tests
+steps:
+  - task: "Investigate and diagnose: {description}"
+    type: dog
+    label: investigation
+  - task: "Fix bug: {description}"
+    type: polecat
+    depends_on: [0]
+    label: fix
+  - task: "Write regression tests for: {description}"
+    type: polecat
+    depends_on: [1]
+    label: regression-test
+MOLML
+
+  cat > "$SGT_MOLECULES/research.yml" <<'MOLML'
+name: research
+description: Multi-angle research with synthesis
+steps:
+  - task: "Research competitive landscape for: {description}"
+    type: dog
+    label: competitive
+  - task: "Research technical approaches for: {description}"
+    type: dog
+    label: technical
+  - task: "Synthesize findings and write recommendation for: {description}"
+    type: dog
+    depends_on: [0, 1]
+    label: synthesis
+MOLML
+
+  log_event "MOLECULE_INIT"
+  info "molecules initialized at $SGT_MOLECULES"
+  info "available: feature, bugfix, research"
+}
+
+cmd_molecule_list() {
+  ensure_init
+  if [[ ! -d "$SGT_MOLECULES" ]]; then
+    info "no molecules — run: sgt molecule init"
+    return
+  fi
+
+  for f in "$SGT_MOLECULES"/*.yml; do
+    [[ -f "$f" ]] || continue
+    local name desc
+    name=$(grep '^name:' "$f" | head -1 | sed 's/name: *//')
+    desc=$(grep '^description:' "$f" | head -1 | sed 's/description: *//')
+    local step_count
+    step_count=$(grep -c '^ *- task:' "$f" || echo 0)
+    echo "  $name ($step_count steps) — $desc"
+  done
+}
+
+cmd_molecule_run() {
+  local molecule="${1:-}" rig="${2:-}"
+  [[ -n "$molecule" ]] || die "usage: sgt molecule run <molecule> <rig> <description>"
+  [[ -n "$rig" ]] || die "usage: sgt molecule run <molecule> <rig> <description>"
+  shift 2
+
+  local description="$*"
+  [[ -n "$description" ]] || die "no description provided"
+  ensure_init
+  ensure_rig "$rig"
+
+  local mol_file="$SGT_MOLECULES/${molecule}.yml"
+  [[ -f "$mol_file" ]] || die "molecule '$molecule' not found at $mol_file"
+
+  local repo
+  repo="$(rig_repo "$rig")"
+
+  # Create a convoy (milestone) for this molecule run
+  local convoy_name="mol-${molecule}-$(date +%s)"
+  info "creating convoy for molecule run: $convoy_name"
+  cmd_convoy_create "$convoy_name" "$repo" 2>/dev/null || true
+
+  # Parse steps and dispatch non-dependent ones immediately
+  # For simplicity, dispatch all steps as issues with dependency notes
+  # The Mayor will coordinate execution order
+  local step_idx=0
+  local step_issues=()
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*task:[[:space:]]*(.*) ]]; then
+      local raw_task="${BASH_REMATCH[1]}"
+      # Remove quotes
+      raw_task="${raw_task#\"}"
+      raw_task="${raw_task%\"}"
+      raw_task="${raw_task#\'}"
+      raw_task="${raw_task%\'}"
+      # Substitute {description}
+      local task="${raw_task//\{description\}/$description}"
+
+      # Get type (next line might have it)
+      local step_type="polecat"
+      local step_label=""
+      local step_deps=""
+
+      # Read ahead for type, depends_on, label (simplified YAML parsing)
+      step_idx=$((step_idx + 1))
+
+      # Create issue with dependency info in body
+      local issue_url issue_number
+      issue_url=$(gh issue create \
+        --repo "$repo" \
+        --title "[${molecule}/${step_idx}] $task" \
+        --body "$(cat <<EOF
+## Molecule: $molecule (step $step_idx)
+
+$task
+
+**Convoy:** $convoy_name
+
+---
+*Part of molecule run. Dispatched by sgt.*
+EOF
+)" 2>&1) || warn "failed to create issue for step $step_idx"
+
+      if [[ -n "$issue_url" ]]; then
+        issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
+        step_issues+=("$issue_number")
+        info "step $step_idx: issue #$issue_number — $task"
+
+        # Add to convoy
+        gh issue edit "$issue_number" --repo "$repo" --milestone "$convoy_name" 2>/dev/null || true
+      fi
+    fi
+  done < "$mol_file"
+
+  info ""
+  info "molecule '$molecule' dispatched with ${#step_issues[@]} steps"
+  info "convoy: $convoy_name"
+  info "the Mayor will coordinate execution order"
+
+  log_event "MOLECULE_RUN molecule=$molecule rig=$rig steps=${#step_issues[@]} convoy=$convoy_name"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# ESCALATION — Severity-based routing
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Issues can be labeled with severity levels:
+# - critical: Immediate dispatch, Mayor notified, timeout 15min
+# - high: Priority dispatch, 30min timeout
+# - normal: Standard dispatch (default)
+# - low: Queued, dispatched when capacity available
+#
+# Escalation config is stored in $SGT_ESCALATION
+
+cmd_escalation_init() {
+  ensure_init
+
+  cat > "$SGT_ESCALATION" <<'ESCJSON'
+{
+  "levels": {
+    "critical": {
+      "timeout_minutes": 15,
+      "max_retries": 3,
+      "notify": true,
+      "auto_dispatch": true
+    },
+    "high": {
+      "timeout_minutes": 30,
+      "max_retries": 2,
+      "notify": true,
+      "auto_dispatch": true
+    },
+    "normal": {
+      "timeout_minutes": 60,
+      "max_retries": 1,
+      "notify": false,
+      "auto_dispatch": false
+    },
+    "low": {
+      "timeout_minutes": 120,
+      "max_retries": 0,
+      "notify": false,
+      "auto_dispatch": false
+    }
+  }
+}
+ESCJSON
+
+  # Create labels on all rigs
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local repo
+    repo="$(cat "$rig_file")"
+    for level in critical high normal low dog; do
+      gh label create "$level" --repo "$repo" --force 2>/dev/null || true
+    done
+    info "created escalation labels on $(basename "$rig_file")"
+  done
+
+  log_event "ESCALATION_INIT"
+  info "escalation initialized at $SGT_ESCALATION"
+}
+
+cmd_escalation_show() {
+  ensure_init
+  if [[ ! -f "$SGT_ESCALATION" ]]; then
+    info "escalation not configured — run: sgt escalation init"
+    return
+  fi
+  cat "$SGT_ESCALATION"
+}
+
+# ─── Up / Down (start/stop everything) ───────────────────────────────
+
+cmd_up() {
+  ensure_init
+  info "starting sgt system..."
+
+  # Start workers first (bottom-up: witnesses + refineries, then deacon, then daemon)
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local rig_name
+    rig_name="$(basename "$rig_file")"
+    cmd_witness_start "$rig_name"
+    cmd_refinery_start "$rig_name"
+  done
+
+  # Start deacon (monitors witnesses + refineries)
+  cmd_deacon_start
+
+  # Give deacon a moment to write its first heartbeat
+  sleep 2
+
+  # Start daemon last (monitors deacon via boot)
+  cmd_daemon_start
+
+  # Start mayor (AI coordinator)
+  cmd_mayor_start
+
+  log_event "SYSTEM_UP"
+  info "sgt system is up"
+}
+
+cmd_down() {
+  ensure_init
+  info "stopping sgt system..."
+
+  # Stop all witnesses and refineries
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    local rig_name
+    rig_name="$(basename "$rig_file")"
+    cmd_witness_stop "$rig_name" 2>/dev/null || true
+    cmd_refinery_stop "$rig_name" 2>/dev/null || true
+  done
+
+  # Stop mayor
+  cmd_mayor_stop 2>/dev/null || true
+
+  # Stop deacon
+  cmd_deacon_stop 2>/dev/null || true
+
+  # Stop daemon
+  cmd_daemon_stop 2>/dev/null || true
+
+  log_event "SYSTEM_DOWN"
+  info "sgt system is down"
+  info "(polecats left running — use 'sgt nuke' to kill individual workers)"
+}
+
+# ─── Log ──────────────────────────────────────────────────────────────
+
+cmd_log() {
+  local lines="${1:-50}"
+  tail -n "$lines" "$SGT_LOG" 2>/dev/null || info "no log entries"
+}
+
+# ─── Trail (recent activity feed) ─────────────────────────────────────
+
+cmd_trail() {
+  local lines="${1:-20}"
+  ensure_init
+  echo "=== Recent Activity ==="
+  tail -n "$lines" "$SGT_LOG" 2>/dev/null || info "no activity"
+}
+
+# ─── CLAUDE.md Templates ─────────────────────────────────────────────
+
+_write_claude_md() {
+  local rpath="$1"
+  [[ -f "$rpath/CLAUDE.md" ]] && return 0
+
+  cat > "$rpath/CLAUDE.md" <<'CLMD'
+# Project Context
+
+This repository is managed by sgt (Simple GitHub Gastown).
+Workers (polecats) operate on feature branches and submit PRs.
+
+## Workflow
+
+1. Read your assigned GitHub issue for the task description
+2. Work on your feature branch
+3. Commit frequently with clear messages
+4. Push your branch
+5. Open a PR that references the issue (use "Closes #N")
+6. Exit when done
+CLMD
+}
+
+_write_polecat_claude_md() {
+  local worktree="$1" issue="$2" task="$3" repo="$4" pname="$5" branch="$6" default_branch="$7" auto_merge="$8"
+
+  cat >> "$worktree/CLAUDE.md" <<CLMD
+
+# SGT Polecat Instructions
+
+You are polecat \`$pname\`, an ephemeral coding agent.
+
+## Your Assignment
+
+- **Issue**: #$issue
+- **Task**: $task
+- **Branch**: \`$branch\`
+- **Target**: \`$default_branch\`
+
+## Protocol
+
+1. Read the issue description for full context
+2. Implement the requested changes
+3. Write tests if appropriate
+4. Commit your work with clear commit messages referencing #$issue
+5. Push your branch: \`git push -u origin $branch\`
+6. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
+7. Exit the session
+
+## Rules
+
+- Stay focused on the issue — don't scope-creep
+- If blocked, comment on the issue explaining the blocker, then exit
+- Never force-push or modify the default branch directly
+- Keep commits atomic and well-described
+CLMD
+}
+
+# ─── Main Dispatch ────────────────────────────────────────────────────
+
+cmd_help() {
+  cat <<EOF
+sgt $SGT_VERSION — Simple GitHub Gastown
+
+Usage: sgt <command> [args]
+
+Core Commands:
+  init                          Initialize sgt workspace
+  rig add <name> <repo>         Add a repository as a rig
+  rig list                      List registered rigs
+  rig remove <name>             Remove a rig
+  sling <rig> <task> [opts]     Dispatch coding work (issue + branch + polecat)
+    --convoy <name>               Add to milestone
+    --label <label>               Add label (repeatable)
+    --auto-merge                  Auto-merge PR on CI pass
+  status                        Show all agents, polecats, dogs, crew
+  peek <target>                 View output (polecat, witness/<rig>, refinery/<rig>,
+                                deacon, mayor, dog/<name>, crew/<name>)
+  nuke <polecat>                Kill polecat and clean up
+  sweep                         Clean up completed polecats
+
+Agent Commands:
+  up                            Start full system (daemon + deacon + witnesses + refineries + mayor)
+  down                          Stop all agents (polecats keep running)
+  daemon start|stop|status      Control the watchdog daemon
+  deacon start|stop             Control the health monitor
+  witness start|stop <rig>      Control per-rig polecat monitor
+  refinery start|stop <rig>     Control per-rig merge queue
+  mayor start|stop|notify       Control the AI coordinator
+  wake-mayor [reason]           Wake the mayor on demand (event-driven)
+  nudge <target> <message>      Send message to agent's tmux session
+
+Dogs (non-coding helpers):
+  dog <rig> <task>              Dispatch research/analysis task
+  dog list                      List active dogs
+  dog sweep                     Clean up completed dogs
+
+Crew (persistent agents):
+  crew add <name> <rig> [role]  Add a crew member (roles: reviewer, maintainer, general)
+  crew wake <name> [task]       Wake up a crew member with optional task
+  crew list                     List crew members
+  crew remove <name>            Remove a crew member
+
+Molecules (workflow templates):
+  molecule init                 Create default molecule templates
+  molecule list                 List available molecules
+  molecule run <mol> <rig> <desc>  Execute a multi-step workflow
+
+Escalation:
+  escalation init               Set up severity labels and config
+  escalation show               Show escalation rules
+
+Communication:
+  mail send <repo> <#> <msg>    Comment on a GitHub issue
+  mail check <repo>             Show recent issue comments
+  convoy create <name> <repo>   Create a convoy (milestone)
+  convoy status <repo>          Show convoy progress
+
+Diagnostics:
+  log [lines]                   Show recent log entries
+  trail [lines]                 Show recent activity feed
+  version                       Show version
+  help                          This help
+
+Agent Hierarchy:
+  daemon     Mechanical watchdog (bash loop, every 3 min)
+   └─ boot   Ephemeral triage — checks deacon health
+       └─ deacon   Health monitor — ensures witnesses + refineries alive
+           ├─ witness/<rig>    Polecat lifecycle manager (+ orphan PR scanner)
+           └─ refinery/<rig>   Merge queue processor
+  mayor      AI coordinator (event-driven, fallback every 10 min)
+  dogs       Ephemeral non-coding helpers (research, analysis)
+  crew       Persistent project agents (review, maintenance)
+
+Environment:
+  SGT_ROOT              Workspace root (default: ~/sgt)
+  SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
+  SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
+
+Examples:
+  sgt init
+  sgt rig add myapp owner/repo
+  sgt up                                        # Start full system
+  sgt sling myapp "Add user authentication"
+  sgt sling myapp "Fix login bug" --label critical --convoy v1.0
+  sgt dog myapp "Research competitor pricing"    # Non-coding task
+  sgt crew add alice myapp reviewer             # Add persistent reviewer
+  sgt crew wake alice "Review latest PRs"       # Wake up crew member
+  sgt molecule init                             # Create templates
+  sgt molecule run feature myapp "User dashboard"  # Multi-step workflow
+  sgt escalation init                           # Set up severity levels
+  sgt status
+  sgt peek mayor                                # Check mayor decisions
+  sgt peek dog/dog-a1b2c3d4
+  sgt down                                      # Stop agents
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$cmd" in
+    # Internal commands for tmux agent sessions (not user-facing)
+    _witness)       _witness_loop "$@" ;;
+    _refinery)      _refinery_loop "$@" ;;
+    _deacon)        _deacon_loop ;;
+    _daemon)        _daemon_loop ;;
+    _boot)          _boot_check ;;
+    _mayor)         _mayor_loop ;;
+
+    init)           cmd_init ;;
+    rig)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        add)    cmd_rig_add "$@" ;;
+        list|ls) cmd_rig_list ;;
+        remove|rm) cmd_rig_remove "$@" ;;
+        *)      die "unknown rig command: $sub (try: add, list, remove)" ;;
+      esac
+      ;;
+    sling)          cmd_sling "$@" ;;
+    status|st)      cmd_status ;;
+    peek)           cmd_peek "$@" ;;
+    nuke)           cmd_nuke "$@" ;;
+    sweep)          cmd_sweep ;;
+    convoy)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        create)  cmd_convoy_create "$@" ;;
+        status)  cmd_convoy_status "$@" ;;
+        *)       die "unknown convoy command: $sub (try: create, status)" ;;
+      esac
+      ;;
+    up)             cmd_up ;;
+    down)           cmd_down ;;
+    daemon)
+      local sub="${1:-status}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        start)  cmd_daemon_start ;;
+        stop)   cmd_daemon_stop ;;
+        status) cmd_daemon_status ;;
+        *)      die "unknown daemon command: $sub (try: start, stop, status)" ;;
+      esac
+      ;;
+    deacon)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        start)  cmd_deacon_start ;;
+        stop)   cmd_deacon_stop ;;
+        *)      die "unknown deacon command: $sub (try: start, stop)" ;;
+      esac
+      ;;
+    witness)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        start)  cmd_witness_start "$@" ;;
+        stop)   cmd_witness_stop "$@" ;;
+        *)      die "unknown witness command: $sub (try: start, stop)" ;;
+      esac
+      ;;
+    refinery)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        start)  cmd_refinery_start "$@" ;;
+        stop)   cmd_refinery_stop "$@" ;;
+        *)      die "unknown refinery command: $sub (try: start, stop)" ;;
+      esac
+      ;;
+    mayor)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        start)   cmd_mayor_start ;;
+        stop)    cmd_mayor_stop ;;
+        notify)  cmd_mayor_notify "$@" ;;
+        *)       die "unknown mayor command: $sub (try: start, stop, notify)" ;;
+      esac
+      ;;
+    wake-mayor) cmd_wake_mayor "$@" ;;
+    _wake-refinery) _wake_refinery "$@" ;;
+    dog)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        list|ls)  cmd_dog_list ;;
+        sweep)    cmd_dog_sweep ;;
+        *)
+          # If first arg looks like a rig name, it's a dispatch
+          if [[ -f "$SGT_RIGS/$sub" ]]; then
+            cmd_dog "$sub" "$@"
+          else
+            die "unknown dog command: $sub (try: <rig> <task>, list, sweep)"
+          fi
+          ;;
+      esac
+      ;;
+    crew)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        add)     cmd_crew_add "$@" ;;
+        wake)    cmd_crew_wake "$@" ;;
+        list|ls) cmd_crew_list ;;
+        remove|rm) cmd_crew_remove "$@" ;;
+        *)       die "unknown crew command: $sub (try: add, wake, list, remove)" ;;
+      esac
+      ;;
+    molecule|mol)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        init)   cmd_molecule_init ;;
+        list|ls) cmd_molecule_list ;;
+        run)    cmd_molecule_run "$@" ;;
+        *)      die "unknown molecule command: $sub (try: init, list, run)" ;;
+      esac
+      ;;
+    escalation|esc)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        init)  cmd_escalation_init ;;
+        show)  cmd_escalation_show ;;
+        *)     die "unknown escalation command: $sub (try: init, show)" ;;
+      esac
+      ;;
+    nudge)          cmd_nudge "$@" ;;
+    mail)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        send)   cmd_mail_send "$@" ;;
+        check)  cmd_mail_check "$@" ;;
+        *)      die "unknown mail command: $sub (try: send, check)" ;;
+      esac
+      ;;
+    log)            cmd_log "$@" ;;
+    trail)          cmd_trail "$@" ;;
+    version|--version|-v) echo "sgt $SGT_VERSION" ;;
+    help|--help|-h) cmd_help ;;
+    *)              die "unknown command: $cmd (try: sgt help)" ;;
+  esac
+}
+
+main "$@"

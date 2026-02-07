@@ -1,0 +1,13 @@
+name: research
+description: Multi-angle research with synthesis
+steps:
+  - task: "Research competitive landscape for: {description}"
+    type: dog
+    label: competitive
+  - task: "Research technical approaches for: {description}"
+    type: dog
+    label: technical
+  - task: "Synthesize findings and write recommendation for: {description}"
+    type: dog
+    depends_on: [0, 1]
+    label: synthesis
