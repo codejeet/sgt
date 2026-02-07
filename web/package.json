@@ -1,0 +1,14 @@
+{
+  "name": "sgt-web",
+  "version": "1.0.0",
+  "description": "SGT Web UI Control Panel — real-time dashboard for monitoring agents, workers, rigs, logs, and dispatching tasks",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  }
+}

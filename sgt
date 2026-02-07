@@ -79,6 +79,23 @@ rig_path() {
   echo "$SGT_ROOT/rigs/$name"
 }
 
+# Check if an issue has the sgt-authorized label
+_has_sgt_authorized() {
+  local repo="$1" issue="$2"
+  [[ -n "$issue" && "$issue" != "0" ]] || return 1
+  local labels
+  labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)
+  echo "$labels" | grep -qx "sgt-authorized"
+}
+
+# Ensure the sgt-authorized label exists on a repo (idempotent)
+_ensure_sgt_authorized_label() {
+  local repo="$1"
+  gh label create "sgt-authorized" --repo "$repo" \
+    --description "Authorized for sgt processing — do not apply manually" \
+    --color "0E8A16" --force 2>/dev/null || true
+}
+
 # Generate polecat name: <rig>-<short-id>
 polecat_name() {
   local rig="$1"
@@ -128,6 +145,7 @@ cmd_rig_add() {
   fi
 
   _write_claude_md "$rpath"
+  _ensure_sgt_authorized_label "$repo"
   log_event "RIG_ADD $name $repo"
   info "rig '$name' added ($repo)"
 }
@@ -201,6 +219,8 @@ cmd_sling() {
 
   # ── 1. Create GitHub Issue ──
   info "creating issue on $(basename "$repo")..."
+  _ensure_sgt_authorized_label "$repo"
+  labels+=("sgt-authorized")
   local label_args=""
   for l in "${labels[@]+"${labels[@]}"}"; do
     label_args="$label_args --label $l"
@@ -873,12 +893,25 @@ MQSTATE
         fi
 
         if [[ "$tracked" == "false" ]]; then
-          echo "[witness/$rig] orphaned PR #$pr_num on branch $pr_branch — queuing for refinery"
-          log_event "WITNESS_ORPHAN_PR pr=#$pr_num branch=$pr_branch"
-
           local orphan_pname="${pr_branch#sgt/}"
           local orphan_issue
           orphan_issue=$(gh pr view "$pr_num" --repo "$repo" --json body --jq '.body' 2>/dev/null | grep -oP 'Closes #\K[0-9]+' || true)
+
+          # Security gate: only queue if linked issue has sgt-authorized label
+          if [[ -z "$orphan_issue" || "$orphan_issue" == "0" ]]; then
+            echo "[witness/$rig] orphaned PR #$pr_num has no linked issue — skipping (unauthorized)"
+            log_event "WITNESS_ORPHAN_SKIP_NO_ISSUE pr=#$pr_num branch=$pr_branch"
+            continue
+          fi
+
+          if ! _has_sgt_authorized "$repo" "$orphan_issue"; then
+            echo "[witness/$rig] orphaned PR #$pr_num linked issue #$orphan_issue lacks sgt-authorized label — skipping"
+            log_event "WITNESS_ORPHAN_SKIP_UNAUTHORIZED pr=#$pr_num issue=#$orphan_issue"
+            continue
+          fi
+
+          echo "[witness/$rig] orphaned PR #$pr_num on branch $pr_branch — queuing for refinery"
+          log_event "WITNESS_ORPHAN_PR pr=#$pr_num branch=$pr_branch"
 
           mkdir -p "$SGT_CONFIG/merge-queue"
           cat > "$SGT_CONFIG/merge-queue/$orphan_pname" <<MQSTATE
@@ -905,6 +938,13 @@ MQSTATE
 # Re-sling an existing issue (don't create a new one)
 _resling_existing_issue() {
   local rig="$1" issue_number="$2" task="$3" repo="$4"
+
+  # Security gate: verify issue has sgt-authorized label
+  if ! _has_sgt_authorized "$repo" "$issue_number"; then
+    echo "[resling] issue #$issue_number lacks sgt-authorized label — skipping"
+    log_event "RESLING_SKIP_UNAUTHORIZED issue=#$issue_number rig=$rig"
+    return 1
+  fi
 
   local rpath pname branch session_name
   rpath="$(rig_path "$rig")"
@@ -1213,6 +1253,21 @@ _refinery_loop() {
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
 
+      # Security gate: verify linked issue has sgt-authorized label
+      if [[ -n "$mq_issue" && "$mq_issue" != "0" ]]; then
+        if ! _has_sgt_authorized "$mq_repo" "$mq_issue"; then
+          echo "[refinery/$rig] PR #$mq_pr linked issue #$mq_issue lacks sgt-authorized — skipping"
+          log_event "REFINERY_SKIP_UNAUTHORIZED pr=#$mq_pr issue=#$mq_issue"
+          rm -f "$f"
+          continue
+        fi
+      else
+        echo "[refinery/$rig] PR #$mq_pr has no linked issue — skipping (unauthorized)"
+        log_event "REFINERY_SKIP_NO_ISSUE pr=#$mq_pr"
+        rm -f "$f"
+        continue
+      fi
+
       # Check PR state
       local pr_state
       pr_state=$(gh pr view "$mq_pr" --repo "$mq_repo" --json state --jq '.state' 2>/dev/null || true)
@@ -1331,6 +1386,14 @@ Please address the feedback in the next iteration." 2>/dev/null || true
         fi
 
         echo "[refinery/$rig] dog $dname finished — reviewing output"
+
+        # Security gate: verify dog's issue has sgt-authorized label
+        if ! _has_sgt_authorized "$d_repo" "$d_issue"; then
+          echo "[refinery/$rig] dog $dname issue #$d_issue lacks sgt-authorized — skipping"
+          log_event "REFINERY_DOG_SKIP_UNAUTHORIZED dog=$dname issue=#$d_issue"
+          rm -f "$df"
+          continue
+        fi
 
         REFINERY_REJECT_REASON=""
         if _refinery_review_dog "$d_repo" "$d_issue" "$rig" "$dname"; then
@@ -1735,15 +1798,15 @@ HEADER
   [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$briefing"
   echo "" >> "$briefing"
 
-  # Open issues across all rigs
-  echo "## Open Issues (all rigs)" >> "$briefing"
+  # Open issues across all rigs (sgt-authorized only)
+  echo "## Open Issues (all rigs, sgt-authorized)" >> "$briefing"
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
     local rname repo
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
     echo "### $rname ($repo)" >> "$briefing"
-    gh issue list --repo "$repo" --state open --json number,title,labels,milestone \
+    gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number,title,labels,milestone \
       --jq '.[] | "- #\(.number): \(.title) [\(.labels | map(.name) | join(","))] \(if .milestone then "(" + .milestone.title + ")" else "" end)"' \
       2>/dev/null >> "$briefing" || echo "  (couldn't fetch)" >> "$briefing"
     echo "" >> "$briefing"
@@ -1881,8 +1944,14 @@ _mayor_loop() {
       local rname repo critical_issues
       rname="$(basename "$rig_file")"
       repo="$(cat "$rig_file")"
-      critical_issues=$(gh issue list --repo "$repo" --state open --label critical,high \
-        --json number,title --jq '.[].title' 2>/dev/null | head -5)
+      critical_issues=$(
+        {
+          gh issue list --repo "$repo" --state open --label "sgt-authorized,critical" \
+            --json number,title --jq '.[].title' 2>/dev/null
+          gh issue list --repo "$repo" --state open --label "sgt-authorized,high" \
+            --json number,title --jq '.[].title' 2>/dev/null
+        } | sort -u | head -5
+      )
       if [[ -n "$critical_issues" ]]; then
         issues_found+="  - critical/high issues on $rname:\n"
         while IFS= read -r line; do
@@ -1916,6 +1985,21 @@ _mayor_loop() {
           if [[ "$has_polecat" == "false" ]]; then
             local pr_num
             pr_num=$(echo "$pr_info" | grep -oP '#\d+' | tr -d '#')
+
+            # Security gate: check linked issue has sgt-authorized label
+            local linked_issue
+            linked_issue=$(gh pr view "$pr_num" --repo "$repo" --json body --jq '.body' 2>/dev/null | grep -oP 'Closes #\K[0-9]+' || true)
+            if [[ -z "$linked_issue" || "$linked_issue" == "0" ]]; then
+              echo "[mayor] orphaned PR #$pr_num has no linked issue — skipping (unauthorized)"
+              log_event "MAYOR_ORPHAN_SKIP_NO_ISSUE pr=#$pr_num"
+              continue
+            fi
+            if ! _has_sgt_authorized "$repo" "$linked_issue"; then
+              echo "[mayor] orphaned PR #$pr_num linked issue #$linked_issue lacks sgt-authorized — skipping"
+              log_event "MAYOR_ORPHAN_SKIP_UNAUTHORIZED pr=#$pr_num issue=#$linked_issue"
+              continue
+            fi
+
             local mergeable
             mergeable=$(gh pr view "$pr_num" --repo "$repo" --json mergeable --jq '.mergeable' 2>/dev/null)
             if [[ "$mergeable" == "MERGEABLE" ]]; then
@@ -1927,7 +2011,7 @@ RIG=$rname
 REPO=$repo
 PR=$pr_num
 BRANCH=$pr_branch
-ISSUE=0
+ISSUE=${linked_issue}
 TYPE=polecat
 AUTO_MERGE=true
 QUEUED=$(date -Iseconds)
@@ -2106,6 +2190,7 @@ cmd_dog() {
 
   # Create issue for tracking
   info "creating issue for dog task..."
+  _ensure_sgt_authorized_label "$repo"
   local issue_url issue_number
   issue_url=$(gh issue create \
     --repo "$repo" \
@@ -2121,8 +2206,8 @@ $task
 *Type: non-coding (results posted as comments)*
 EOF
 )" \
-    --label "dog" 2>&1) || {
-    # Label might not exist, try without
+    --label "dog" --label "sgt-authorized" 2>&1) || {
+    # Label might not exist, try without dog label
     issue_url=$(gh issue create \
       --repo "$repo" \
       --title "[Dog] $task" \
@@ -2136,7 +2221,8 @@ $task
 *Created by sgt — dog: \`$dname\`*
 *Type: non-coding (results posted as comments)*
 EOF
-)" 2>&1) || die "failed to create issue: $issue_url"
+)" \
+    --label "sgt-authorized" 2>&1) || die "failed to create issue: $issue_url"
   }
 
   issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
@@ -2563,6 +2649,9 @@ cmd_molecule_run() {
   info "creating convoy for molecule run: $convoy_name"
   cmd_convoy_create "$convoy_name" "$repo" 2>/dev/null || true
 
+  # Ensure sgt-authorized label exists
+  _ensure_sgt_authorized_label "$repo"
+
   # Parse steps and dispatch non-dependent ones immediately
   # For simplicity, dispatch all steps as issues with dependency notes
   # The Mayor will coordinate execution order
@@ -2603,7 +2692,8 @@ $task
 ---
 *Part of molecule run. Dispatched by sgt.*
 EOF
-)" 2>&1) || warn "failed to create issue for step $step_idx"
+)" \
+        --label "sgt-authorized" 2>&1) || warn "failed to create issue for step $step_idx"
 
       if [[ -n "$issue_url" ]]; then
         issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
@@ -2635,6 +2725,29 @@ EOF
 # - low: Queued, dispatched when capacity available
 #
 # Escalation config is stored in $SGT_ESCALATION
+
+cmd_label_init() {
+  local rig="${1:-}"
+  if [[ -n "$rig" ]]; then
+    ensure_init
+    ensure_rig "$rig"
+    local repo
+    repo="$(rig_repo "$rig")"
+    _ensure_sgt_authorized_label "$repo"
+    info "created sgt-authorized label on $rig"
+  else
+    # Apply to all rigs
+    ensure_init
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local repo rname
+      rname="$(basename "$rig_file")"
+      repo="$(cat "$rig_file")"
+      _ensure_sgt_authorized_label "$repo"
+      info "created sgt-authorized label on $rname"
+    done
+  fi
+}
 
 cmd_escalation_init() {
   ensure_init
@@ -2678,7 +2791,8 @@ ESCJSON
     for level in critical high normal low dog; do
       gh label create "$level" --repo "$repo" --force 2>/dev/null || true
     done
-    info "created escalation labels on $(basename "$rig_file")"
+    _ensure_sgt_authorized_label "$repo"
+    info "created escalation + sgt-authorized labels on $(basename "$rig_file")"
   done
 
   log_event "ESCALATION_INIT"
@@ -2876,6 +2990,9 @@ Molecules (workflow templates):
   molecule list                 List available molecules
   molecule run <mol> <rig> <desc>  Execute a multi-step workflow
 
+Security:
+  label init [rig]              Create sgt-authorized label (on rig or all rigs)
+
 Escalation:
   escalation init               Set up severity labels and config
   escalation show               Show escalation rules
@@ -3050,6 +3167,14 @@ main() {
         list|ls) cmd_molecule_list ;;
         run)    cmd_molecule_run "$@" ;;
         *)      die "unknown molecule command: $sub (try: init, list, run)" ;;
+      esac
+      ;;
+    label)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        init)  cmd_label_init "$@" ;;
+        *)     die "unknown label command: $sub (try: init)" ;;
       esac
       ;;
     escalation|esc)
