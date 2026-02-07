@@ -68,53 +68,115 @@ app.get('/api/status', async (req, res) => {
 });
 
 function parseStatus(raw) {
+  // Supports both legacy (=== Agents ===) and current box-drawing output.
   const result = { agents: [], polecats: [], dogs: [], crew: [], mergeQueue: [] };
   let section = null;
 
+  function setSectionFromHeader(line) {
+    // Legacy headers
+    if (line.startsWith('=== Agents ===')) return 'agents';
+    if (line.startsWith('=== Dogs ===')) return 'dogs';
+    if (line.startsWith('=== Crew ===')) return 'crew';
+    if (line.startsWith('=== Merge Queue')) return 'mergeQueue';
+    if (line.startsWith('=== Polecats ===')) return 'polecats';
+
+    // New headers
+    const mh = line.match(/^╭─\s+(.+?)\s+─/);
+    if (!mh) return null;
+    const title = mh[1].trim();
+    if (title === 'Agents') return 'agents';
+    if (title === 'Dogs') return 'dogs';
+    if (title === 'Crew') return 'crew';
+    if (title.startsWith('Merge Queue')) return 'mergeQueue';
+    if (title === 'Polecats') return 'polecats';
+    return null;
+  }
+
   for (const line of raw.split('\n')) {
-    if (line.startsWith('=== Agents ===')) { section = 'agents'; continue; }
-    if (line.startsWith('=== Dogs ===')) { section = 'dogs'; continue; }
-    if (line.startsWith('=== Crew ===')) { section = 'crew'; continue; }
-    if (line.startsWith('=== Merge Queue')) { section = 'mergeQueue'; continue; }
-    if (line.startsWith('=== Polecats ===')) { section = 'polecats'; continue; }
+    const maybe = setSectionFromHeader(line);
+    if (maybe) { section = maybe; continue; }
+
     if (line.startsWith('»') || line.trim() === '') continue;
+    if (line.trim() === 'none' || line.trim() === 'empty') continue;
+    if (line.startsWith('1 polecat') || line.includes('polecat(s) tracked')) continue;
 
     if (section === 'agents') {
-      const m = line.match(/^\s+(\S+):\s+(.+)$/);
+      // Legacy: "  daemon:  on (pid ...)"
+      const mLegacy = line.match(/^\s+(\S+):\s+(.+)$/);
+      if (mLegacy) {
+        result.agents.push({ name: mLegacy[1], status: mLegacy[2].trim() });
+        continue;
+      }
+
+      // New: "  daemon           on  (pid ...)" or "  witness/sgt      on"
+      const m = line.match(/^\s{2,}([^\s]+)\s{2,}(.+?)\s*$/);
       if (m) {
-        result.agents.push({ name: m[1], status: m[2].trim() });
-      } else if (line.includes('last heartbeat:')) {
+        const name = m[1].trim();
+        const status = m[2].trim();
+        result.agents.push({ name, status });
+        continue;
+      }
+
+      if (line.includes('last heartbeat:')) {
         const hb = line.match(/last heartbeat:\s+(.+)/);
         if (hb && result.agents.length > 0) {
           result.agents[result.agents.length - 1].heartbeat = hb[1].trim();
         }
       }
+
     } else if (section === 'polecats') {
-      const pm = line.match(/^\s+(\S+)\s+\[(\w+)\]/);
-      if (pm) {
-        result.polecats.push({ name: pm[1], alive: pm[2] });
-      } else if (result.polecats.length > 0) {
+      // Legacy detailed block
+      const pmLegacy = line.match(/^\s+(\S+)\s+\[(\w+)\]/);
+      if (pmLegacy) {
+        result.polecats.push({ name: pmLegacy[1], alive: pmLegacy[2] });
+        continue;
+      }
+      if (result.polecats.length > 0) {
         const last = result.polecats[result.polecats.length - 1];
         const kv = line.match(/^\s+(\w+):\s+(.+)/);
-        if (kv) last[kv[1]] = kv[2].trim();
+        if (kv) { last[kv[1]] = kv[2].trim(); continue; }
       }
+
+      // New compact polecat line: "  thrembo-voice-ui-b007867c alive  #2  sgt/thrembo-voice-ui-b007867c"
+      const pm = line.match(/^\s{2,}(\S+)\s+(alive|dead)\s{2,}#?(\d+)\s{2,}(.+)$/);
+      if (pm) {
+        result.polecats.push({
+          name: pm[1],
+          alive: pm[2],
+          issue: '#' + pm[3],
+          branch: pm[4].trim(),
+        });
+      }
+
     } else if (section === 'dogs') {
       const dm = line.match(/^\s+(\S+)\s+\[(\w+)\]\s+—\s+(.+)/);
       if (dm) {
         result.dogs.push({ name: dm[1], alive: dm[2], issue: dm[3] });
+        continue;
       }
+      const dn = line.match(/^\s{2,}(\S+)\s+(alive|dead)\s{2,}(.+)$/);
+      if (dn) result.dogs.push({ name: dn[1], alive: dn[2], issue: dn[3].trim() });
+
     } else if (section === 'crew') {
       const cm = line.match(/^\s+(\S+)\s+\[(\w+)\]\s+—\s+(.+)/);
       if (cm) {
         result.crew.push({ name: cm[1], status: cm[2], detail: cm[3] });
+        continue;
       }
+      const cn = line.match(/^\s{2,}(\S+)\s+(\S+)\s{2,}(.+)$/);
+      if (cn) result.crew.push({ name: cn[1], status: cn[2], detail: cn[3].trim() });
+
     } else if (section === 'mergeQueue') {
       const mm = line.match(/^\s+(\S+)\s+—\s+(.+)/);
       if (mm) {
         result.mergeQueue.push({ name: mm[1], detail: mm[2] });
+        continue;
       }
+      const mn = line.match(/^\s{2,}(\S+)\s{2,}(.+)$/);
+      if (mn) result.mergeQueue.push({ name: mn[1], detail: mn[2].trim() });
     }
   }
+
   return result;
 }
 
