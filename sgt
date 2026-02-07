@@ -22,6 +22,10 @@ SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
+# AI backend (claude|codex)
+# Priority: CLI flags (per-run) > env SGT_AI_BACKEND > $SGT_CONFIG/settings.env > default
+SGT_SETTINGS_ENV="$SGT_CONFIG/settings.env"
+
 # ─── Helpers ──────────────────────────────────────────────────────────
 
 die()  { echo "sgt: $*" >&2; exit 1; }
@@ -55,6 +59,82 @@ _wake_refinery() {
 
 ensure_init() {
   [[ -d "$SGT_CONFIG" ]] || die "not initialized — run: sgt init"
+  # Load settings if present
+  if [[ -f "$SGT_SETTINGS_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$SGT_SETTINGS_ENV" 2>/dev/null || true
+  fi
+}
+
+_ai_backend_default() {
+  local b="${SGT_AI_BACKEND:-}"
+  if [[ -z "$b" && -f "$SGT_SETTINGS_ENV" ]]; then
+    b=$(grep -E '^SGT_AI_BACKEND=' "$SGT_SETTINGS_ENV" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
+  fi
+  b="${b:-claude}"
+  case "$b" in
+    claude|codex) echo "$b" ;;
+    *) die "invalid SGT_AI_BACKEND '$b' (expected claude|codex)" ;;
+  esac
+}
+
+_ai_cmd() {
+  # Print a command that runs the selected backend with a prompt.
+  # Usage: _ai_cmd <backend> <prompt>
+  local backend="$1" prompt="$2"
+  case "$backend" in
+    claude)
+      printf 'claude %q --dangerously-skip-permissions' "$prompt"
+      ;;
+    codex)
+      # Non-interactive agent run; allow full access like the previous claude invocation.
+      printf 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color auto %q' "$prompt"
+      ;;
+    *)
+      die "unknown backend: $backend"
+      ;;
+  esac
+}
+
+_ai_promptfile() {
+  # Run a backend using a prompt read from a file; echoes agent output to stdout.
+  # Usage: _ai_promptfile <backend> <workdir> <prompt_file>
+  local backend="$1" workdir="$2" prompt_file="$3"
+  case "$backend" in
+    claude)
+      ( cd "$workdir" && claude -p "Read $(basename "$prompt_file")." --dangerously-skip-permissions )
+      ;;
+    codex)
+      local out="$workdir/.codex-last-message.txt"
+      rm -f "$out" 2>/dev/null || true
+      # Feed the file content as stdin prompt (more reliable than shell-escaping huge text)
+      ( cd "$workdir" && codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - < "$prompt_file" >/dev/null 2>&1 ) || true
+      cat "$out" 2>/dev/null || true
+      ;;
+    *)
+      die "unknown backend: $backend"
+      ;;
+  esac
+}
+
+_ai_prompt() {
+  # Run a backend with a prompt string (non-interactive); echoes agent output to stdout.
+  # Usage: _ai_prompt <backend> <workdir> <prompt>
+  local backend="$1" workdir="$2" prompt="$3"
+  case "$backend" in
+    claude)
+      ( cd "$workdir" && claude -p "$prompt" --dangerously-skip-permissions )
+      ;;
+    codex)
+      local out="$workdir/.codex-last-message.txt"
+      rm -f "$out" 2>/dev/null || true
+      ( cd "$workdir" && printf "%s" "$prompt" | codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - >/dev/null 2>&1 ) || true
+      cat "$out" 2>/dev/null || true
+      ;;
+    *)
+      die "unknown backend: $backend"
+      ;;
+  esac
 }
 
 ensure_rig() {
@@ -112,6 +192,13 @@ list_rigs() {
 cmd_init() {
   mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs"
   touch "$SGT_LOG"
+  if [[ ! -f "$SGT_SETTINGS_ENV" ]]; then
+    cat > "$SGT_SETTINGS_ENV" <<EOF
+# sgt settings (sourced by bash)
+# Supported: SGT_AI_BACKEND=claude|codex
+SGT_AI_BACKEND=claude
+EOF
+  fi
   log_event "INIT sgt workspace at $SGT_ROOT"
   info "initialized sgt at $SGT_ROOT"
 }
@@ -196,12 +283,14 @@ cmd_sling() {
   shift
 
   local task="" convoy="" labels=() branch_prefix="sgt" auto_merge=false
+  local backend="$(_ai_backend_default)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --convoy)  convoy="$2"; shift 2 ;;
       --label)   labels+=("$2"); shift 2 ;;
       --auto-merge) auto_merge=true; shift ;;
+      --backend) backend="$2"; shift 2 ;;
       *)         task="${task:+$task }$1"; shift ;;
     esac
   done
@@ -209,6 +298,8 @@ cmd_sling() {
   [[ -n "$task" ]] || die "no task description provided"
   ensure_init
   ensure_rig "$rig"
+
+  case "$backend" in claude|codex) ;; *) die "invalid backend $backend (expected claude|codex)" ;; esac
 
   local repo rpath pname branch session_name
   repo="$(rig_repo "$rig")"
@@ -289,14 +380,15 @@ WORKTREE=$worktree
 SESSION=$session_name
 DEFAULT_BRANCH=$default_branch
 AUTO_MERGE=$auto_merge
+BACKEND=$backend
 CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
-  # ── 5. Spawn Claude Code in tmux ──
+  # ── 5. Spawn AI agent in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
@@ -733,7 +825,7 @@ _witness_loop() {
 
       # Source in subshell to avoid polluting
       local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge
-      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE)=' "$f")"
+      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND)=' "$f")"
       p_session="$SESSION"
       p_branch="$BRANCH"
       p_issue="$ISSUE"
@@ -801,6 +893,7 @@ BRANCH=$p_branch
 ISSUE=$p_issue
 PR=$pr_number
 AUTO_MERGE=$p_auto_merge
+BACKEND=${BACKEND:-$(_ai_backend_default)}
 TYPE=polecat
 QUEUED=$(date -Iseconds)
 MQSTATE
@@ -938,6 +1031,7 @@ MQSTATE
 # Re-sling an existing issue (don't create a new one)
 _resling_existing_issue() {
   local rig="$1" issue_number="$2" task="$3" repo="$4"
+  local backend="${5:-$(_ai_backend_default)}"
 
   # Security gate: verify issue has sgt-authorized label
   if ! _has_sgt_authorized "$repo" "$issue_number"; then
@@ -976,12 +1070,13 @@ WORKTREE=$worktree
 SESSION=$session_name
 DEFAULT_BRANCH=$default_branch
 AUTO_MERGE=false
+BACKEND=$backend
 CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -1030,7 +1125,7 @@ cmd_witness_stop() {
 
 # AI review: check PR diff against issue spec
 _refinery_review_pr() {
-  local repo="$1" pr="$2" issue="$3" rig="$4"
+  local repo="$1" pr="$2" issue="$3" rig="$4" backend="$5"
 
   echo "[refinery/$rig] reviewing PR #$pr..."
 
@@ -1091,9 +1186,7 @@ If rejecting, explain what's missing in 2-3 sentences before the verdict.
 REVIEWMD
 
   local review_output
-  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
-    'Read review-prompt.md. Review the PR. Be strict — only approve complete implementations.' \
-    --dangerously-skip-permissions" </dev/null 2>&1 || true)
+  review_output=$(timeout 180 bash -c "_ai_promptfile '$backend' '$review_dir' '$review_dir/review-prompt.md'" 2>/dev/null || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] PR #$pr APPROVED"
@@ -1125,7 +1218,7 @@ Closing PR and dispatching rework." 2>/dev/null || true
 
 # AI review: check dog output quality against issue spec
 _refinery_review_dog() {
-  local repo="$1" issue="$2" rig="$3" dname="$4"
+  local repo="$1" issue="$2" rig="$3" dname="$4" backend="$5"
 
   echo "[refinery/$rig] reviewing dog $dname output on issue #$issue..."
 
@@ -1178,9 +1271,7 @@ If rejecting, explain what's missing in 2-3 sentences before the verdict.
 REVIEWMD
 
   local review_output
-  review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
-    'Read dog-review-prompt.md. Review the research output quality.' \
-    --dangerously-skip-permissions" </dev/null 2>&1 || true)
+  review_output=$(timeout 180 bash -c "_ai_promptfile '$backend' '$review_dir' '$review_dir/dog-review-prompt.md'" 2>/dev/null || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] dog $dname APPROVED"
@@ -1241,8 +1332,8 @@ _refinery_loop() {
       local mqname
       mqname="$(basename "$f")"
 
-      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE)=' "$f")"
+      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -1250,6 +1341,7 @@ _refinery_loop() {
       mq_polecat="${POLECAT:-$mqname}"
       mq_auto_merge="${AUTO_MERGE:-false}"
       mq_type="${TYPE:-polecat}"
+      mq_backend="${BACKEND:-$(_ai_backend_default)}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
 
@@ -1324,7 +1416,7 @@ _refinery_loop() {
 
       # === AI REVIEW ===
       REFINERY_REJECT_REASON=""
-      if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig"; then
+      if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig" "$mq_backend"; then
         # APPROVED — merge
         echo "[refinery/$rig] merging PR #$mq_pr..."
         local merge_result
@@ -1371,11 +1463,12 @@ Please address the feedback in the next iteration." 2>/dev/null || true
         dname="$(basename "$df")"
 
         local d_session="" d_repo="" d_issue="" d_rig=""
-        eval "$(grep -E '^(SESSION|REPO|ISSUE|RIG)=' "$df")"
+        eval "$(grep -E '^(SESSION|REPO|ISSUE|RIG|BACKEND)=' "$df")"
         d_session="${SESSION:-}"
         d_repo="${REPO:-$repo}"
         d_issue="${ISSUE:-0}"
         d_rig="${RIG:-$rig}"
+        local d_backend="${BACKEND:-$(_ai_backend_default)}"
 
         # Only process dogs for this rig
         [[ "$d_rig" == "$rig" ]] || continue
@@ -1396,7 +1489,7 @@ Please address the feedback in the next iteration." 2>/dev/null || true
         fi
 
         REFINERY_REJECT_REASON=""
-        if _refinery_review_dog "$d_repo" "$d_issue" "$rig" "$dname"; then
+        if _refinery_review_dog "$d_repo" "$d_issue" "$rig" "$dname" "$d_backend"; then
           # APPROVED — close issue, notify mayor
           gh issue close "$d_issue" --repo "$d_repo" 2>/dev/null || true
           echo "[refinery/$rig] dog $dname approved and issue #$d_issue closed"
@@ -1461,7 +1554,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "claude \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
+              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
 
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
@@ -2077,8 +2170,9 @@ Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
 After deciding, report your actions: sgt mayor notify "<summary of what you did>"
 MAYORMD
 
-      if timeout 300 bash -c "cd '$mayor_workspace' && claude --dangerously-skip-permissions -p \
-        'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" \
+      local backend="$(_ai_backend_default)"
+
+      if timeout 300 bash -c "_ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
@@ -2174,13 +2268,19 @@ cmd_dog() {
   shift
 
   local task=""
+  local backend="$(_ai_backend_default)"
   while [[ $# -gt 0 ]]; do
-    task="${task:+$task }$1"; shift
+    case "$1" in
+      --backend) backend="$2"; shift 2 ;;
+      *) task="${task:+$task }$1"; shift ;;
+    esac
   done
 
   [[ -n "$task" ]] || die "no task description provided"
   ensure_init
   ensure_rig "$rig"
+
+  case "$backend" in claude|codex) ;; *) die "invalid backend $backend (expected claude|codex)" ;; esac
 
   local repo rpath dname session_name
   repo="$(rig_repo "$rig")"
@@ -2270,13 +2370,14 @@ ISSUE_URL=$issue_url
 SESSION=$session_name
 WORKSPACE=$dog_workspace
 CREATED=$(date -Iseconds)
+BACKEND=$backend
 STATUS=running
 DSTATE
 
   # Spawn in tmux
   info "spawning dog $dname..."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "claude \"Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
 
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
@@ -2470,7 +2571,7 @@ cmd_crew_wake() {
   fi
 
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "claude \"Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes.\" --dangerously-skip-permissions; echo '[SGT] crew exited'"
+    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes." ); echo '[SGT] crew exited'"
 
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
@@ -2957,6 +3058,7 @@ Core Commands:
     --convoy <name>               Add to milestone
     --label <label>               Add label (repeatable)
     --auto-merge                  Auto-merge PR on CI pass
+    --backend <claude|codex>      Select AI backend for this polecat (default: SGT_AI_BACKEND)
   status                        Show all agents, polecats, dogs, crew
   peek <target>                 View output (polecat, witness/<rig>, refinery/<rig>,
                                 deacon, mayor, dog/<name>, crew/<name>)
@@ -2975,7 +3077,7 @@ Agent Commands:
   nudge <target> <message>      Send message to agent's tmux session
 
 Dogs (non-coding helpers):
-  dog <rig> <task>              Dispatch research/analysis task
+  dog <rig> <task> [--backend <claude|codex>]  Dispatch research/analysis task
   dog list                      List active dogs
   dog sweep                     Clean up completed dogs
 
@@ -3023,6 +3125,8 @@ Environment:
   SGT_ROOT              Workspace root (default: ~/sgt)
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
+  SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
+  NO_COLOR              Disable ANSI color output
 
 Examples:
   sgt init
