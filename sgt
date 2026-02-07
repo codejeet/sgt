@@ -2083,6 +2083,34 @@ HEADER
   echo "$briefing"
 }
 
+_mayor_wake_summary() {
+  local reason="$1"
+  local summary=""
+
+  if [[ -z "$reason" || "$reason" == "periodic" ]]; then
+    echo ""
+    return 0
+  fi
+
+  if [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+):(.+)$ ]]; then
+    summary="merged PR #${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]}, rig ${BASH_REMATCH[3]})"
+  elif [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+)$ ]]; then
+    summary="merged PR #${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]})"
+  elif [[ "$reason" =~ ^dog-approved:([^:]+):#([0-9]+):(.+)$ ]]; then
+    summary="dog approved ${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]}, rig ${BASH_REMATCH[3]})"
+  elif [[ "$reason" =~ ^dog-approved:([^:]+):#([0-9]+)$ ]]; then
+    summary="dog approved ${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]})"
+  elif [[ "$reason" =~ ^orphan-pr:#([0-9]+):(.+)$ ]]; then
+    summary="orphan PR #${BASH_REMATCH[1]} queued (rig ${BASH_REMATCH[2]})"
+  elif [[ "$reason" =~ ^orphan-pr:#([0-9]+)$ ]]; then
+    summary="orphan PR #${BASH_REMATCH[1]} queued"
+  else
+    summary="wake: $reason"
+  fi
+
+  echo "$summary"
+}
+
 _mayor_loop() {
   set +e  # Mayor loop must never exit on errors
   log_event "MAYOR_START"
@@ -2115,6 +2143,14 @@ _mayor_loop() {
     local notify_rigger=""
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    if [[ "$wake_reason" != "periodic" ]]; then
+      local wake_summary
+      wake_summary=$(_mayor_wake_summary "$wake_reason")
+      if [[ -n "$wake_summary" ]]; then
+        _mayor_notify_rigger "$wake_summary"
+      fi
+    fi
 
     # === 1. Check agent health ===
     for agent in daemon deacon; do

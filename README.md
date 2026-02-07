@@ -20,7 +20,7 @@ SGT replaces that with a simpler mental model: GitHub Issues/PRs + tmux + `gh`.
 
 ## OpenClaw notifications
 
-SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR (and when mayor reports).
+SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued); periodic all-clear checks stay quiet.
 
 1. Create a notification config at `$SGT_ROOT/.sgt/notify.json` (default `~/sgt/.sgt/notify.json`).
 2. Set routing options: `channel` (default `last`), optional `to`, optional `reply_to` (or `reply-to`).
