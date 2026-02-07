@@ -1,16 +1,15 @@
-# SGT Web UI Control Panel
+# SGT Web UI (Control Panel)
 
-Real-time dashboard for monitoring and managing SGT agents, workers, rigs, logs, and dispatching tasks.
+SGT Web UI is a small, dependency-light **real-time dashboard** for SGT (Simple GitHub Gastown): monitor agents/polecats, tail logs, and dispatch new work.
 
-## Setup
+## Quick start
 
 ```bash
 cd web
 npm install
 npm start
+# open http://localhost:4747
 ```
-
-The UI will be available at `http://localhost:4747`.
 
 ## Configuration
 
@@ -24,27 +23,66 @@ Environment variables:
 
 ## Features
 
-- **Dashboard** — Live agent status, polecat overview, merge queue summary
-- **Higher density mode** — Toggle compact layout (`c`) and collapsible cards (persisted in localStorage)
+- **Dashboard** — Live agent status (incl. mayor), polecat overview, merge queue summary
+- **Polecats** — Active polecats with rig/issue/branch/PR; click to peek tmux output
+- **Logs** — Tail `sgt.log` (auto-scroll + realtime updates)
+- **Realtime WS** — Status push (poll every 3s) + log stream; reconnect/backoff + heartbeat + stale indicators
+- **High density** — Compact mode toggle (`c`), multi-column rows, collapsible cards (persisted)
 - **Keyboard shortcuts** — `1..7` switch panels, `c` toggles compact, `Esc` closes peek modal
-- **Realtime robustness** — WS heartbeat (ping/pong), exponential reconnect backoff + stale indicators + last-updated timestamps
-- **Polecats panel** — All active polecats with status, rig, issue, branch, PR info. Click to peek at tmux output
-- **Dogs panel** — Active dogs with status
-- **Rigs** — Registered rigs with repo links, witness/refinery status, polecat counts
-- **Sling** — Dispatch new polecats (pick rig, enter task, optional labels/convoy) or dogs
-- **Log viewer** — Real-time tailing of sgt.log with auto-scroll
-- **Merge Queue** — Pending PRs in refinery queue
+- **Dispatch** — Sling polecats / dogs from the UI
+
+## Theme
+
+The UI uses a **dark triadic “modern color wheel” theme** with accents used sparingly:
+- `--accentA` (Cyan) `#22D3EE`
+- `--accentB` (Amber) `#F59E0B`
+- `--accentC` (Lime) `#84CC16`
 
 ## Screenshots
 
-- Before: `web/screenshots/before-dashboard.png`
-- After:  `web/screenshots/after-dashboard.png`
+Stored under `web/docs/screenshots/`:
+
+- Before (baseline): `web/docs/screenshots/before-triadic-dashboard.png`
+- After (triadic theme):
+  - `web/docs/screenshots/after-triadic-dashboard.png`
+  - `web/docs/screenshots/after-triadic-polecats.png`
+  - `web/docs/screenshots/after-triadic-logs.png`
+
+## Troubleshooting
+
+- **Port already in use (EADDRINUSE)**
+  - Find/kill the process: `ss -ltnp | grep ':4747'`
+  - Or run on a different port: `SGT_WEB_PORT=4750 npm start`
+
+- **WebSocket shows Disconnected / stale timestamps**
+  - The UI will reconnect automatically with backoff.
+  - If the server is down, restart it: `npm start`.
+
+- **Missing SGT binary / wrong SGT_ROOT**
+  - Set `SGT_ROOT` and/or `SGT_BIN` explicitly, e.g.:
+    - `SGT_ROOT=~/sgt SGT_BIN=~/sgt/sgt npm start`
+
+- **Permissions**
+  - The server shells out to `sgt` and reads `~/sgt/sgt.log`. Ensure the user running the web server can access those files.
+
+## Reasoning behind the project
+
+SGT exists because the original **Gas Town** tooling became bloated and fragile:
+- “Beads” (naming/prefix conventions) were easy to break and hard to recover.
+- Persistence and state management drifted over time.
+
+SGT replaces that complexity with a simpler, more reliable model:
+- **GitHub Issues + PRs** as the source of truth
+- **tmux** for worker lifecycle/output
+- **gh** CLI for consistent operations
+
+The goal is higher reliability, a simpler mental model, and easier ops.
 
 ## Architecture
 
-- **Backend**: Node.js + Express. Reads SGT state from `~/.sgt/` directory and shells out to `sgt` CLI for actions.
-- **Frontend**: Single HTML page with vanilla JS (no framework).
-- **Real-time**: WebSocket pushes status updates (polled every 3s) and new log lines (file watcher), with heartbeat + reconnect/backoff.
+- **Backend**: Node.js + Express. Shells out to `sgt` CLI for actions; tails `~/sgt/sgt.log`.
+- **Frontend**: Single HTML page with vanilla JS.
+- **Real-time**: WebSocket pushes status and log deltas; includes heartbeat + reconnect/backoff.
 
 ## API Endpoints
 
