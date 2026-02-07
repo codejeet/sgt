@@ -2826,6 +2826,18 @@ You are polecat \`$pname\`, an ephemeral coding agent.
 CLMD
 }
 
+# ─── Web UI ───────────────────────────────────────────────────────────
+
+cmd_web() {
+  ensure_init
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local web_bin="$script_dir/sgt-web"
+  [[ -x "$web_bin" ]] || die "sgt-web not found at $web_bin"
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the web UI"
+  SGT_ROOT="$SGT_ROOT" exec python3 "$web_bin" "$@"
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 cmd_help() {
@@ -2886,6 +2898,9 @@ Communication:
   convoy create <name> <repo>   Create a convoy (milestone)
   convoy status <repo>          Show convoy progress
 
+Web UI:
+  web [--port PORT] [--host HOST]  Start web UI control panel (default: :7777)
+
 Diagnostics:
   log [lines]                   Show recent log entries
   trail [lines]                 Show recent activity feed
@@ -2919,6 +2934,8 @@ Examples:
   sgt molecule init                             # Create templates
   sgt molecule run feature myapp "User dashboard"  # Multi-step workflow
   sgt escalation init                           # Set up severity levels
+  sgt web                                        # Start web UI on :7777
+  sgt web --port 8080                             # Custom port
   sgt status
   sgt peek mayor                                # Check mayor decisions
   sgt peek dog/dog-a1b2c3d4
@@ -3071,6 +3088,7 @@ main() {
         *)      die "unknown mail command: $sub (try: send, check)" ;;
       esac
       ;;
+    web)            cmd_web "$@" ;;
     log)            cmd_log "$@" ;;
     trail)          cmd_trail "$@" ;;
     version|--version|-v) echo "sgt $SGT_VERSION" ;;

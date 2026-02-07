@@ -1,0 +1,1527 @@
+#!/usr/bin/env python3
+"""sgt-web — Web UI control panel for SGT (Simple GitHub Gastown).
+
+A real-time dashboard for monitoring agents, workers, rigs, logs,
+and dispatching tasks. Uses only the Python standard library.
+
+Usage:
+    sgt-web [--port PORT] [--host HOST] [--sgt-root PATH]
+"""
+
+import argparse
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+# ── Configuration ───────────────────────────────────────────────────
+
+SGT_ROOT = Path(os.environ.get("SGT_ROOT", Path.home() / "sgt"))
+SGT_CONFIG = SGT_ROOT / ".sgt"
+SGT_RIGS = SGT_CONFIG / "rigs"
+SGT_POLECATS = SGT_CONFIG / "polecats"
+SGT_AGENTS = SGT_CONFIG / "agents"
+SGT_LOG = SGT_ROOT / "sgt.log"
+SGT_DOGS = SGT_CONFIG / "dogs"
+SGT_CREW = SGT_CONFIG / "crew"
+SGT_MERGE_QUEUE = SGT_CONFIG / "merge-queue"
+SGT_DAEMON_PID = SGT_CONFIG / "daemon.pid"
+SGT_DEACON_HEARTBEAT = SGT_CONFIG / "deacon-heartbeat.json"
+SGT_MOLECULES = SGT_ROOT / "molecules"
+SGT_ESCALATION = SGT_CONFIG / "escalation.json"
+
+# SSE clients
+_sse_clients: list[queue.Queue] = []
+_sse_lock = threading.Lock()
+
+
+# ── State Reader ────────────────────────────────────────────────────
+
+def parse_state_file(path: Path) -> dict:
+    """Parse a bash key=value state file into a dict."""
+    data = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, _, val = line.partition("=")
+                val = val.strip('"').strip("'")
+                data[key.strip()] = val
+    except (OSError, UnicodeDecodeError):
+        pass
+    return data
+
+
+def get_rigs() -> list[dict]:
+    """List all registered rigs."""
+    rigs = []
+    if not SGT_RIGS.is_dir():
+        return rigs
+    for f in sorted(SGT_RIGS.iterdir()):
+        if f.is_file():
+            repo_url = f.read_text().strip()
+            owner_repo = repo_url.replace("https://github.com/", "")
+            rigs.append({
+                "name": f.name,
+                "repo": repo_url,
+                "owner_repo": owner_repo,
+                "path": str(SGT_ROOT / "rigs" / f.name),
+            })
+    return rigs
+
+
+def get_polecats() -> list[dict]:
+    """List all polecats (coding workers) with state."""
+    polecats = []
+    if not SGT_POLECATS.is_dir():
+        return polecats
+    for f in sorted(SGT_POLECATS.iterdir()):
+        if f.is_file():
+            state = parse_state_file(f)
+            state["name"] = f.name
+            # Check if tmux session is alive
+            state["session_alive"] = _tmux_session_alive(f"sgt-{f.name}")
+            polecats.append(state)
+    return polecats
+
+
+def get_dogs() -> list[dict]:
+    """List all dogs (non-coding workers)."""
+    dogs = []
+    if not SGT_DOGS.is_dir():
+        return dogs
+    for f in sorted(SGT_DOGS.iterdir()):
+        if f.is_file():
+            state = parse_state_file(f)
+            state["name"] = f.name
+            state["session_alive"] = _tmux_session_alive(f"sgt-dog-{f.name}")
+            dogs.append(state)
+    return dogs
+
+
+def get_crew() -> list[dict]:
+    """List all crew members (persistent agents)."""
+    crew = []
+    if not SGT_CREW.is_dir():
+        return crew
+    for f in sorted(SGT_CREW.iterdir()):
+        if f.is_file():
+            state = parse_state_file(f)
+            state["name"] = f.name
+            crew.append(state)
+    return crew
+
+
+def get_merge_queue() -> list[dict]:
+    """List merge queue entries."""
+    entries = []
+    if not SGT_MERGE_QUEUE.is_dir():
+        return entries
+    for f in sorted(SGT_MERGE_QUEUE.iterdir()):
+        if f.is_file():
+            state = parse_state_file(f)
+            state["name"] = f.name
+            entries.append(state)
+    return entries
+
+
+def get_agents() -> dict:
+    """Get status of system agents (daemon, deacon, witnesses, refineries, mayor)."""
+    agents = {}
+
+    # Daemon
+    daemon_running = False
+    daemon_pid = None
+    if SGT_DAEMON_PID.exists():
+        try:
+            daemon_pid = int(SGT_DAEMON_PID.read_text().strip())
+            os.kill(daemon_pid, 0)
+            daemon_running = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    agents["daemon"] = {"running": daemon_running, "pid": daemon_pid}
+
+    # Deacon heartbeat
+    deacon = {"running": False, "heartbeat": None}
+    if SGT_DEACON_HEARTBEAT.exists():
+        try:
+            hb = json.loads(SGT_DEACON_HEARTBEAT.read_text())
+            deacon["heartbeat"] = hb
+            # Consider alive if heartbeat < 5 min old
+            ts = hb.get("timestamp", "")
+            if ts:
+                hb_time = datetime.fromisoformat(ts)
+                age = (datetime.now(timezone.utc) - hb_time.replace(tzinfo=timezone.utc)).total_seconds()
+                deacon["running"] = age < 300
+                deacon["age_seconds"] = int(age)
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+    agents["deacon"] = deacon
+
+    # Witnesses and refineries (tmux sessions)
+    for rig in get_rigs():
+        name = rig["name"]
+        agents[f"witness/{name}"] = {
+            "running": _tmux_session_alive(f"sgt-witness-{name}"),
+            "type": "witness",
+            "rig": name,
+        }
+        agents[f"refinery/{name}"] = {
+            "running": _tmux_session_alive(f"sgt-refinery-{name}"),
+            "type": "refinery",
+            "rig": name,
+        }
+
+    # Mayor
+    agents["mayor"] = {"running": _tmux_session_alive("sgt-mayor")}
+
+    return agents
+
+
+def get_log(lines: int = 50) -> list[str]:
+    """Get recent log entries."""
+    if not SGT_LOG.exists():
+        return []
+    try:
+        all_lines = SGT_LOG.read_text().splitlines()
+        return all_lines[-lines:]
+    except OSError:
+        return []
+
+
+def get_molecules() -> list[dict]:
+    """List available workflow molecules."""
+    molecules = []
+    if not SGT_MOLECULES.is_dir():
+        return molecules
+    for f in sorted(SGT_MOLECULES.iterdir()):
+        if f.suffix in (".yml", ".yaml") and f.is_file():
+            molecules.append({
+                "name": f.stem,
+                "file": f.name,
+                "content": f.read_text(),
+            })
+    return molecules
+
+
+def get_escalation() -> dict | None:
+    """Get escalation config."""
+    if not SGT_ESCALATION.exists():
+        return None
+    try:
+        return json.loads(SGT_ESCALATION.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def get_full_status() -> dict:
+    """Build complete system snapshot."""
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "rigs": get_rigs(),
+        "polecats": get_polecats(),
+        "dogs": get_dogs(),
+        "crew": get_crew(),
+        "merge_queue": get_merge_queue(),
+        "agents": get_agents(),
+        "molecules": get_molecules(),
+        "escalation": get_escalation(),
+    }
+
+
+def _tmux_session_alive(name: str) -> bool:
+    """Check if a tmux session exists."""
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", name],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _peek_session(name: str, lines: int = 80) -> str:
+    """Capture recent output from a tmux session."""
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", name, "-p", "-S", f"-{lines}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        return f"(session '{name}' not available)"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "(tmux not available)"
+
+
+# ── SGT Command Dispatch ───────────────────────────────────────────
+
+def run_sgt(*args: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Run an sgt CLI command and return (returncode, stdout, stderr)."""
+    sgt_bin = Path(__file__).parent / "sgt"
+    try:
+        result = subprocess.run(
+            [str(sgt_bin)] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "SGT_ROOT": str(SGT_ROOT)},
+        )
+        return result.returncode, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return 1, "", "command timed out"
+    except FileNotFoundError:
+        return 1, "", "sgt binary not found"
+
+
+# ── SSE (Server-Sent Events) ──────────────────────────────────────
+
+def _broadcast_event(event_type: str, data: dict):
+    """Send an SSE event to all connected clients."""
+    payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+    with _sse_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
+
+
+def _status_broadcaster():
+    """Background thread: broadcast status updates every 3 seconds."""
+    prev_hash = None
+    while True:
+        try:
+            status = get_full_status()
+            cur_hash = json.dumps(status, sort_keys=True)
+            if cur_hash != prev_hash:
+                _broadcast_event("status", status)
+                prev_hash = cur_hash
+            time.sleep(3)
+        except Exception:
+            time.sleep(5)
+
+
+# ── HTTP Handler ───────────────────────────────────────────────────
+
+class SGTHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for the SGT web UI."""
+
+    def log_message(self, format, *args):
+        # Quieter logging
+        pass
+
+    def _send_json(self, data: dict, status: int = 200):
+        body = json.dumps(data, indent=2).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, html: str):
+        body = html.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_sse(self):
+        """Stream server-sent events."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        q: queue.Queue = queue.Queue(maxsize=100)
+        with _sse_lock:
+            _sse_clients.append(q)
+
+        try:
+            # Send initial status immediately
+            status = get_full_status()
+            initial = f"event: status\ndata: {json.dumps(status)}\n\n"
+            self.wfile.write(initial.encode())
+            self.wfile.flush()
+
+            while True:
+                try:
+                    payload = q.get(timeout=15)
+                    self.wfile.write(payload.encode())
+                    self.wfile.flush()
+                except queue.Empty:
+                    # Send keepalive
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            with _sse_lock:
+                if q in _sse_clients:
+                    _sse_clients.remove(q)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/":
+            self._send_html(DASHBOARD_HTML)
+        elif path == "/api/status":
+            self._send_json(get_full_status())
+        elif path == "/api/rigs":
+            self._send_json({"rigs": get_rigs()})
+        elif path == "/api/polecats":
+            self._send_json({"polecats": get_polecats()})
+        elif path == "/api/dogs":
+            self._send_json({"dogs": get_dogs()})
+        elif path == "/api/crew":
+            self._send_json({"crew": get_crew()})
+        elif path == "/api/agents":
+            self._send_json({"agents": get_agents()})
+        elif path == "/api/merge-queue":
+            self._send_json({"merge_queue": get_merge_queue()})
+        elif path == "/api/log":
+            params = parse_qs(parsed.query)
+            lines = int(params.get("lines", ["50"])[0])
+            self._send_json({"log": get_log(lines)})
+        elif path == "/api/molecules":
+            self._send_json({"molecules": get_molecules()})
+        elif path.startswith("/api/peek/"):
+            target = path[len("/api/peek/"):]
+            # target can be: <polecat>, witness/<rig>, refinery/<rig>, mayor, deacon, dog/<name>
+            if "/" in target:
+                session_name = f"sgt-{target.replace('/', '-')}"
+            else:
+                session_name = f"sgt-{target}"
+            output = _peek_session(session_name)
+            self._send_json({"target": target, "session": session_name, "output": output})
+        elif path == "/events":
+            self._send_sse()
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len) if content_len else b""
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid JSON"}, 400)
+            return
+
+        if path == "/api/sling":
+            rig = data.get("rig", "")
+            task = data.get("task", "")
+            if not rig or not task:
+                self._send_json({"error": "rig and task are required"}, 400)
+                return
+            args = ["sling", rig, task]
+            if data.get("auto_merge"):
+                args.append("--auto-merge")
+            if data.get("label"):
+                args.extend(["--label", data["label"]])
+            rc, stdout, stderr = run_sgt(*args)
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        elif path == "/api/dog":
+            rig = data.get("rig", "")
+            task = data.get("task", "")
+            if not rig or not task:
+                self._send_json({"error": "rig and task are required"}, 400)
+                return
+            rc, stdout, stderr = run_sgt("dog", rig, task)
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        elif path == "/api/nuke":
+            target = data.get("target", "")
+            if not target:
+                self._send_json({"error": "target is required"}, 400)
+                return
+            rc, stdout, stderr = run_sgt("nuke", target)
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        elif path == "/api/sweep":
+            rc, stdout, stderr = run_sgt("sweep")
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        elif path == "/api/system":
+            action = data.get("action", "")
+            if action == "up":
+                rc, stdout, stderr = run_sgt("up")
+            elif action == "down":
+                rc, stdout, stderr = run_sgt("down")
+            elif action == "daemon-start":
+                rc, stdout, stderr = run_sgt("daemon", "start")
+            elif action == "daemon-stop":
+                rc, stdout, stderr = run_sgt("daemon", "stop")
+            elif action == "wake-mayor":
+                reason = data.get("reason", "web-ui")
+                rc, stdout, stderr = run_sgt("wake-mayor", reason)
+            else:
+                self._send_json({"error": f"unknown action: {action}"}, 400)
+                return
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        elif path == "/api/molecule/run":
+            molecule = data.get("molecule", "")
+            rig = data.get("rig", "")
+            description = data.get("description", "")
+            if not molecule or not rig or not description:
+                self._send_json({"error": "molecule, rig, and description are required"}, 400)
+                return
+            rc, stdout, stderr = run_sgt("molecule", "run", molecule, rig, description)
+            self._send_json({
+                "ok": rc == 0,
+                "stdout": stdout,
+                "stderr": stderr,
+            }, 200 if rc == 0 else 500)
+
+        else:
+            self.send_error(404)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+
+# ── Dashboard HTML ─────────────────────────────────────────────────
+
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGT Control Panel</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --purple: #bc8cff;
+  --cyan: #39d2c0;
+  --radius: 8px;
+  --font: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Layout ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header .version {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.connection-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  transition: background 0.3s;
+}
+.connection-dot.connected { background: var(--green); }
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 16px 20px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+@media (max-width: 1000px) {
+  .main { grid-template-columns: 1fr; }
+}
+
+/* ── Cards ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.card-header .count {
+  background: var(--border);
+  color: var(--text-dim);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.card-body {
+  padding: 10px 14px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.card-body::-webkit-scrollbar { width: 6px; }
+.card-body::-webkit-scrollbar-track { background: transparent; }
+.card-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.card.full-width {
+  grid-column: 1 / -1;
+}
+
+/* ── Status badges ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.badge.running { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge.stopped { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge.idle    { background: rgba(210,153,34,0.15); color: var(--orange); }
+.badge.queued  { background: rgba(88,166,255,0.15); color: var(--accent); }
+
+.dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot.on  { background: var(--green); }
+.dot.off { background: var(--red); }
+
+/* ── Row items ── */
+.item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(48,54,61,0.5);
+}
+.item-row:last-child { border-bottom: none; }
+
+.item-name {
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+}
+.item-name:hover { text-decoration: underline; }
+
+.item-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.item-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* ── Agent grid ── */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.agent-tile {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-tile .agent-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.agent-tile .agent-status {
+  font-size: 11px;
+}
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:active { transform: scale(0.97); }
+.btn.primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+.btn.primary:hover { opacity: 0.9; color: var(--bg); }
+.btn.danger { border-color: var(--red); color: var(--red); }
+.btn.danger:hover { background: rgba(248,81,73,0.15); }
+.btn.success { border-color: var(--green); color: var(--green); }
+.btn.success:hover { background: rgba(63,185,80,0.15); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Forms ── */
+.dispatch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.form-row label {
+  width: 70px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+input, select, textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+textarea { resize: vertical; min-height: 50px; }
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.checkbox-row input[type=checkbox] {
+  flex: 0;
+  width: 14px;
+  height: 14px;
+}
+
+/* ── Log viewer ── */
+.log-viewer {
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-dim);
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+/* ── Peek modal ── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 90%;
+  max-width: 900px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-body pre {
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+
+/* ── Toast notifications ── */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12px;
+  max-width: 350px;
+  animation: slideIn 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toast.success { border-left: 3px solid var(--green); }
+.toast.error   { border-left: 3px solid var(--red); }
+
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+
+/* ── Empty state ── */
+.empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 20px 0;
+  text-align: center;
+}
+
+/* ── Summary bar ── */
+.summary-bar {
+  display: flex;
+  gap: 16px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.summary-value {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 14px;
+}
+.tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>SGT Control Panel <span class="version">v0.5.0</span></h1>
+  <div class="header-actions">
+    <div class="connection-dot" id="connDot" title="SSE disconnected"></div>
+    <button class="btn success" onclick="systemAction('up')" title="Start all agents">Up</button>
+    <button class="btn danger" onclick="systemAction('down')" title="Stop all agents">Down</button>
+    <button class="btn" onclick="systemAction('wake-mayor')" title="Wake mayor">Wake Mayor</button>
+  </div>
+</div>
+
+<div class="summary-bar" id="summaryBar">
+  <div class="summary-item">Rigs: <span class="summary-value" id="sumRigs">-</span></div>
+  <div class="summary-item">Polecats: <span class="summary-value" id="sumPolecats">-</span></div>
+  <div class="summary-item">Dogs: <span class="summary-value" id="sumDogs">-</span></div>
+  <div class="summary-item">Crew: <span class="summary-value" id="sumCrew">-</span></div>
+  <div class="summary-item">Merge Queue: <span class="summary-value" id="sumQueue">-</span></div>
+  <div class="summary-item">Agents: <span class="summary-value" id="sumAgents">-</span></div>
+  <div class="summary-item" style="margin-left:auto">Updated: <span class="summary-value" id="sumTime">-</span></div>
+</div>
+
+<div class="main">
+
+  <!-- Agents -->
+  <div class="card">
+    <div class="card-header">
+      System Agents
+      <span class="count" id="agentCount">0</span>
+    </div>
+    <div class="card-body">
+      <div class="agent-grid" id="agentGrid"></div>
+    </div>
+  </div>
+
+  <!-- Rigs -->
+  <div class="card">
+    <div class="card-header">
+      Rigs
+      <span class="count" id="rigCount">0</span>
+    </div>
+    <div class="card-body" id="rigList"></div>
+  </div>
+
+  <!-- Polecats (coding workers) -->
+  <div class="card">
+    <div class="card-header">
+      Polecats (Coding Workers)
+      <span class="count" id="polecatCount">0</span>
+    </div>
+    <div class="card-body" id="polecatList"></div>
+  </div>
+
+  <!-- Dogs (non-coding workers) -->
+  <div class="card">
+    <div class="card-header">
+      Dogs (Research Workers)
+      <span class="count" id="dogCount">0</span>
+    </div>
+    <div class="card-body" id="dogList"></div>
+  </div>
+
+  <!-- Merge Queue -->
+  <div class="card">
+    <div class="card-header">
+      Merge Queue
+      <span class="count" id="queueCount">0</span>
+    </div>
+    <div class="card-body" id="queueList"></div>
+  </div>
+
+  <!-- Crew -->
+  <div class="card">
+    <div class="card-header">
+      Crew (Persistent Agents)
+      <span class="count" id="crewCount">0</span>
+    </div>
+    <div class="card-body" id="crewList"></div>
+  </div>
+
+  <!-- Dispatch -->
+  <div class="card">
+    <div class="card-header">Dispatch Task</div>
+    <div class="card-body">
+      <div class="tabs" id="dispatchTabs">
+        <div class="tab active" data-tab="sling">Sling (Code)</div>
+        <div class="tab" data-tab="dog">Dog (Research)</div>
+        <div class="tab" data-tab="molecule">Molecule (Workflow)</div>
+      </div>
+
+      <div class="tab-panel active" id="tab-sling" style="padding-top:10px;">
+        <div class="dispatch-form">
+          <div class="form-row">
+            <label>Rig</label>
+            <select id="slingRig"></select>
+          </div>
+          <div class="form-row">
+            <label>Task</label>
+            <textarea id="slingTask" placeholder="Describe the task..."></textarea>
+          </div>
+          <div class="form-row">
+            <label>Label</label>
+            <input id="slingLabel" placeholder="(optional)">
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="slingAutoMerge">
+            <label for="slingAutoMerge">Auto-merge on approval</label>
+          </div>
+          <button class="btn primary" onclick="dispatch('sling')">Sling</button>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="tab-dog" style="padding-top:10px;">
+        <div class="dispatch-form">
+          <div class="form-row">
+            <label>Rig</label>
+            <select id="dogRig"></select>
+          </div>
+          <div class="form-row">
+            <label>Task</label>
+            <textarea id="dogTask" placeholder="Describe the research task..."></textarea>
+          </div>
+          <button class="btn primary" onclick="dispatch('dog')">Send Dog</button>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="tab-molecule" style="padding-top:10px;">
+        <div class="dispatch-form">
+          <div class="form-row">
+            <label>Molecule</label>
+            <select id="molSelect"></select>
+          </div>
+          <div class="form-row">
+            <label>Rig</label>
+            <select id="molRig"></select>
+          </div>
+          <div class="form-row">
+            <label>Description</label>
+            <textarea id="molDesc" placeholder="Describe what to build..."></textarea>
+          </div>
+          <button class="btn primary" onclick="dispatch('molecule')">Run Molecule</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card full-width">
+    <div class="card-header">
+      Activity Log
+      <div>
+        <button class="btn" onclick="refreshLog(100)">100 lines</button>
+        <button class="btn" onclick="refreshLog(500)">500 lines</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="log-viewer" id="logViewer"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Peek Modal -->
+<div class="modal-backdrop" id="peekModal" style="display:none" onclick="closePeek(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="peekTitle">Session Output</span>
+      <button class="btn" onclick="document.getElementById('peekModal').style.display='none'">Close</button>
+    </div>
+    <div class="modal-body">
+      <pre id="peekOutput"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ── State ──
+let state = {};
+let connected = false;
+
+// ── SSE Connection ──
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.addEventListener('status', (e) => {
+    state = JSON.parse(e.data);
+    render();
+    setConnected(true);
+  });
+  es.onopen = () => setConnected(true);
+  es.onerror = () => {
+    setConnected(false);
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+function setConnected(val) {
+  connected = val;
+  const dot = document.getElementById('connDot');
+  dot.className = 'connection-dot' + (val ? ' connected' : '');
+  dot.title = val ? 'Connected (live)' : 'Disconnected';
+}
+
+// ── Render ──
+function render() {
+  renderSummary();
+  renderAgents();
+  renderRigs();
+  renderPolecats();
+  renderDogs();
+  renderQueue();
+  renderCrew();
+  renderLog();
+  populateSelects();
+}
+
+function renderSummary() {
+  const s = state;
+  document.getElementById('sumRigs').textContent = (s.rigs || []).length;
+  document.getElementById('sumPolecats').textContent = (s.polecats || []).length;
+  document.getElementById('sumDogs').textContent = (s.dogs || []).length;
+  document.getElementById('sumCrew').textContent = (s.crew || []).length;
+  document.getElementById('sumQueue').textContent = (s.merge_queue || []).length;
+  const agents = s.agents || {};
+  const running = Object.values(agents).filter(a => a.running).length;
+  document.getElementById('sumAgents').textContent = `${running}/${Object.keys(agents).length}`;
+  if (s.timestamp) {
+    const d = new Date(s.timestamp);
+    document.getElementById('sumTime').textContent = d.toLocaleTimeString();
+  }
+}
+
+function renderAgents() {
+  const agents = state.agents || {};
+  const grid = document.getElementById('agentGrid');
+  const keys = Object.keys(agents);
+  document.getElementById('agentCount').textContent = keys.length;
+
+  if (!keys.length) {
+    grid.innerHTML = '<div class="empty">No agents configured</div>';
+    return;
+  }
+
+  grid.innerHTML = keys.map(k => {
+    const a = agents[k];
+    const running = a.running;
+    const extra = [];
+    if (a.pid) extra.push(`PID ${a.pid}`);
+    if (a.age_seconds !== undefined) extra.push(`${Math.round(a.age_seconds)}s ago`);
+    if (a.rig) extra.push(a.rig);
+
+    return `<div class="agent-tile">
+      <div class="agent-name"><span class="dot ${running ? 'on' : 'off'}"></span> ${esc(k)}</div>
+      <div class="agent-status">${running
+        ? '<span class="badge running">running</span>'
+        : '<span class="badge stopped">stopped</span>'}</div>
+      ${extra.length ? `<div class="item-meta">${esc(extra.join(' · '))}</div>` : ''}
+      ${running ? `<button class="btn" onclick="peek('${esc(k)}')" style="margin-top:4px;font-size:10px">Peek</button>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderRigs() {
+  const rigs = state.rigs || [];
+  document.getElementById('rigCount').textContent = rigs.length;
+  const el = document.getElementById('rigList');
+  if (!rigs.length) {
+    el.innerHTML = '<div class="empty">No rigs registered</div>';
+    return;
+  }
+  el.innerHTML = rigs.map(r => `
+    <div class="item-row">
+      <div>
+        <span class="item-name" onclick="window.open('${esc(r.repo)}')">${esc(r.name)}</span>
+        <div class="item-meta">${esc(r.owner_repo)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderPolecats() {
+  const pcs = state.polecats || [];
+  document.getElementById('polecatCount').textContent = pcs.length;
+  const el = document.getElementById('polecatList');
+  if (!pcs.length) {
+    el.innerHTML = '<div class="empty">No active polecats</div>';
+    return;
+  }
+  el.innerHTML = pcs.map(p => {
+    const alive = p.session_alive;
+    const status = p.STATUS || 'unknown';
+    return `<div class="item-row">
+      <div>
+        <span class="item-name" onclick="peek('${esc(p.name)}')">${esc(p.name)}</span>
+        <div class="item-meta">
+          ${p.RIG ? `rig: ${esc(p.RIG)}` : ''}
+          ${p.ISSUE ? ` · issue: #${esc(p.ISSUE)}` : ''}
+          ${p.BRANCH ? ` · ${esc(p.BRANCH)}` : ''}
+        </div>
+      </div>
+      <div class="item-actions">
+        <span class="badge ${alive ? 'running' : (status === 'running' ? 'idle' : 'stopped')}">${alive ? 'active' : status}</span>
+        ${alive ? `<button class="btn danger" onclick="nuke('${esc(p.name)}')" title="Kill worker">Nuke</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderDogs() {
+  const dogs = state.dogs || [];
+  document.getElementById('dogCount').textContent = dogs.length;
+  const el = document.getElementById('dogList');
+  if (!dogs.length) {
+    el.innerHTML = '<div class="empty">No active dogs</div>';
+    return;
+  }
+  el.innerHTML = dogs.map(d => {
+    const alive = d.session_alive;
+    const status = d.STATUS || 'unknown';
+    return `<div class="item-row">
+      <div>
+        <span class="item-name" onclick="peek('dog/${esc(d.name)}')">${esc(d.name)}</span>
+        <div class="item-meta">
+          ${d.RIG ? `rig: ${esc(d.RIG)}` : ''}
+          ${d.ISSUE ? ` · issue: #${esc(d.ISSUE)}` : ''}
+        </div>
+      </div>
+      <div class="item-actions">
+        <span class="badge ${alive ? 'running' : 'stopped'}">${alive ? 'active' : status}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderQueue() {
+  const q = state.merge_queue || [];
+  document.getElementById('queueCount').textContent = q.length;
+  const el = document.getElementById('queueList');
+  if (!q.length) {
+    el.innerHTML = '<div class="empty">Merge queue empty</div>';
+    return;
+  }
+  el.innerHTML = q.map(m => `
+    <div class="item-row">
+      <div>
+        <span class="item-name">${esc(m.name)}</span>
+        <div class="item-meta">
+          ${m.RIG ? `rig: ${esc(m.RIG)}` : ''}
+          ${m.PR ? ` · PR #${esc(m.PR)}` : ''}
+          ${m.TYPE ? ` · ${esc(m.TYPE)}` : ''}
+          ${m.AUTO_MERGE === 'true' ? ' · auto-merge' : ''}
+        </div>
+      </div>
+      <span class="badge queued">queued</span>
+    </div>
+  `).join('');
+}
+
+function renderCrew() {
+  const crew = state.crew || [];
+  document.getElementById('crewCount').textContent = crew.length;
+  const el = document.getElementById('crewList');
+  if (!crew.length) {
+    el.innerHTML = '<div class="empty">No crew members</div>';
+    return;
+  }
+  el.innerHTML = crew.map(c => `
+    <div class="item-row">
+      <div>
+        <span class="item-name">${esc(c.NAME || c.name)}</span>
+        <div class="item-meta">
+          ${c.ROLE ? `role: ${esc(c.ROLE)}` : ''}
+          ${c.RIG ? ` · rig: ${esc(c.RIG)}` : ''}
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderLog() {
+  const log = state._log;
+  if (!log) {
+    // Fetch log separately on first load
+    refreshLog(50);
+    return;
+  }
+}
+
+function populateSelects() {
+  const rigs = state.rigs || [];
+  const opts = rigs.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('');
+  const noRig = rigs.length ? '' : '<option value="">No rigs available</option>';
+  for (const id of ['slingRig', 'dogRig', 'molRig']) {
+    const sel = document.getElementById(id);
+    const prev = sel.value;
+    sel.innerHTML = noRig + opts;
+    if (prev && rigs.find(r => r.name === prev)) sel.value = prev;
+  }
+
+  const mols = state.molecules || [];
+  const molOpts = mols.map(m => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join('');
+  const molSel = document.getElementById('molSelect');
+  const prevMol = molSel.value;
+  molSel.innerHTML = (mols.length ? '' : '<option value="">No molecules</option>') + molOpts;
+  if (prevMol && mols.find(m => m.name === prevMol)) molSel.value = prevMol;
+}
+
+// ── Actions ──
+async function dispatch(type) {
+  let body, url;
+  if (type === 'sling') {
+    const rig = document.getElementById('slingRig').value;
+    const task = document.getElementById('slingTask').value.trim();
+    if (!rig || !task) return toast('Rig and task are required', 'error');
+    body = { rig, task, label: document.getElementById('slingLabel').value.trim() || undefined, auto_merge: document.getElementById('slingAutoMerge').checked };
+    url = '/api/sling';
+  } else if (type === 'dog') {
+    const rig = document.getElementById('dogRig').value;
+    const task = document.getElementById('dogTask').value.trim();
+    if (!rig || !task) return toast('Rig and task are required', 'error');
+    body = { rig, task };
+    url = '/api/dog';
+  } else if (type === 'molecule') {
+    const molecule = document.getElementById('molSelect').value;
+    const rig = document.getElementById('molRig').value;
+    const description = document.getElementById('molDesc').value.trim();
+    if (!molecule || !rig || !description) return toast('All fields required', 'error');
+    body = { molecule, rig, description };
+    url = '/api/molecule/run';
+  }
+
+  try {
+    const res = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (data.ok) {
+      toast('Dispatched successfully', 'success');
+      // Clear form
+      if (type === 'sling') { document.getElementById('slingTask').value = ''; document.getElementById('slingLabel').value = ''; }
+      else if (type === 'dog') { document.getElementById('dogTask').value = ''; }
+      else if (type === 'molecule') { document.getElementById('molDesc').value = ''; }
+    } else {
+      toast(`Failed: ${data.stderr || data.stdout || 'unknown error'}`, 'error');
+    }
+  } catch (e) {
+    toast(`Network error: ${e.message}`, 'error');
+  }
+}
+
+async function nuke(name) {
+  if (!confirm(`Kill polecat "${name}"?`)) return;
+  try {
+    const res = await fetch('/api/nuke', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ target: name }) });
+    const data = await res.json();
+    toast(data.ok ? 'Nuked' : `Failed: ${data.stderr}`, data.ok ? 'success' : 'error');
+  } catch (e) { toast(`Error: ${e.message}`, 'error'); }
+}
+
+async function systemAction(action) {
+  try {
+    const res = await fetch('/api/system', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action }) });
+    const data = await res.json();
+    toast(data.ok ? `${action}: OK` : `${action}: ${data.stderr}`, data.ok ? 'success' : 'error');
+  } catch (e) { toast(`Error: ${e.message}`, 'error'); }
+}
+
+async function peek(target) {
+  document.getElementById('peekTitle').textContent = `Peek: ${target}`;
+  document.getElementById('peekOutput').textContent = 'Loading...';
+  document.getElementById('peekModal').style.display = 'flex';
+  try {
+    const res = await fetch(`/api/peek/${encodeURIComponent(target)}`);
+    const data = await res.json();
+    document.getElementById('peekOutput').textContent = data.output || '(empty)';
+  } catch (e) {
+    document.getElementById('peekOutput').textContent = `Error: ${e.message}`;
+  }
+}
+
+function closePeek(e) {
+  if (e.target === document.getElementById('peekModal')) {
+    document.getElementById('peekModal').style.display = 'none';
+  }
+}
+
+async function refreshLog(lines) {
+  try {
+    const res = await fetch(`/api/log?lines=${lines}`);
+    const data = await res.json();
+    const el = document.getElementById('logViewer');
+    el.textContent = (data.log || []).join('\n') || '(no log entries)';
+    el.scrollTop = el.scrollHeight;
+  } catch (e) {
+    document.getElementById('logViewer').textContent = `Error: ${e.message}`;
+  }
+}
+
+// ── Tabs ──
+document.getElementById('dispatchTabs').addEventListener('click', (e) => {
+  if (!e.target.classList.contains('tab')) return;
+  const tabName = e.target.dataset.tab;
+  document.querySelectorAll('#dispatchTabs .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${tabName}`));
+});
+
+// ── Toast ──
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── Helpers ──
+function esc(s) {
+  if (s == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+// ── Init ──
+connectSSE();
+refreshLog(50);
+</script>
+</body>
+</html>
+"""
+
+
+# ── Main ───────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="SGT Web UI Control Panel")
+    parser.add_argument("--port", type=int, default=7777, help="Port (default: 7777)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    parser.add_argument("--sgt-root", type=str, default=None, help="SGT root directory")
+    args = parser.parse_args()
+
+    if args.sgt_root:
+        global SGT_ROOT, SGT_CONFIG, SGT_RIGS, SGT_POLECATS, SGT_AGENTS
+        global SGT_LOG, SGT_DOGS, SGT_CREW, SGT_MERGE_QUEUE
+        global SGT_DAEMON_PID, SGT_DEACON_HEARTBEAT, SGT_MOLECULES, SGT_ESCALATION
+        SGT_ROOT = Path(args.sgt_root)
+        SGT_CONFIG = SGT_ROOT / ".sgt"
+        SGT_RIGS = SGT_CONFIG / "rigs"
+        SGT_POLECATS = SGT_CONFIG / "polecats"
+        SGT_AGENTS = SGT_CONFIG / "agents"
+        SGT_LOG = SGT_ROOT / "sgt.log"
+        SGT_DOGS = SGT_CONFIG / "dogs"
+        SGT_CREW = SGT_CONFIG / "crew"
+        SGT_MERGE_QUEUE = SGT_CONFIG / "merge-queue"
+        SGT_DAEMON_PID = SGT_CONFIG / "daemon.pid"
+        SGT_DEACON_HEARTBEAT = SGT_CONFIG / "deacon-heartbeat.json"
+        SGT_MOLECULES = SGT_ROOT / "molecules"
+        SGT_ESCALATION = SGT_CONFIG / "escalation.json"
+
+    # Start SSE broadcaster
+    broadcaster = threading.Thread(target=_status_broadcaster, daemon=True)
+    broadcaster.start()
+
+    server = HTTPServer((args.host, args.port), SGTHandler)
+    print(f"SGT Web UI running at http://{args.host}:{args.port}")
+    print(f"SGT_ROOT: {SGT_ROOT}")
+    print("Press Ctrl+C to stop")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
