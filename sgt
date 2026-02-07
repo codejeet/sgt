@@ -276,7 +276,7 @@ PSTATE
   # ── 5. Spawn Claude Code in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude -p \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
@@ -941,7 +941,7 @@ STATUS=running
 PSTATE
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "claude -p \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "claude \"Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}.\" --dangerously-skip-permissions; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -1053,7 +1053,7 @@ REVIEWMD
   local review_output
   review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
     'Read review-prompt.md. Review the PR. Be strict — only approve complete implementations.' \
-    --dangerously-skip-permissions" 2>&1 || true)
+    --dangerously-skip-permissions" </dev/null 2>&1 || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] PR #$pr APPROVED"
@@ -1140,7 +1140,7 @@ REVIEWMD
   local review_output
   review_output=$(timeout 120 bash -c "cd '$review_dir' && claude -p \
     'Read dog-review-prompt.md. Review the research output quality.' \
-    --dangerously-skip-permissions" 2>&1 || true)
+    --dangerously-skip-permissions" </dev/null 2>&1 || true)
 
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] dog $dname APPROVED"
@@ -1398,7 +1398,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "claude -p \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
+              "claude \"Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
 
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
@@ -1995,7 +1995,7 @@ MAYORMD
 
       if timeout 300 bash -c "cd '$mayor_workspace' && claude --dangerously-skip-permissions -p \
         'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" \
-        2>&1 | tail -5; then
+        </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
       else
@@ -2190,7 +2190,7 @@ DSTATE
   # Spawn in tmux
   info "spawning dog $dname..."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "claude -p \"Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
+    "claude \"Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue.\" --dangerously-skip-permissions; echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
 
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
@@ -2384,7 +2384,7 @@ cmd_crew_wake() {
   fi
 
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "claude -p \"Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes.\" --dangerously-skip-permissions; echo '[SGT] crew exited'"
+    "claude \"Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes.\" --dangerously-skip-permissions; echo '[SGT] crew exited'"
 
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
