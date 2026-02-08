@@ -914,9 +914,128 @@ cmd_mail_send() {
   info "mail sent to issue #$issue"
 }
 
+_parse_since_iso() {
+  local since="${1:-}"
+  [[ -n "$since" ]] || return 0
+
+  local ts=""
+  if [[ "$since" =~ ^[0-9]+d$ ]]; then
+    local days="${since%d}"
+    ts=$(date -u -d "$days days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  elif [[ "$since" =~ ^[0-9]+$ ]]; then
+    ts=$(date -u -d "$since days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  else
+    ts=$(date -u -d "$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+  fi
+
+  [[ -n "$ts" ]] || die "invalid --since value: $since"
+  echo "$ts"
+}
+
+cmd_inbox() {
+  local repo="" issue="" limit=50 page=1 since=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --limit) limit="$2"; shift 2 ;;
+      --since) since="$2"; shift 2 ;;
+      --page) page="$2"; shift 2 ;;
+      -h|--help)
+        cat <<EOF
+usage: sgt inbox <repo> <issue#> [--limit N] [--since DATE] [--page N]
+
+Notes:
+  --limit   Number of messages per page (default: 50, max: 100)
+  --since   ISO date/time or relative days (e.g., 2026-02-01, 7d)
+  --page    Page number (1 = most recent page)
+EOF
+        return 0
+        ;;
+      *)
+        if [[ -z "$repo" ]]; then
+          repo="$1"; shift; continue
+        fi
+        if [[ -z "$issue" ]]; then
+          issue="$1"; shift; continue
+        fi
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$repo" && -n "$issue" ]] || die "usage: sgt inbox <repo> <issue#> [--limit N] [--since DATE] [--page N]"
+
+  ensure_init
+
+  if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+    repo="https://github.com/$repo"
+  fi
+  local owner_repo="${repo#https://github.com/}"
+
+  issue="${issue#\#}"
+  [[ "$limit" =~ ^[0-9]+$ ]] || die "invalid --limit (expected number)"
+  [[ "$page" =~ ^[0-9]+$ ]] || die "invalid --page (expected number)"
+  (( limit > 0 )) || die "invalid --limit (must be >0)"
+  (( page > 0 )) || die "invalid --page (must be >0)"
+  if (( limit > 100 )); then
+    warn "limit capped at 100 (GitHub API max per_page)"
+    limit=100
+  fi
+
+  local since_iso=""
+  if [[ -n "$since" ]]; then
+    since_iso="$(_parse_since_iso "$since")"
+  fi
+
+  local viewer=""
+  viewer=$(gh api user --jq .login 2>/dev/null || true)
+
+  local qs="sort=created&direction=desc&per_page=$limit&page=$page"
+  [[ -n "$since_iso" ]] && qs="$qs&since=$since_iso"
+
+  local issue_title=""
+  issue_title=$(gh api "repos/$owner_repo/issues/$issue" --jq .title 2>/dev/null || true)
+
+  if [[ -n "$issue_title" ]]; then
+    info "inbox #$issue — $issue_title"
+  else
+    info "inbox #$issue"
+  fi
+  info "repo: $owner_repo (page $page, limit $limit${since_iso:+, since $since_iso})"
+
+  local raw=""
+  raw=$(gh api "repos/$owner_repo/issues/$issue/comments?$qs" 2>/dev/null || true)
+  if [[ -z "$raw" || "$raw" == "[]" ]]; then
+    info "no messages"
+    return 0
+  fi
+
+  echo "$raw" | jq -r --arg viewer "$viewer" '
+    reverse
+    | .[]
+    | .created_at as $c
+    | .user.login as $u
+    | (.body // "") as $b
+    | ($c | sub("T"; " ") | sub("Z$"; "Z")) as $d
+    | ($b | gsub("\r"; "") | gsub("\n"; "\n  ")) as $body
+    | ($body | if length == 0 then "(empty)" else . end) as $body2
+    | ($viewer | length) as $vlen
+    | (if $vlen == 0 then "msg" elif $u == $viewer then "sent" else "recv" end) as $dir
+    | "[$d] " + $dir + " @" + $u + "\n  " + $body2 + "\n"
+  '
+}
+
 cmd_mail_check() {
   local repo="${1:-}"
-  [[ -n "$repo" ]] || die "usage: sgt mail check <repo>"
+  [[ -n "$repo" ]] || die "usage: sgt mail check <repo> [issue#] [--limit N] [--since DATE] [--page N]"
+  shift 2>/dev/null || true
+
+  if [[ "${1:-}" =~ ^#?[0-9]+$ ]]; then
+    cmd_inbox "$repo" "$@"
+    return 0
+  elif [[ "$#" -gt 0 ]]; then
+    die "usage: sgt mail check <repo> [issue#] [--limit N] [--since DATE] [--page N]"
+  fi
 
   if [[ "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
     repo="https://github.com/$repo"
@@ -3278,7 +3397,8 @@ Escalation:
 
 Communication:
   mail send <repo> <#> <msg>    Comment on a GitHub issue
-  mail check <repo>             Show recent issue comments
+  inbox <repo> <#> [opts]       Show issue thread messages (oldest→newest)
+  mail check <repo> [#] [opts]  Show recent issue comments or issue thread
   convoy create <name> <repo>   Create a convoy (milestone)
   convoy status <repo>          Show convoy progress
 
@@ -3468,6 +3588,7 @@ main() {
       esac
       ;;
     nudge)          cmd_nudge "$@" ;;
+    inbox)          cmd_inbox "$@" ;;
     mail)
       local sub="${1:-}"
       shift 2>/dev/null || true
