@@ -929,33 +929,6 @@ cmd_mail_check() {
     || info "no recent messages"
 }
 
-cmd_inbox() {
-  local jq_filter
-  jq_filter='.messages
-    | sort_by(.createdAt)
-    | reverse[]
-    | "## \((.direction // "unknown") | ascii_upcase) \(.fromName // "unknown") ->-> \(.toName // "unknown") - id: `\(.id // "null")` - created: \(.createdAt // "null") - acked: \(.ackedAt // "null")\n\(.text // "")\n\n---\n"'
-
-  command -v jq &>/dev/null || die "jq is required for 'sgt inbox'"
-
-  local pager=()
-  if [[ -n "${SGT_PAGER:-}" ]]; then
-    pager=(bash -lc "$SGT_PAGER")
-  elif command -v glow &>/dev/null; then
-    pager=(glow -p)
-  elif command -v less &>/dev/null; then
-    pager=(less -R)
-  else
-    die "no pager found (need glow or less)"
-  fi
-
-  if [[ -n "${SGT_INBOX_CMD:-}" ]]; then
-    bash -lc "$SGT_INBOX_CMD" | jq -r "$jq_filter" | "${pager[@]}"
-  else
-    npx -y @codejeet/oadm@latest inbox --all --json | jq -r "$jq_filter" | "${pager[@]}"
-  fi
-}
-
 # ═══════════════════════════════════════════════════════════════════════
 # AGENT LAYER — Witness, Refinery, Deacon, Boot, Daemon
 # ═══════════════════════════════════════════════════════════════════════
@@ -3306,8 +3279,6 @@ Escalation:
 Communication:
   mail send <repo> <#> <msg>    Comment on a GitHub issue
   mail check <repo>             Show recent issue comments
-  mail inbox                    Open interactive OADM inbox (alias for 'sgt inbox')
-  inbox                         Open interactive OADM inbox (glow -p, fallback: less)
   convoy create <name> <repo>   Create a convoy (milestone)
   convoy status <repo>          Show convoy progress
 
@@ -3347,7 +3318,6 @@ Examples:
   sgt molecule run feature myapp "User dashboard"  # Multi-step workflow
   sgt escalation init                           # Set up severity levels
   sgt status
-  sgt inbox                                     # Browse OADM inbox interactively
   sgt peek mayor                                # Check mayor decisions
   sgt peek dog/dog-a1b2c3d4
   sgt down                                      # Stop agents
@@ -3498,15 +3468,13 @@ main() {
       esac
       ;;
     nudge)          cmd_nudge "$@" ;;
-    inbox)          cmd_inbox "$@" ;;
     mail)
       local sub="${1:-}"
       shift 2>/dev/null || true
       case "$sub" in
         send)   cmd_mail_send "$@" ;;
         check)  cmd_mail_check "$@" ;;
-        inbox)  cmd_inbox "$@" ;;
-        *)      die "unknown mail command: $sub (try: send, check, inbox)" ;;
+        *)      die "unknown mail command: $sub (try: send, check)" ;;
       esac
       ;;
     log)            cmd_log "$@" ;;
