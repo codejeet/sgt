@@ -42,3 +42,22 @@ sgt mayor notify "OpenClaw notification test"
 ```
 
 If `openclaw` is missing or the config is absent, notifications are skipped.
+
+## Interactive inbox mode
+
+`sgt` can render OpenClaw/OADM inbox messages in an interactive pager:
+
+```bash
+sgt inbox
+```
+
+- Fetches: `npx -y @codejeet/oadm@latest inbox --all --json`
+- Formats each message with: direction, fromName, toName, id, createdAt, ackedAt, text
+- Renderer/pager: `glow -p` when available, otherwise `less`
+- Supports scroll + search through the pager UI (`/` in `less`/`glow` pager)
+
+Alias:
+
+```bash
+sgt mail inbox
+```
