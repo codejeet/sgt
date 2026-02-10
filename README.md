@@ -155,7 +155,9 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 
 - Retries only trigger for transient classes: `timeout`, `network`, `http-5xx`, and `secondary-rate-limit`.
 - Before each retry, refinery re-checks live PR state (`OPEN`) and head SHA; if either drifts, retry is skipped and the queue item is kept with refreshed `HEAD_SHA`.
-- Refinery also enforces a per-attempt idempotency key of `repo+PR+head SHA`. Duplicate PR-ready queue replays for the same key are ignored before merge/conflict/reject side effects run.
+- Refinery also enforces a durable per-attempt idempotency key of `repo+PR+head SHA`, persisted under `~/.sgt/refinery-merge-attempts/`.
+- Once a merge action has been attempted for that key, the fence is kept across retries, future refinery cycles, and process restarts.
+- Duplicate PR-ready queue replays for the same key are skipped before any additional merge action runs.
 - Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
 
 Configure retry behavior with:
@@ -170,10 +172,10 @@ Observability:
 - `REFINERY_MERGE_RETRY pr=#... attempt=<n>/<max> class=<class> delay_s=<seconds>`
 - `REFINERY_MERGE_RETRY_SKIP pr=#... attempt=<n>/<max> reason="..."`
 - `REFINERY_MERGE_FAILED pr=#... attempt=<n>/<max> class=<class> transient=<true|false> error="..."`
-- `REFINERY_DUPLICATE_SKIP pr=#... issue=#... reason="duplicate merge-attempt key (repo+pr+head) already processed" key="owner/repo|pr=<n>|head=<sha>"`
+- `REFINERY_DUPLICATE_SKIP pr=#... issue=#... reason_code=duplicate-merge-attempt-key reason="duplicate merge-attempt key (repo+pr+head) already processed" key="owner/repo|pr=<n>|head=<sha>"`
 
 When duplicate queue events are ignored, refinery emits both:
-- an operator-visible status line: `duplicate event ignored ... (key=...)`
+- an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`
 - a structured activity log event: `REFINERY_DUPLICATE_SKIP ...`
 
 ## Security gate (sgt-authorized label)

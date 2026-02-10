@@ -799,7 +799,7 @@ _refinery_merge_attempt_claim() {
   mkdir -p "$key_dir" || return 1
   _REFINERY_MERGE_ATTEMPT_KEY="$key"
   _REFINERY_MERGE_ATTEMPT_FILE="$key_file"
-  if [[ -f "$key_file" ]]; then
+  if ! ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
     return 1
   fi
   cat > "$key_file" <<EOF
@@ -2615,11 +2615,12 @@ _refinery_loop() {
 
       local claimed_attempt_file=""
       if ! _refinery_merge_attempt_claim "$mq_repo" "$mq_pr" "$mq_head_sha" "$mqname"; then
-        local duplicate_key duplicate_reason
+        local duplicate_key duplicate_reason duplicate_reason_code
         duplicate_key="${_REFINERY_MERGE_ATTEMPT_KEY:-unknown}"
+        duplicate_reason_code="duplicate-merge-attempt-key"
         duplicate_reason="duplicate merge-attempt key (repo+pr+head) already processed"
-        echo "[refinery/$rig] PR #$mq_pr duplicate event ignored — $duplicate_reason (key=$duplicate_key)"
-        log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason=\"$(_escape_quotes "$duplicate_reason")\" key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
+        echo "[refinery/$rig] PR #$mq_pr duplicate merge skipped — reason_code=$duplicate_reason_code reason=\"$duplicate_reason\" key=$duplicate_key"
+        log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason_code=$duplicate_reason_code reason=\"$(_escape_quotes "$duplicate_reason")\" key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
         rm -f "$f"
         continue
       fi
@@ -2690,7 +2691,6 @@ _refinery_loop() {
             merge_skip_reason="$retry_live_head"
             echo "[refinery/$rig] PR #$mq_pr merge retry skipped — $merge_skip_reason"
             log_event "REFINERY_MERGE_RETRY_SKIP pr=#$mq_pr attempt=$merge_attempt/$max_attempts reason=\"$(_escape_quotes "$merge_skip_reason")\""
-            _refinery_merge_attempt_release "$claimed_attempt_file"
             break
           fi
           merge_expected_head_sha="$retry_live_head"
@@ -2718,7 +2718,6 @@ _refinery_loop() {
           _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url"
           gh pr comment "$mq_pr" --repo "$mq_repo" \
             --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
-          _refinery_merge_attempt_release "$claimed_attempt_file"
         fi
       else
         # REJECTED — close PR, re-dispatch with feedback

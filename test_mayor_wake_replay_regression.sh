@@ -89,4 +89,7 @@ echo "=== refinery stale post-merge redispatch guard ==="
 echo "=== refinery duplicate PR-ready replay dedupe ==="
 "$REPO_ROOT/test_refinery_pr_ready_dedupe.sh"
 
+echo "=== refinery restart replay merge-attempt dedupe ==="
+"$REPO_ROOT/test_refinery_merge_attempt_restart_replay.sh"
+
 echo "ALL TESTS PASSED"
