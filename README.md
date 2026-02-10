@@ -243,6 +243,10 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 - Conflict re-sling is now guarded by a per-issue claim (`~/.sgt/resling-issue-claims/`) so concurrent conflict handlers dedupe to one active re-sling per issue.
 - On refinery restart, pending conflict evidence is replayed and resumed from disk without spawning duplicate polecats; already-dispatched evidence is treated as complete.
 - Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
+- For repeated `REVIEW_UNCLEAR` review loops, refinery persists per-PR retry state directly on the queue item (`REVIEW_UNCLEAR_RETRY_COUNT`, `REVIEW_UNCLEAR_NEXT_RETRY_AT`, `REVIEW_UNCLEAR_LAST_REASON`, escalation markers).
+- Unclear re-review attempts use bounded exponential backoff with jitter; backoff windows survive daemon restarts so replay does not hammer re-review.
+- When the unclear retry cap is reached, refinery emits a single saturation escalation notification (PR, issue, last reason, next-action hint) and then holds the PR until manual intervention.
+- Saturation escalation dedupe is restart-safe via persisted queue markers (`REVIEW_UNCLEAR_ESCALATED`, `REVIEW_UNCLEAR_ESCALATED_AT`), so refinery restart replay does not re-page.
 
 Configure retry behavior with:
 
@@ -250,6 +254,10 @@ Configure retry behavior with:
 export SGT_REFINERY_MERGE_MAX_ATTEMPTS=3
 export SGT_REFINERY_MERGE_RETRY_BASE_MS=1000
 export SGT_REFINERY_MERGE_RETRY_JITTER_MS=400
+export SGT_REFINERY_REVIEW_UNCLEAR_MAX_RETRIES=5
+export SGT_REFINERY_REVIEW_UNCLEAR_BACKOFF_BASE_SECS=30
+export SGT_REFINERY_REVIEW_UNCLEAR_BACKOFF_MAX_SECS=600
+export SGT_REFINERY_REVIEW_UNCLEAR_JITTER_SECS=15
 ```
 
 Observability:
@@ -264,6 +272,10 @@ Observability:
 - `REFINERY_CONFLICT_RESLING_DEDUPE issue=#... reason_code=<active-resling-claim|active-polecat-existing> ...`
 - `REFINERY_CONFLICT_RESLING_RESUMED issue=#... source_pr=<n> polecat=<name> evidence="..."`
 - `REFINERY_CONFLICT_RESLING_SKIPPED issue=#... status=<SKIPPED_STALE|SKIPPED_UNAUTHORIZED|PENDING> reason="..."`
+- `REFINERY_REVIEW_UNCLEAR_PENDING pr=#... issue=#... attempt=<n>/<max> retry_in=<seconds>s next_retry_at=<epoch> reason="..."`
+- `REFINERY_REVIEW_UNCLEAR_BACKOFF pr=#... issue=#... attempt=<n> wait_s=<seconds> next_retry_at=<epoch>`
+- `REFINERY_REVIEW_UNCLEAR_ESCALATED pr=#... issue=#... attempts=<n>/<max> reason="..." next_action_hint="..."`
+- `REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#... issue=#... attempts=<n>/<max> escalated=<0|1>`
 
 When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`

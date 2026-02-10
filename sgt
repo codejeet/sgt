@@ -136,6 +136,7 @@ _MAYOR_DISPATCH_TRIGGER_KEY=""
 _MAYOR_DISPATCH_TRIGGER_FILE=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
+_REFINERY_REVIEW_UNCLEAR_REASON=""
 _RESLING_LAST_POLECAT=""
 _RESLING_ISSUE_CLAIM_FILE=""
 
@@ -1251,6 +1252,16 @@ _merge_queue_set_head_sha() {
   _merge_queue_set_field "$queue_file" "HEAD_SHA" "$head_sha"
 }
 
+_merge_queue_reset_unclear_retry_state() {
+  local queue_file="${1:-}"
+  [[ -n "$queue_file" && -f "$queue_file" ]] || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_RETRY_COUNT" "0" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_NEXT_RETRY_AT" "0" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_LAST_REASON" "" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_ESCALATED" "0" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_ESCALATED_AT" "" || return 1
+}
+
 _merge_queue_mark_review_state() {
   local queue_file="${1:-}" review_state="${2:-}"
   [[ -n "$queue_file" && -f "$queue_file" && -n "$review_state" ]] || return 1
@@ -1262,6 +1273,8 @@ _merge_queue_mark_review_state() {
     if [[ ! "$review_unclear_since" =~ ^[0-9]+$ ]]; then
       review_unclear_since="$now"
     fi
+  else
+    _merge_queue_reset_unclear_retry_state "$queue_file" || return 1
   fi
   _merge_queue_set_field "$queue_file" "REVIEW_STATE" "$review_state" || return 1
   _merge_queue_set_field "$queue_file" "REVIEW_UPDATED_AT" "$now" || return 1
@@ -1278,6 +1291,7 @@ _merge_queue_mark_review_ready() {
   _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_SINCE" "" || return 1
   _merge_queue_set_field "$queue_file" "REVIEWED_HEAD_SHA" "$reviewed_head_sha" || return 1
   _merge_queue_set_field "$queue_file" "REVIEWED_AT" "$now" || return 1
+  _merge_queue_reset_unclear_retry_state "$queue_file" || return 1
 }
 
 _merge_queue_repo_pr_key() {
@@ -1355,6 +1369,11 @@ TYPE=polecat
 REVIEW_STATE=REVIEW_PENDING
 REVIEW_UPDATED_AT=$(date +%s)
 REVIEW_UNCLEAR_SINCE=
+REVIEW_UNCLEAR_RETRY_COUNT=0
+REVIEW_UNCLEAR_NEXT_RETRY_AT=0
+REVIEW_UNCLEAR_LAST_REASON=
+REVIEW_UNCLEAR_ESCALATED=0
+REVIEW_UNCLEAR_ESCALATED_AT=
 REVIEWED_HEAD_SHA=
 REVIEWED_AT=
 QUEUED=$(date -Iseconds)
@@ -1713,6 +1732,59 @@ _refinery_merge_retry_delay_secs() {
   fi
   total_ms=$((scaled_base + jitter_ms_actual))
   printf '%d.%03d' "$((total_ms / 1000))" "$((total_ms % 1000))"
+}
+
+_refinery_unclear_retry_max_attempts() {
+  local raw="${SGT_REFINERY_REVIEW_UNCLEAR_MAX_RETRIES:-5}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=5
+  (( raw < 1 )) && raw=1
+  echo "$raw"
+}
+
+_refinery_unclear_retry_base_secs() {
+  local raw="${SGT_REFINERY_REVIEW_UNCLEAR_BACKOFF_BASE_SECS:-30}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=30
+  echo "$raw"
+}
+
+_refinery_unclear_retry_max_backoff_secs() {
+  local raw="${SGT_REFINERY_REVIEW_UNCLEAR_BACKOFF_MAX_SECS:-600}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=600
+  (( raw < 0 )) && raw=0
+  echo "$raw"
+}
+
+_refinery_unclear_retry_jitter_secs() {
+  local raw="${SGT_REFINERY_REVIEW_UNCLEAR_JITTER_SECS:-15}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=15
+  echo "$raw"
+}
+
+_refinery_unclear_retry_delay_secs() {
+  local attempt="${1:-1}"
+  local base_secs max_secs jitter_secs exponent base_delay jitter_delay total_delay
+  [[ "$attempt" =~ ^[0-9]+$ ]] || attempt=1
+  (( attempt < 1 )) && attempt=1
+  base_secs="$(_refinery_unclear_retry_base_secs)"
+  max_secs="$(_refinery_unclear_retry_max_backoff_secs)"
+  jitter_secs="$(_refinery_unclear_retry_jitter_secs)"
+  exponent=$((attempt - 1))
+  if (( exponent > 20 )); then
+    exponent=20
+  fi
+  base_delay=$((base_secs * (2 ** exponent)))
+  if (( max_secs > 0 && base_delay > max_secs )); then
+    base_delay="$max_secs"
+  fi
+  jitter_delay=0
+  if (( jitter_secs > 0 )); then
+    jitter_delay=$((RANDOM % (jitter_secs + 1)))
+  fi
+  total_delay=$((base_delay + jitter_delay))
+  if (( max_secs > 0 && total_delay > max_secs )); then
+    total_delay="$max_secs"
+  fi
+  echo "$total_delay"
 }
 
 _refinery_merge_error_class() {
@@ -3215,6 +3287,7 @@ cmd_witness_stop() {
 _refinery_review_pr() {
   local repo="$1" pr="$2" issue="$3" rig="$4" backend="$5"
   local owner_repo pr_url issue_url
+  _REFINERY_REVIEW_UNCLEAR_REASON=""
   owner_repo="$(_repo_owner_repo "$repo")"
   pr_url="$(_repo_pr_url "$repo" "$pr")"
   issue_url="$(_repo_issue_url "$repo" "$issue")"
@@ -3307,8 +3380,14 @@ Closing PR and dispatching rework." 2>/dev/null || true
     REFINERY_REJECT_REASON="$reject_reason"
     return 1
   else
+    local unclear_reason
+    unclear_reason="review output missing explicit verdict"
+    if [[ -z "$review_output" ]]; then
+      unclear_reason="review output empty or timed out"
+    fi
+    _REFINERY_REVIEW_UNCLEAR_REASON="$unclear_reason"
     echo "[refinery/$rig] PR #$pr — review inconclusive, marking REVIEW_UNCLEAR"
-    log_event "REFINERY_REVIEW_UNCLEAR pr=#$pr"
+    log_event "REFINERY_REVIEW_UNCLEAR pr=#$pr reason=\"$(_escape_quotes "$unclear_reason")\""
     return 2
   fi
 }
@@ -3435,7 +3514,8 @@ _refinery_loop() {
 
       local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
       local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since="" mq_reviewed_head_sha="" mq_reviewed_at=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")"
+      local mq_unclear_retry_count="" mq_unclear_next_retry_at="" mq_unclear_escalated="" mq_unclear_escalated_at=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -3448,8 +3528,16 @@ _refinery_loop() {
       mq_review_state="${REVIEW_STATE:-REVIEW_PENDING}"
       mq_review_updated_at="${REVIEW_UPDATED_AT:-}"
       mq_review_unclear_since="${REVIEW_UNCLEAR_SINCE:-}"
+      mq_unclear_retry_count="${REVIEW_UNCLEAR_RETRY_COUNT:-0}"
+      mq_unclear_next_retry_at="${REVIEW_UNCLEAR_NEXT_RETRY_AT:-0}"
+      mq_unclear_escalated="${REVIEW_UNCLEAR_ESCALATED:-0}"
+      mq_unclear_escalated_at="${REVIEW_UNCLEAR_ESCALATED_AT:-}"
       mq_reviewed_head_sha="${REVIEWED_HEAD_SHA:-}"
       mq_reviewed_at="${REVIEWED_AT:-}"
+
+      [[ "$mq_unclear_retry_count" =~ ^[0-9]+$ ]] || mq_unclear_retry_count=0
+      [[ "$mq_unclear_next_retry_at" =~ ^[0-9]+$ ]] || mq_unclear_next_retry_at=0
+      [[ "$mq_unclear_escalated" =~ ^[01]$ ]] || mq_unclear_escalated=0
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
@@ -3523,6 +3611,24 @@ _refinery_loop() {
         _merge_queue_mark_review_state "$f" "REVIEW_PENDING" || true
         _merge_queue_set_field "$f" "REVIEWED_AT" "" || true
         continue
+      fi
+
+      if [[ "$mq_review_state" == "REVIEW_UNCLEAR" ]]; then
+        local now_epoch_unclear_retry max_unclear_retry_attempts
+        now_epoch_unclear_retry="$(date +%s)"
+        max_unclear_retry_attempts="$(_refinery_unclear_retry_max_attempts)"
+        if (( mq_unclear_retry_count >= max_unclear_retry_attempts )); then
+          echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR saturated — awaiting manual intervention (attempts=${mq_unclear_retry_count}/${max_unclear_retry_attempts})"
+          log_event "REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#$mq_pr issue=#$mq_issue attempts=$mq_unclear_retry_count/$max_unclear_retry_attempts escalated=$mq_unclear_escalated"
+          continue
+        fi
+        if (( mq_unclear_next_retry_at > now_epoch_unclear_retry )); then
+          local wait_s
+          wait_s=$((mq_unclear_next_retry_at - now_epoch_unclear_retry))
+          echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR backoff active — retry in ${wait_s}s (attempt=${mq_unclear_retry_count})"
+          log_event "REFINERY_REVIEW_UNCLEAR_BACKOFF pr=#$mq_pr issue=#$mq_issue attempt=$mq_unclear_retry_count wait_s=$wait_s next_retry_at=$mq_unclear_next_retry_at"
+          continue
+        fi
       fi
 
       local claimed_attempt_file=""
@@ -3717,10 +3823,15 @@ _refinery_loop() {
             --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
         fi
       elif [[ "$review_rc" -eq 2 ]]; then
-        local unclear_since unclear_age now_epoch
+        local unclear_since unclear_age now_epoch unclear_reason
+        local unclear_retry_count unclear_retry_max unclear_delay_s unclear_next_retry_at
+        local unclear_escalated_at next_action_hint
         _merge_queue_mark_review_state "$f" "REVIEW_UNCLEAR" || true
         unclear_since=$(grep -E '^REVIEW_UNCLEAR_SINCE=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
         now_epoch="$(date +%s)"
+        unclear_reason="${_REFINERY_REVIEW_UNCLEAR_REASON:-review inconclusive}"
+        unclear_retry_count=$((mq_unclear_retry_count + 1))
+        unclear_retry_max="$(_refinery_unclear_retry_max_attempts)"
         unclear_age=0
         if [[ "$unclear_since" =~ ^[0-9]+$ ]]; then
           unclear_age=$((now_epoch - unclear_since))
@@ -3728,8 +3839,30 @@ _refinery_loop() {
             unclear_age=0
           fi
         fi
-        echo "[refinery/$rig] PR #$mq_pr held in REVIEW_UNCLEAR (age=${unclear_age}s)"
-        log_event "REFINERY_REVIEW_UNCLEAR_PENDING pr=#$mq_pr issue=#$mq_issue age=${unclear_age}s"
+
+        _merge_queue_set_field "$f" "REVIEW_UNCLEAR_RETRY_COUNT" "$unclear_retry_count" || true
+        _merge_queue_set_field "$f" "REVIEW_UNCLEAR_LAST_REASON" "$unclear_reason" || true
+        if (( unclear_retry_count >= unclear_retry_max )); then
+          _merge_queue_set_field "$f" "REVIEW_UNCLEAR_NEXT_RETRY_AT" "0" || true
+          next_action_hint="inspect review prompt/output and intervene on PR #$mq_pr or issue #$mq_issue before requeueing"
+          if [[ "$mq_unclear_escalated" != "1" ]]; then
+            unclear_escalated_at="$(date -Iseconds)"
+            _merge_queue_set_field "$f" "REVIEW_UNCLEAR_ESCALATED" "1" || true
+            _merge_queue_set_field "$f" "REVIEW_UNCLEAR_ESCALATED_AT" "$unclear_escalated_at" || true
+            echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR retry cap reached — escalating once (attempts=${unclear_retry_count}/${unclear_retry_max})"
+            log_event "REFINERY_REVIEW_UNCLEAR_ESCALATED pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max reason=\"$(_escape_quotes "$unclear_reason")\" next_action_hint=\"$(_escape_quotes "$next_action_hint")\""
+            _notify_openclaw "[SGT Refinery] unclear-review saturated rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max last_reason=\"$(_escape_quotes "$unclear_reason")\" next_action=\"$(_escape_quotes "$next_action_hint")\" pr_url=$mq_pr_url issue_url=$mq_issue_url"
+          else
+            echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR retry cap already escalated — holding"
+            log_event "REFINERY_REVIEW_UNCLEAR_ESCALATION_DEDUPE pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max reason=\"$(_escape_quotes "$unclear_reason")\""
+          fi
+        else
+          unclear_delay_s="$(_refinery_unclear_retry_delay_secs "$unclear_retry_count")"
+          unclear_next_retry_at=$((now_epoch + unclear_delay_s))
+          _merge_queue_set_field "$f" "REVIEW_UNCLEAR_NEXT_RETRY_AT" "$unclear_next_retry_at" || true
+          echo "[refinery/$rig] PR #$mq_pr held in REVIEW_UNCLEAR (age=${unclear_age}s attempt=${unclear_retry_count}/${unclear_retry_max} retry_in=${unclear_delay_s}s)"
+          log_event "REFINERY_REVIEW_UNCLEAR_PENDING pr=#$mq_pr issue=#$mq_issue age=${unclear_age}s attempt=$unclear_retry_count/$unclear_retry_max retry_in=${unclear_delay_s}s next_retry_at=$unclear_next_retry_at reason=\"$(_escape_quotes "$unclear_reason")\""
+        fi
         _refinery_merge_attempt_release "$claimed_attempt_file"
         continue
       else
