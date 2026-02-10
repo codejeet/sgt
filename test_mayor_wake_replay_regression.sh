@@ -62,6 +62,9 @@ BASH
 echo "=== mayor wake trigger ttl dedupe ==="
 "$REPO_ROOT/test_mayor_wake_dedupe_ttl.sh"
 
+echo "=== mayor post-merge dispatch durable dedupe fence ==="
+"$REPO_ROOT/test_mayor_post_merge_dispatch_fence.sh"
+
 echo "=== mayor cycle lease lock recovery ==="
 "$REPO_ROOT/test_mayor_cycle_lock_lease.sh"
 
