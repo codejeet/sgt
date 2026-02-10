@@ -95,6 +95,16 @@ Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
 - Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
 
+Mayor also runs a stale-polecat reconciliation fence after merged/closed transitions:
+- On `merged:*` or `dog-approved:*` wake cycles, mayor revalidates each tracked polecat against live issue/PR state.
+- If a polecat is still in-flight but tied to `issue_state=CLOSED` or `pr_state=MERGED`, mayor cleans the stale session/worktree/state and records one idempotent cleanup decision.
+- Cleanup is restart-safe and replay-safe via a durable fence under `~/.sgt/mayor-stale-polecat-fence/`, so repeated cycles/restarts do not duplicate session nukes or duplicate decision entries.
+
+Stale-polecat symptoms and telemetry:
+- Symptom: `sgt status` still shows a running polecat after its issue is closed or PR merged.
+- Activity log event: `MAYOR_POLECAT_CLEANUP reason_code=<stale-issue-closed|stale-pr-merged> polecat=<name> repo=<owner/repo> issue=#<n> pr=#<n|unknown> branch="<branch>" issue_state=<state> pr_state=<state> action=<cleanup-action>`.
+- Decision log event: `MAYOR POLECAT CLEANUP reason_code=<...> polecat=<...> ... action=<...>` (`context=stale-polecat-cleanup` in `~/.sgt/mayor-decisions.log`).
+
 Mayor decision logging is durable:
 - Decision entries are appended under an exclusive file lock.
 - Each append captures the pre-write file offset and rolls back (`ftruncate`) on write/fsync failure, so concurrent cycles do not leave interleaved or truncated decision lines.

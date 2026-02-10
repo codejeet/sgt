@@ -83,6 +83,9 @@ echo "=== mayor snapshot freshness guard ==="
 echo "=== mayor orphan stale snapshot guard ==="
 "$REPO_ROOT/test_mayor_orphan_stale_snapshot_guard.sh"
 
+echo "=== mayor stale polecat revalidation fence ==="
+"$REPO_ROOT/test_mayor_stale_polecat_revalidation_fence.sh"
+
 echo "=== mayor critical alert cooldown dedupe ==="
 "$REPO_ROOT/test_mayor_critical_alert_cooldown.sh"
 
