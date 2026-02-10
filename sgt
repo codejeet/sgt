@@ -757,6 +757,88 @@ _merge_queue_set_head_sha() {
   fi
 }
 
+_refinery_merge_retry_max_attempts() {
+  local raw="${SGT_REFINERY_MERGE_MAX_ATTEMPTS:-3}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=3
+  (( raw < 1 )) && raw=1
+  echo "$raw"
+}
+
+_refinery_merge_retry_base_ms() {
+  local raw="${SGT_REFINERY_MERGE_RETRY_BASE_MS:-1000}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=1000
+  echo "$raw"
+}
+
+_refinery_merge_retry_jitter_ms() {
+  local raw="${SGT_REFINERY_MERGE_RETRY_JITTER_MS:-400}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=400
+  echo "$raw"
+}
+
+_refinery_merge_retry_delay_secs() {
+  local attempt="${1:-1}"
+  local base_ms jitter_ms scaled_base jitter_ms_actual total_ms
+  [[ "$attempt" =~ ^[0-9]+$ ]] || attempt=1
+  (( attempt < 1 )) && attempt=1
+  base_ms="$(_refinery_merge_retry_base_ms)"
+  jitter_ms="$(_refinery_merge_retry_jitter_ms)"
+  scaled_base=$((base_ms * attempt))
+  jitter_ms_actual=0
+  if (( jitter_ms > 0 )); then
+    jitter_ms_actual=$((RANDOM % (jitter_ms + 1)))
+  fi
+  total_ms=$((scaled_base + jitter_ms_actual))
+  printf '%d.%03d' "$((total_ms / 1000))" "$((total_ms % 1000))"
+}
+
+_refinery_merge_error_class() {
+  local raw="${1:-}" lc
+  lc="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lc" =~ secondary[[:space:]-]*rate[[:space:]-]*limit|abuse[[:space:]]+detection ]]; then
+    echo "secondary-rate-limit"
+  elif [[ "$lc" =~ timed?[[:space:]-]*out|timeout|deadline[[:space:]]+exceeded ]]; then
+    echo "timeout"
+  elif [[ "$lc" =~ (^|[^0-9])5[0-9][0-9]([^0-9]|$)|http[[:space:]]*5[0-9][0-9]|server[[:space:]]+error|bad[[:space:]]+gateway|service[[:space:]]+unavailable|gateway[[:space:]]+timeout ]]; then
+    echo "http-5xx"
+  elif [[ "$lc" =~ connection[[:space:]]+reset|connection[[:space:]]+refused|network[[:space:]]+is[[:space:]]+unreachable|temporary[[:space:]]+failure|no[[:space:]]+such[[:space:]]+host|tls|eof|i/o[[:space:]]+timeout|context[[:space:]]+canceled ]]; then
+    echo "network"
+  else
+    echo "non-transient"
+  fi
+}
+
+_refinery_merge_error_is_transient() {
+  local klass="${1:-}"
+  case "$klass" in
+    timeout|network|http-5xx|secondary-rate-limit) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_refinery_revalidate_pr_open_head() {
+  local repo="${1:-}" pr="${2:-}" expected_head_sha="${3:-}" queue_file="${4:-}"
+  local live_snapshot live_state live_head_sha
+  live_snapshot=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
+  if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
+    echo "unable to query live PR state"
+    return 1
+  fi
+  IFS='|' read -r live_state live_head_sha <<< "$live_snapshot"
+  if [[ "$live_state" != "OPEN" ]]; then
+    echo "pr state drifted to ${live_state:-unknown}"
+    return 1
+  fi
+  if [[ -n "$expected_head_sha" && "$live_head_sha" != "$expected_head_sha" ]]; then
+    if [[ -n "$queue_file" ]]; then
+      _merge_queue_set_head_sha "$queue_file" "$live_head_sha" || true
+    fi
+    echo "head sha drifted expected=${expected_head_sha:-unknown} live=${live_head_sha:-unknown}"
+    return 1
+  fi
+  echo "$live_head_sha"
+}
+
 _find_recent_duplicate_issue() {
   local repo="${1:-}" title="${2:-}" cooldown_secs="${3:-0}"
   shift 3 || true
@@ -2325,18 +2407,9 @@ _refinery_loop() {
       REFINERY_REJECT_REASON=""
       if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig" "$mq_backend"; then
         # Revalidate immediately before merge to prevent stale queue merges.
-        local live_snapshot live_state live_head_sha premerge_reason=""
-        live_snapshot=$(gh pr view "$mq_pr" --repo "$mq_repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
-        if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
-          premerge_reason="unable to query live PR state"
-        else
-          IFS='|' read -r live_state live_head_sha <<< "$live_snapshot"
-          if [[ "$live_state" != "OPEN" ]]; then
-            premerge_reason="pr state drifted to ${live_state:-unknown}"
-          elif [[ -n "$mq_head_sha" && "$live_head_sha" != "$mq_head_sha" ]]; then
-            premerge_reason="head sha drifted queued=${mq_head_sha:-unknown} live=${live_head_sha:-unknown}"
-            _merge_queue_set_head_sha "$f" "$live_head_sha" || true
-          fi
+        local live_head_sha premerge_reason=""
+        if ! live_head_sha=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$mq_head_sha" "$f"); then
+          premerge_reason="$live_head_sha"
         fi
         if [[ -n "$premerge_reason" ]]; then
           echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation drift — skipping ($premerge_reason)"
@@ -2344,10 +2417,50 @@ _refinery_loop() {
           continue
         fi
 
-        # APPROVED — merge
-        echo "[refinery/$rig] merging PR #$mq_pr..."
-        local merge_result
-        if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch 2>&1); then
+        # APPROVED — merge (bounded retry for transient errors).
+        local merge_attempt max_attempts merge_result merge_error_class merge_success=false
+        local merge_error_transient=false merge_skip_reason="" merge_expected_head_sha
+        max_attempts="$(_refinery_merge_retry_max_attempts)"
+        merge_expected_head_sha="$live_head_sha"
+        merge_attempt=1
+        merge_error_class="non-transient"
+        echo "[refinery/$rig] merging PR #$mq_pr (max attempts=$max_attempts)..."
+        while (( merge_attempt <= max_attempts )); do
+          if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch 2>&1); then
+            merge_success=true
+            break
+          fi
+          merge_error_class="$(_refinery_merge_error_class "$merge_result")"
+          if _refinery_merge_error_is_transient "$merge_error_class"; then
+            merge_error_transient=true
+          else
+            merge_error_transient=false
+          fi
+          if [[ "$merge_error_transient" != "true" || "$merge_attempt" -ge "$max_attempts" ]]; then
+            break
+          fi
+
+          local retry_delay_s retry_live_head
+          if ! retry_live_head=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
+            merge_skip_reason="$retry_live_head"
+            echo "[refinery/$rig] PR #$mq_pr merge retry skipped — $merge_skip_reason"
+            log_event "REFINERY_MERGE_RETRY_SKIP pr=#$mq_pr attempt=$merge_attempt/$max_attempts reason=\"$(_escape_quotes "$merge_skip_reason")\""
+            break
+          fi
+          merge_expected_head_sha="$retry_live_head"
+
+          retry_delay_s="$(_refinery_merge_retry_delay_secs "$merge_attempt")"
+          echo "[refinery/$rig] PR #$mq_pr merge transient failure class=$merge_error_class attempt=$merge_attempt/$max_attempts — retrying in ${retry_delay_s}s"
+          log_event "REFINERY_MERGE_RETRY pr=#$mq_pr attempt=$merge_attempt/$max_attempts class=$merge_error_class delay_s=$retry_delay_s"
+          sleep "$retry_delay_s"
+          merge_attempt=$((merge_attempt + 1))
+        done
+
+        if [[ "$merge_skip_reason" != "" ]]; then
+          continue
+        fi
+
+        if [[ "$merge_success" == "true" ]]; then
           echo "[refinery/$rig] PR #$mq_pr merged successfully"
           log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
           _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
@@ -2355,9 +2468,10 @@ _refinery_loop() {
           rm -f "$f"
         else
           echo "[refinery/$rig] merge failed: $merge_result"
-          log_event "REFINERY_MERGE_FAILED pr=#$mq_pr: $merge_result"
+          log_event "REFINERY_MERGE_FAILED pr=#$mq_pr attempt=$merge_attempt/$max_attempts class=$merge_error_class transient=$merge_error_transient error=\"$(_escape_quotes "$merge_result")\""
+          _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url"
           gh pr comment "$mq_pr" --repo "$mq_repo" \
-            --body "[sgt-refinery] Auto-merge failed: \`$merge_result\`" 2>/dev/null || true
+            --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
         fi
       else
         # REJECTED — close PR, re-dispatch with feedback
