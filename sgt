@@ -150,6 +150,13 @@ _MAYOR_ACTION_RECEIPT_EXPECTED_STATE=""
 _MAYOR_ACTION_RECEIPT_OBSERVED_STATE=""
 _MAYOR_ACTION_RECEIPT_VERIFIED_AT=""
 _MAYOR_ACTION_RECEIPT_STATUS=""
+_MAYOR_NOTIFY_RECEIPT_FILE=""
+_MAYOR_NOTIFY_RECEIPT_CHANNEL=""
+_MAYOR_NOTIFY_RECEIPT_TARGET=""
+_MAYOR_NOTIFY_RECEIPT_MESSAGE_KEY=""
+_MAYOR_NOTIFY_RECEIPT_ATTEMPT=""
+_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT=""
+_MAYOR_NOTIFY_RECEIPT_OUTCOME=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
@@ -586,6 +593,112 @@ _mayor_action_verify_and_log() {
   _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=${mismatch_reason:-post-action-live-mismatch} retry=${mismatch_retry:-retry-next-mayor-cycle} $receipt_summary" "$context" "$SGT_ROOT" || true
   log_event "MAYOR_ACTION_RECEIPT non-success reason=${mismatch_reason:-post-action-live-mismatch} retry=${mismatch_retry:-retry-next-mayor-cycle} $receipt_summary"
   return 1
+}
+
+_mayor_notify_receipts_dir() {
+  echo "$SGT_CONFIG/mayor-notify-receipts"
+}
+
+_mayor_notify_attempts_dir() {
+  echo "$SGT_CONFIG/mayor-notify-attempts"
+}
+
+_mayor_notify_receipt_summary() {
+  printf 'channel=%s target=%s message_key=%s attempt=%s verified_at=%s outcome=%s' \
+    "$(_escape_quotes "${_MAYOR_NOTIFY_RECEIPT_CHANNEL:-unknown}")" \
+    "$(_escape_quotes "${_MAYOR_NOTIFY_RECEIPT_TARGET:-unknown}")" \
+    "$(_escape_quotes "${_MAYOR_NOTIFY_RECEIPT_MESSAGE_KEY:-unknown}")" \
+    "${_MAYOR_NOTIFY_RECEIPT_ATTEMPT:-0}" \
+    "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown}" \
+    "$(_escape_quotes "${_MAYOR_NOTIFY_RECEIPT_OUTCOME:-unknown}")"
+}
+
+_mayor_notify_message_key() {
+  local channel="${1:-}" target="${2:-}" message="${3:-}"
+  local basis
+  basis="$(printf '%s|%s|%s' "$channel" "$target" "$(_one_line "$message")")"
+  echo "notify-$(_mayor_dispatch_trigger_key_id "$basis")"
+}
+
+_mayor_notify_attempt_state_file() {
+  local channel="${1:-}" target="${2:-}" message_key="${3:-}"
+  local key key_id dir
+  [[ -n "$channel" && -n "$target" && -n "$message_key" ]] || return 1
+  key="${channel}|${target}|${message_key}"
+  key_id="$(_mayor_dispatch_trigger_key_id "$key")"
+  dir="$(_mayor_notify_attempts_dir)"
+  mkdir -p "$dir" || return 1
+  echo "$dir/$key_id.state"
+}
+
+_mayor_notify_state_load() {
+  local file="${1:-}"
+  [[ -n "$file" && -f "$file" ]] || return 1
+  eval "$(grep -E '^(CHANNEL|TARGET|MESSAGE_KEY|ATTEMPT_COUNT|RETRY_USED|LAST_OUTCOME|LAST_REASON|LAST_VERIFIED_AT|ESCALATED)=' "$file" 2>/dev/null || true)"
+  _MAYOR_NOTIFY_STATE_CHANNEL="${CHANNEL:-}"
+  _MAYOR_NOTIFY_STATE_TARGET="${TARGET:-}"
+  _MAYOR_NOTIFY_STATE_MESSAGE_KEY="${MESSAGE_KEY:-}"
+  _MAYOR_NOTIFY_STATE_ATTEMPT_COUNT="${ATTEMPT_COUNT:-0}"
+  _MAYOR_NOTIFY_STATE_RETRY_USED="${RETRY_USED:-0}"
+  _MAYOR_NOTIFY_STATE_LAST_OUTCOME="${LAST_OUTCOME:-none}"
+  _MAYOR_NOTIFY_STATE_LAST_REASON="${LAST_REASON:-none}"
+  _MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT="${LAST_VERIFIED_AT:-}"
+  _MAYOR_NOTIFY_STATE_ESCALATED="${ESCALATED:-0}"
+  return 0
+}
+
+_mayor_notify_state_write() {
+  local file="${1:-}" channel="${2:-}" target="${3:-}" message_key="${4:-}" attempt_count="${5:-0}" retry_used="${6:-0}" last_outcome="${7:-none}" last_reason="${8:-none}" last_verified_at="${9:-}" escalated="${10:-0}"
+  local state_tmp
+  [[ -n "$file" && -n "$channel" && -n "$target" && -n "$message_key" ]] || return 1
+  state_tmp="${file}.tmp.$$"
+  cat > "$state_tmp" <<EOF
+CHANNEL=$(_escape_wake_value "$channel")
+TARGET=$(_escape_wake_value "$target")
+MESSAGE_KEY=$(_escape_wake_value "$message_key")
+ATTEMPT_COUNT=$(_escape_wake_value "$attempt_count")
+RETRY_USED=$(_escape_wake_value "$retry_used")
+LAST_OUTCOME=$(_escape_wake_value "$last_outcome")
+LAST_REASON=$(_escape_wake_value "$last_reason")
+LAST_VERIFIED_AT=$(_escape_wake_value "$last_verified_at")
+ESCALATED=$(_escape_wake_value "$escalated")
+EOF
+  mv "$state_tmp" "$file"
+}
+
+_mayor_notify_receipt_record() {
+  local channel="${1:-}" target="${2:-}" message_key="${3:-}" attempt="${4:-}" outcome="${5:-}" reason="${6:-}"
+  local dir key key_id file receipt_tmp now_iso
+  [[ -n "$channel" && -n "$target" && -n "$message_key" && -n "$attempt" && -n "$outcome" ]] || return 1
+  dir="$(_mayor_notify_receipts_dir)"
+  mkdir -p "$dir" || return 1
+  key="${channel}|${target}|${message_key}|attempt=${attempt}"
+  key_id="$(_mayor_dispatch_trigger_key_id "$key")"
+  file="$dir/$key_id.state"
+  now_iso="$(date -Iseconds)"
+  receipt_tmp="${file}.tmp.$$"
+  cat > "$receipt_tmp" <<EOF
+CHANNEL=$(_escape_wake_value "$channel")
+TARGET=$(_escape_wake_value "$target")
+MESSAGE_KEY=$(_escape_wake_value "$message_key")
+ATTEMPT=$(_escape_wake_value "$attempt")
+VERIFIED_AT=$(_escape_wake_value "$now_iso")
+OUTCOME=$(_escape_wake_value "$outcome")
+REASON=$(_escape_wake_value "${reason:-none}")
+EOF
+  mv "$receipt_tmp" "$file"
+  _MAYOR_NOTIFY_RECEIPT_FILE="$file"
+  _MAYOR_NOTIFY_RECEIPT_CHANNEL="$channel"
+  _MAYOR_NOTIFY_RECEIPT_TARGET="$target"
+  _MAYOR_NOTIFY_RECEIPT_MESSAGE_KEY="$message_key"
+  _MAYOR_NOTIFY_RECEIPT_ATTEMPT="$attempt"
+  _MAYOR_NOTIFY_RECEIPT_VERIFIED_AT="$now_iso"
+  _MAYOR_NOTIFY_RECEIPT_OUTCOME="$outcome"
+}
+
+_mayor_notify_is_transient_failure() {
+  local text="${1:-}"
+  [[ "$(_one_line "$text" | tr '[:upper:]' '[:lower:]')" =~ (timeout|timed[[:space:]-]?out|network|connection[[:space:]-]?reset|connection[[:space:]-]?refused|temporary|temporarily|try[[:space:]-]?again|http[[:space:]-]?5[0-9]{2}|5[0-9]{2}|secondary[[:space:]-]?rate[[:space:]-]?limit|rate[[:space:]-]?limit) ]]
 }
 
 _mayor_dispatch_trigger_key() {
@@ -2796,16 +2909,8 @@ _find_recent_duplicate_issue() {
 }
 
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
-_notify_openclaw() {
-  local message="${1:-}"
-  [[ -n "$message" ]] || return 0
-  command -v openclaw &>/dev/null || return 0
-  [[ -f "$SGT_NOTIFY" ]] || return 0
-
-  local channel="" to="" reply_to=""
-  local notify_out=""
-  local py_bin=""
-  local py_parse_notify='import json, sys
+_openclaw_notify_config_read() {
+  local notify_out="" py_bin="" py_parse_notify='import json, sys
 path = sys.argv[1]
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -2824,18 +2929,27 @@ def get(keys):
 print(get(["channel"]))
 print(get(["to"]))
 print(get(["reply_to", "reply-to", "replyTo"]))'
+  command -v openclaw &>/dev/null || return 1
+  [[ -f "$SGT_NOTIFY" ]] || return 1
 
-  # Avoid heredoc inside command substitution to prevent bash parser warnings.
   if command -v python3 &>/dev/null; then
     py_bin="python3"
   elif command -v python &>/dev/null; then
     py_bin="python"
   else
-    return 0
+    return 1
   fi
 
-  notify_out="$("$py_bin" -c "$py_parse_notify" "$SGT_NOTIFY" 2>/dev/null)" || return 0
+  notify_out="$("$py_bin" -c "$py_parse_notify" "$SGT_NOTIFY" 2>/dev/null)" || return 1
+  echo "$notify_out"
+}
 
+_notify_openclaw() {
+  local message="${1:-}"
+  [[ -n "$message" ]] || return 0
+  local channel="" to="" reply_to="" notify_out=""
+  notify_out="$(_openclaw_notify_config_read || true)"
+  [[ -n "$notify_out" ]] || return 0
   local fields=()
   while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
   channel="${fields[0]:-}"
@@ -2850,6 +2964,182 @@ print(get(["reply_to", "reply-to", "replyTo"]))'
   "${cmd[@]}" &>/dev/null &
   disown 2>/dev/null
   log_event "OPENCLAW_NOTIFY channel=$channel to=$to reply_to=$reply_to message=$message"
+}
+
+_mayor_notify_rigger() {
+  local message="${1:-}"
+  local suppress_decision_log="${2:-0}"
+  local channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
+  local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" escalated=0
+  local verify_outcome="" verify_reason="" verify_details="" attempt=0 should_retry=0
+  local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
+
+  [[ -n "$message" ]] || return 1
+  if [[ "$message" == mayor\ warning:\ decision-log\ write\ failed* ]]; then
+    suppress_decision_log=1
+  fi
+
+  notify_out="$(_openclaw_notify_config_read || true)"
+  if [[ -z "$notify_out" ]]; then
+    local no_transport_reason
+    no_transport_reason="openclaw-unavailable-or-not-configured"
+    target="rigger"
+    message_key="$(_mayor_notify_message_key "rigger" "$target" "$message")"
+    _mayor_notify_receipt_record "rigger" "$target" "$message_key" "1" "skipped-unavailable" "$no_transport_reason" || true
+    echo "[mayor] notify skipped ($no_transport_reason): $message"
+    log_event "MAYOR_NOTIFY_RECEIPT non-success reason=$no_transport_reason $(_mayor_notify_receipt_summary)"
+    if [[ "$suppress_decision_log" != "1" ]]; then
+      _mayor_record_decision "MAYOR NOTIFY SKIP reason=$no_transport_reason retry=no-openclaw $(_mayor_notify_receipt_summary)" "$context" "$SGT_ROOT" || true
+    fi
+    return 1
+  fi
+
+  local fields=()
+  while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
+  channel="${fields[0]:-}"
+  to="${fields[1]:-}"
+  reply_to="${fields[2]:-}"
+  [[ -n "$channel" ]] || channel="last"
+  if [[ -n "$to" ]]; then
+    target="${to}|channel=${channel}"
+  else
+    target="channel=${channel}"
+  fi
+  message_key="$(_mayor_notify_message_key "$channel" "$target" "$message")"
+  state_file="$(_mayor_notify_attempt_state_file "$channel" "$target" "$message_key")" || return 1
+
+  if _mayor_notify_state_load "$state_file"; then
+    attempt_count="${_MAYOR_NOTIFY_STATE_ATTEMPT_COUNT:-0}"
+    retry_used="${_MAYOR_NOTIFY_STATE_RETRY_USED:-0}"
+    last_outcome="${_MAYOR_NOTIFY_STATE_LAST_OUTCOME:-none}"
+    last_reason="${_MAYOR_NOTIFY_STATE_LAST_REASON:-none}"
+    escalated="${_MAYOR_NOTIFY_STATE_ESCALATED:-0}"
+  else
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "0" "0" "none" "none" "" "0" || return 1
+  fi
+
+  if [[ "$last_outcome" == "delivered" ]]; then
+    log_event "MAYOR_NOTIFY_SKIP reason=replayed-message-key-existing-success channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key"
+    if [[ "$suppress_decision_log" != "1" ]]; then
+      _mayor_record_decision "MAYOR NOTIFY SKIP reason=replayed-message-key-existing-success retry=no-op channel=$channel target=$target message_key=$message_key" "$context" "$SGT_ROOT" || true
+    fi
+    return 0
+  fi
+
+  if [[ "$retry_used" =~ ^[0-9]+$ ]] && (( retry_used >= 1 )) && [[ "$last_outcome" != "delivered" ]]; then
+    if [[ "${escalated:-0}" != "1" ]]; then
+      echo "[mayor] notify escalation: retry budget exhausted target=$target message_key=$message_key"
+      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" || true
+      if [[ "$suppress_decision_log" != "1" ]]; then
+        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+      fi
+    else
+      log_event "MAYOR_NOTIFY_ESCALATE_SUPPRESS reason=already-escalated channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
+      if [[ "$suppress_decision_log" != "1" ]]; then
+        _mayor_record_decision "MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+      fi
+    fi
+    return 1
+  fi
+
+  if [[ "$attempt_count" =~ ^[0-9]+$ ]] && (( attempt_count >= 2 )); then
+    if [[ "${escalated:-0}" != "1" ]]; then
+      echo "[mayor] notify escalation: retry budget exhausted target=$target message_key=$message_key"
+      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" || true
+      if [[ "$suppress_decision_log" != "1" ]]; then
+        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+      fi
+    fi
+    return 1
+  fi
+
+  while :; do
+    attempt=$((attempt_count + 1))
+    verify_outcome="transport-failure"
+    verify_reason="transport-command-failed"
+    verify_details=""
+
+    local -a cmd=(openclaw agent --agent gastown --deliver --message "[SGT Mayor] $message" --channel "$channel")
+    [[ -n "$to" ]] && cmd+=(--to "$to")
+    [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
+    set +e
+    verify_details="$("${cmd[@]}" 2>&1)"
+    send_rc=$?
+    set -e
+    verify_details="$(_one_line "$verify_details")"
+
+    if [[ "$send_rc" -eq 0 ]]; then
+      if [[ "$verify_details" =~ [Ss]tale[[:space:]_-]?[Aa]ck|[Aa]ck[[:space:]_-]?[Ss]tale|mismatched[[:space:]_-]?[Aa]ck ]]; then
+        verify_outcome="stale-ack"
+        verify_reason="stale-ack"
+      elif [[ "$verify_details" =~ [Aa]ck|[Dd]eliver|[Rr]eceipt|message_id|delivery_id ]]; then
+        verify_outcome="delivered"
+        verify_reason="ack-verified"
+      else
+        verify_outcome="missing-ack"
+        verify_reason="missing-ack"
+      fi
+    else
+      if _mayor_notify_is_transient_failure "$verify_details"; then
+        verify_outcome="transport-failure"
+        verify_reason="transport-transient-failure"
+      else
+        verify_outcome="transport-failure"
+        verify_reason="transport-hard-failure"
+      fi
+    fi
+
+    _mayor_notify_receipt_record "$channel" "$target" "$message_key" "$attempt" "$verify_outcome" "$verify_reason" || true
+    log_event "MAYOR_NOTIFY_RECEIPT channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason details=\"$(_escape_quotes "$verify_details")\""
+    if [[ "$suppress_decision_log" != "1" ]]; then
+      _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason" "$context" "$SGT_ROOT" || true
+    fi
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+
+    if [[ "$verify_outcome" == "delivered" ]]; then
+      echo "[mayor] notified Rigger: $message"
+      log_event "MAYOR_NOTIFY_RIGGER success channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt"
+      delivered=1
+      break
+    fi
+
+    should_retry=0
+    if [[ "$attempt" -eq 1 ]]; then
+      if [[ "$verify_outcome" == "missing-ack" || "$verify_outcome" == "stale-ack" || "$verify_reason" == "transport-transient-failure" ]]; then
+        should_retry=1
+      fi
+    fi
+    if [[ "$should_retry" -eq 1 ]]; then
+      retry_used=1
+      attempt_count="$attempt"
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+      continue
+    fi
+    if [[ "$attempt" -eq 1 ]]; then
+      retry_used=1
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+    fi
+    break
+  done
+
+  if [[ "$delivered" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ "$escalated" != "1" ]]; then
+    local escalate_reason
+    escalate_reason="notify-$verify_reason"
+    echo "[mayor] notify escalation: $escalate_reason target=$target message_key=$message_key"
+    log_event "MAYOR_NOTIFY_ESCALATE reason=$escalate_reason channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt outcome=$verify_outcome"
+    if [[ "$suppress_decision_log" != "1" ]]; then
+      _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=$escalate_reason retry=manual channel=$channel target=$target message_key=$message_key attempt=$attempt outcome=$verify_outcome" "$context" "$SGT_ROOT" || true
+    fi
+    escalated=1
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "${retry_used:-1}" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+  fi
+  return 1
 }
 
 # Wake the mayor via FIFO (non-blocking, fire-and-forget)
@@ -6044,18 +6334,6 @@ MAYORMD
 
     log_event "MAYOR_CYCLE completed (trigger: $wake_reason)"
   done
-}
-
-# Notify Rigger agent via OpenClaw messaging (fire-and-forget)
-_mayor_notify_rigger() {
-  local message="$1"
-  if command -v openclaw &>/dev/null && [[ -f "$SGT_NOTIFY" ]]; then
-    _notify_openclaw "[SGT Mayor] $message"
-    echo "[mayor] notified Rigger: $message"
-    log_event "MAYOR_NOTIFY_RIGGER $message"
-    return 0
-  fi
-  return 1
 }
 
 # Public command: sgt mayor notify "<message>" — lets AI mayor report to Rigger
