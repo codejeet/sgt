@@ -137,6 +137,7 @@ export SGT_DEACON_HEARTBEAT_STALE_SECS=300
 
 - Mayor also checks this heartbeat age and proactively restarts deacon when the heartbeat is missing/invalid/stale.
 - `sgt status` now shows deacon heartbeat age + health (`healthy|stale|unknown`) and the active stale threshold.
+- `sgt status` render guardrails are non-fatal: terminal width falls back safely in non-TTY/sparse envs, and polecat metadata races/misses are surfaced as actionable warning lines (for example, retry `sgt status` or run `sgt nuke <polecat>` if stale) while `sgt status` still exits `0`.
 
 Critical/high issue alerts from Mayor are deduped with a cooldown:
 - Mayor sends at most one identical critical/high OpenClaw alert per rig within the cooldown window.

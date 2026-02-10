@@ -78,6 +78,15 @@ _term_cols() {
   echo "$cols"
 }
 
+_status_pr_title_cols() {
+  local cols
+  cols="$(_term_cols)"
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  cols=$((cols - 10))
+  (( cols < 0 )) && cols=0
+  echo "$cols"
+}
+
 _repeat() {
   local ch="$1" n="$2"
   (( n <= 0 )) && return 0
@@ -1370,8 +1379,7 @@ cmd_status() {
   local status_term_cols status_pr_title_cols
   status_term_cols="$(_term_cols)"
   [[ "$status_term_cols" =~ ^[0-9]+$ ]] || status_term_cols=80
-  status_pr_title_cols=$((status_term_cols - 10))
-  (( status_pr_title_cols < 0 )) && status_pr_title_cols=0
+  status_pr_title_cols="$(_status_pr_title_cols)"
 
   _section "Agents"
 
@@ -1495,16 +1503,41 @@ cmd_status() {
     local pname
     pname="$(basename "$f")"
     (
-      source "$f"
+      local session repo branch issue missing_fields
+      local pr_number pr_state pr_title pr_chunk pr_meta pr_title_cols
+      if ! source "$f" 2>/dev/null; then
+        printf "  %s%-14s%s %s\n" "$(_bold)" "$pname" "$(_reset)" "$(_status_badge "unknown")"
+        printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ metadata unreadable (possibly mid-write race); retry 'sgt status'." "$(_reset)"
+        return 0
+      fi
+      session="${SESSION:-}"
+      repo="${REPO:-}"
+      branch="${BRANCH:-}"
+      issue="${ISSUE:-?}"
+      missing_fields=""
+      [[ -z "$session" ]] && missing_fields="${missing_fields} SESSION"
+      [[ -z "$repo" ]] && missing_fields="${missing_fields} REPO"
+      [[ -z "$branch" ]] && missing_fields="${missing_fields} BRANCH"
+      if [[ -n "$missing_fields" ]]; then
+        printf "  %s%-14s%s %s  %s#%s%s\n" \
+          "$(_bold)" "$pname" "$(_reset)" \
+          "$(_status_badge "unknown")" \
+          "$(_fg_gray)" "$issue" "$(_reset)"
+        printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ metadata missing:${missing_fields} (possible race); retry 'sgt status' or run 'sgt nuke $pname' if stale." "$(_reset)"
+        return 0
+      fi
       local alive="dead"
-      tmux has-session -t "$SESSION" 2>/dev/null && alive="alive"
+      tmux has-session -t "$session" 2>/dev/null && alive="alive"
 
-      local pr_number pr_state pr_title
-      pr_number=$(gh pr list --repo "$REPO" --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || true)
-      pr_state=$(gh pr list --repo "$REPO" --head "$BRANCH" --json state --jq '.[0].state' 2>/dev/null || true)
-      pr_title=$(gh pr list --repo "$REPO" --head "$BRANCH" --json title --jq '.[0].title' 2>/dev/null || true)
+      pr_number=""
+      pr_state=""
+      pr_title=""
+      pr_meta="$(gh pr list --repo "$repo" --head "$branch" --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
+      if [[ -n "$pr_meta" ]]; then
+        IFS=$'\t' read -r pr_number pr_state pr_title <<< "$pr_meta"
+      fi
 
-      local pr_chunk=""
+      pr_chunk=""
       if [[ -n "$pr_number" ]]; then
         pr_chunk="  PR#${pr_number} ${pr_state}"
       fi
@@ -1512,12 +1545,18 @@ cmd_status() {
       printf "  %s%-14s%s %s  %s#%s%s  %s%s%s\n" \
         "$(_bold)" "$pname" "$(_reset)" \
         "$(_status_badge "$alive")" \
-        "$(_fg_gray)" "$ISSUE" "$(_reset)" \
-        "$(_dim)" "$BRANCH$pr_chunk" "$(_reset)"
+        "$(_fg_gray)" "$issue" "$(_reset)" \
+        "$(_dim)" "$branch$pr_chunk" "$(_reset)"
+
+      if [[ "$alive" == "dead" && -z "$pr_number" ]]; then
+        printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ PR metadata unavailable (possible race); retry 'sgt status' or run 'sgt nuke $pname' if stale." "$(_reset)"
+      fi
 
       # Optional: show PR title as a second dense line (only if present)
       if [[ -n "$pr_title" ]]; then
-        printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:status_pr_title_cols}" "$(_reset)"
+        pr_title_cols="${status_pr_title_cols:-$(_status_pr_title_cols)}"
+        [[ "$pr_title_cols" =~ ^[0-9]+$ ]] || pr_title_cols="$(_status_pr_title_cols)"
+        printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:pr_title_cols}" "$(_reset)"
       fi
     )
   done

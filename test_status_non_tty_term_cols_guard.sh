@@ -28,6 +28,10 @@ if [[ "$args" == *" pr list "* ]] && [[ "$args" == *" --json title "* ]]; then
   echo "Very long pull request title that should be safely truncated in narrow mode"
   exit 0
 fi
+if [[ "$args" == *" pr list "* ]] && [[ "$args" == *" --json number,state,title "* ]]; then
+  echo $'123\tOPEN\tVery long pull request title that should be safely truncated in narrow mode'
+  exit 0
+fi
 exit 0
 GH
 chmod +x "$TMP_HOME/.local/bin/gh"
@@ -106,5 +110,6 @@ PSTATE
 echo "=== status term-cols guard regression ==="
 run_case "non-tty with COLUMNS unset" ""
 run_case "non-tty with narrow COLUMNS" "1"
+run_case "non-tty with non-numeric COLUMNS" "oops"
 
 echo "ALL TESTS PASSED"
