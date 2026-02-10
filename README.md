@@ -18,9 +18,48 @@ The repo includes a minimal Web UI for realtime monitoring and dispatch:
 Gas Town got bloated/fragile over time: “beads” were easy to break, and persistence/state became brittle.
 SGT replaces that with a simpler mental model: GitHub Issues/PRs + tmux + `gh`.
 
-## OpenClaw notifications
+## Repo Plans (SGT_PLAN.json) — deterministic parallel + sequential
+
+SGT supports **repo-local work plans** so the system can keep itself fed without relying on LLM planning.
+
+- **File**: `SGT_PLAN.json` at the repo root of any rig you want on autopilot.
+- **What it does**: defines a DAG of tasks with explicit dependencies via `depends_on`.
+- **How it runs**:
+  - Mayor calls `sgt plan tick <rig>` automatically for any rig that contains `SGT_PLAN.json`.
+  - `sgt plan tick` queues “ready” tasks up to `policy.max_in_flight`.
+  - Plan state is stored at: `~/sgt/.sgt/plan-state/<rig>.json`
+
+### Minimal schema
+
+```json
+{
+  "version": 1,
+  "rig": "scrapegoat",
+  "policy": { "max_in_flight": 2 },
+  "tasks": [
+    { "id": "ci", "title": "Add CI", "depends_on": [] },
+    { "id": "lint-fix", "title": "Fix lint", "depends_on": ["ci"] }
+  ]
+}
+```
+
+### Manual control
+
+```bash
+# queue ready work now
+sgt plan tick scrapegoat
+
+# wake mayor immediately (event-driven)
+sgt wake-mayor "plan-update:scrapegoat"
+```
+
+## CI self-healing (Mayor watchdog)
+
+For rigs with `SGT_PLAN.json`, Mayor also watches the latest **master** GitHub Actions run.
+If it goes red, Mayor auto-dispatches a **CI-fix** issue (once per failing SHA) so the system repairs itself instead of stalling.
 
 ## Security gate (sgt-authorized label)
+
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.
 
 To disable this gate (not recommended on public repos), set:
@@ -28,6 +67,8 @@ To disable this gate (not recommended on public repos), set:
 ```bash
 export SGT_REQUIRE_AUTH_LABEL=0
 ```
+
+## OpenClaw notifications
 
 SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued); periodic all-clear checks stay quiet.
 
