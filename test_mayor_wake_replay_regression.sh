@@ -62,6 +62,9 @@ BASH
 echo "=== mayor wake trigger ttl dedupe ==="
 "$REPO_ROOT/test_mayor_wake_dedupe_ttl.sh"
 
+echo "=== mayor post-merge dispatch cooldown audit trail ==="
+"$REPO_ROOT/test_mayor_post_merge_dispatch_cooldown_audit.sh"
+
 echo "=== mayor post-merge dispatch durable dedupe fence ==="
 "$REPO_ROOT/test_mayor_post_merge_dispatch_fence.sh"
 

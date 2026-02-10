@@ -118,7 +118,12 @@ export SGT_MAYOR_WAKE_DEDUPE_TTL=15
 ```
 
 Set `SGT_MAYOR_WAKE_DEDUPE_TTL=0` to disable wake-trigger dedupe.
-- Suppressed stale triggers emit an explicit skip reason in mayor output, Rigger notification status, and `~/.sgt/mayor-decisions.log` (`MAYOR WAKE SKIP (duplicate-trigger)`).
+- Suppressed stale triggers are logged as structured dispatch-cooldown suppressions with:
+  - `reason=dispatch_cooldown`
+  - `trigger_key=<wake event key>`
+  - `ttl_remaining=<seconds>`
+  - `prior_decision_ts=<unix epoch>`
+- Suppressed dispatches append a durable `~/.sgt/mayor-decisions.log` line (`MAYOR WAKE SKIP reason=dispatch_cooldown ...`).
 
 Mayor proactive post-merge dispatches also use a durable idempotency fence:
 - Mayor keys merged-trigger dispatch eligibility by `repo+PR+merged head SHA` (`owner/repo|pr=<n>|merged_head=<sha>`), persisted under `~/.sgt/mayor-dispatch-triggers/`.
@@ -155,6 +160,24 @@ sgt peek mayor
 ```
 
 5. If a new post-merge window is expected but skips continue, confirm the upstream event is for a new head SHA; dispatch dedupe is intentionally sticky per `repo+PR+merged_head` across mayor restarts.
+
+Troubleshooting dispatch-cooldown suppressions (replayed merged wake events):
+1. Inspect structured cooldown suppression telemetry:
+
+```bash
+grep 'MAYOR_DISPATCH_COOLDOWN_SUPPRESSED reason=dispatch_cooldown' ~/.sgt/sgt.log | tail -20
+```
+
+2. Confirm each suppressed dispatch wrote a durable decision-log audit line:
+
+```bash
+grep 'MAYOR WAKE SKIP reason=dispatch_cooldown' ~/.sgt/mayor-decisions.log | tail -20
+```
+
+3. Correlate suppression context:
+- `trigger_key` identifies the deduped wake trigger.
+- `ttl_remaining` shows remaining cooldown window.
+- `prior_decision_ts` shows the previous accepted decision timestamp used for cooldown math.
 
 Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
 - Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.

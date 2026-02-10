@@ -4385,11 +4385,18 @@ _mayor_loop() {
           last_seen=""
         fi
         if [[ -n "$event_key" && "$wake_dedupe_ttl" -gt 0 ]] && _wake_trigger_should_suppress "$last_seen" "$now_ts" "$wake_dedupe_ttl"; then
+          local ttl_remaining prior_decision_ts
           age=$((now_ts - last_seen))
-          skip_reason="duplicate wake trigger suppressed (key=$event_key age=${age}s ttl=${wake_dedupe_ttl}s)"
+          ttl_remaining=$((wake_dedupe_ttl - age))
+          if [[ "$ttl_remaining" -lt 0 ]]; then
+            ttl_remaining=0
+          fi
+          prior_decision_ts="$last_seen"
+          skip_reason="dispatch cooldown active (reason=dispatch_cooldown trigger_key=$event_key age=${age}s ttl=${wake_dedupe_ttl}s ttl_remaining=${ttl_remaining}s prior_decision_ts=${prior_decision_ts})"
           echo "[mayor] wake skipped - $skip_reason"
+          log_event "MAYOR_DISPATCH_COOLDOWN_SUPPRESSED reason=dispatch_cooldown trigger_key=\"$(_escape_quotes "$event_key")\" ttl_remaining=${ttl_remaining}s prior_decision_ts=${prior_decision_ts} wake=\"$(_escape_quotes "$event_reason")\""
           _mayor_notify_rigger "mayor skip: $skip_reason"
-          _mayor_record_decision "MAYOR WAKE SKIP (duplicate-trigger) $skip_reason" "wake-dedupe-skip" "$SGT_ROOT" || true
+          _mayor_record_decision "MAYOR WAKE SKIP reason=dispatch_cooldown trigger_key=$event_key ttl_remaining=${ttl_remaining}s prior_decision_ts=${prior_decision_ts} wake=$event_reason" "dispatch-cooldown-skip" "$SGT_ROOT" || true
           continue
         fi
         if [[ -n "$event_key" ]]; then
