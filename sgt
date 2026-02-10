@@ -404,6 +404,154 @@ EOF
   return 0
 }
 
+_mayor_reconcile_triggered_by_transition() {
+  local wake_reason="${1:-}"
+  shift || true
+  local event_reason
+  if [[ "$wake_reason" == "periodic" ]]; then
+    return 1
+  fi
+  for event_reason in "$@"; do
+    if [[ "$event_reason" == merged:* || "$event_reason" == dog-approved:* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_mayor_stale_polecat_fence_dir() {
+  echo "$SGT_CONFIG/mayor-stale-polecat-fence"
+}
+
+_mayor_stale_polecat_fence_key() {
+  local repo="${1:-}" issue="${2:-}" branch="${3:-}" polecat="${4:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  echo "${owner_repo}|issue=${issue}|branch=${branch}|polecat=${polecat}"
+}
+
+_mayor_stale_polecat_pr_snapshot() {
+  local repo="${1:-}" branch="${2:-}"
+  local snapshot
+  snapshot=$(
+    gh pr list --repo "$repo" --head "$branch" --state all \
+      --json number,state \
+      --jq 'if length == 0 then "0|" else ((.[0].number|tostring) + "|" + (.[0].state // "")) end' 2>/dev/null || true
+  )
+  if [[ -z "$snapshot" || "$snapshot" != *"|"* ]]; then
+    echo "0|"
+    return 0
+  fi
+  echo "$snapshot"
+}
+
+_mayor_cleanup_stale_polecat() {
+  local pfile="${1:-}" pname="${2:-}" rig="${3:-}" repo="${4:-}" issue="${5:-}" branch="${6:-}" session="${7:-}" worktree="${8:-}" reason_code="${9:-}" issue_state="${10:-}" pr_number="${11:-}" pr_state="${12:-}"
+  local owner_repo key key_id fence_dir cleanup_marker decision_marker action
+  local -a action_parts=()
+
+  owner_repo="$(_repo_owner_repo "$repo")"
+  key="$(_mayor_stale_polecat_fence_key "$repo" "$issue" "$branch" "$pname")"
+  key_id="$(_mayor_dispatch_trigger_key_id "$key")"
+  fence_dir="$(_mayor_stale_polecat_fence_dir)"
+  mkdir -p "$fence_dir" || return 1
+  cleanup_marker="$fence_dir/${key_id}.cleanup"
+  decision_marker="$fence_dir/${key_id}.decision"
+
+  if [[ -f "$cleanup_marker" ]]; then
+    action="cleanup-already-applied"
+    rm -f "$pfile" 2>/dev/null || true
+  else
+    if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+      tmux kill-session -t "$session" 2>/dev/null || true
+      action_parts+=("killed-session")
+    else
+      action_parts+=("session-not-running")
+    fi
+
+    if [[ -n "$worktree" && -d "$worktree" ]]; then
+      local rpath
+      rpath=""
+      if [[ -n "$rig" ]]; then
+        rpath="$(rig_path "$rig" 2>/dev/null || true)"
+      fi
+      if [[ -n "$rpath" ]]; then
+        git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree" 2>/dev/null || true
+      else
+        rm -rf "$worktree" 2>/dev/null || true
+      fi
+      action_parts+=("removed-worktree")
+    else
+      action_parts+=("worktree-missing")
+    fi
+
+    if rm -f "$pfile" 2>/dev/null || [[ ! -f "$pfile" ]]; then
+      action_parts+=("removed-state")
+    else
+      action_parts+=("state-remove-failed")
+      action="$(IFS=+; echo "${action_parts[*]}")"
+      return 1
+    fi
+
+    action="$(IFS=+; echo "${action_parts[*]}")"
+    cat > "$cleanup_marker" <<EOF
+KEY=$key
+POLECAT=$pname
+REASON_CODE=$reason_code
+ACTION=$action
+UPDATED_AT=$(date -Iseconds)
+EOF
+  fi
+
+  if [[ ! -f "$decision_marker" ]]; then
+    _mayor_record_decision "MAYOR POLECAT CLEANUP reason_code=$reason_code polecat=$pname repo=$owner_repo issue=#${issue:-unknown} pr=#${pr_number:-unknown} branch=\"$(_escape_quotes "$branch")\" issue_state=${issue_state:-unknown} pr_state=${pr_state:-unknown} action=$action" "stale-polecat-cleanup" "$SGT_ROOT" || true
+    log_event "MAYOR_POLECAT_CLEANUP reason_code=$reason_code polecat=$pname repo=$owner_repo issue=#${issue:-unknown} pr=#${pr_number:-unknown} branch=\"$(_escape_quotes "$branch")\" issue_state=${issue_state:-unknown} pr_state=${pr_state:-unknown} action=$action"
+    cat > "$decision_marker" <<EOF
+KEY=$key
+POLECAT=$pname
+REASON_CODE=$reason_code
+ACTION=$action
+UPDATED_AT=$(date -Iseconds)
+EOF
+  fi
+
+  printf 'CLEANED|%s|%s|%s|%s|%s\n' "$pname" "$reason_code" "$action" "${issue:-}" "${pr_number:-}"
+}
+
+_mayor_reconcile_stale_polecats() {
+  local pfile pname snapshot rig repo issue branch session worktree status
+  for pfile in "$SGT_POLECATS"/*; do
+    [[ -f "$pfile" ]] || continue
+    pname="$(basename "$pfile")"
+    snapshot="$(
+      (
+        source "$pfile"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "${RIG:-}" "${REPO:-}" "${ISSUE:-}" "${BRANCH:-}" "${SESSION:-}" "${WORKTREE:-}" "${STATUS:-}"
+      ) 2>/dev/null
+    )"
+    IFS='|' read -r rig repo issue branch session worktree status <<< "$snapshot"
+    [[ -n "$repo" && -n "$branch" ]] || continue
+
+    local issue_state pr_snapshot pr_number pr_state reason_code
+    issue_state=""
+    if [[ "$issue" =~ ^[0-9]+$ && "$issue" != "0" ]]; then
+      issue_state=$(gh issue view "$issue" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)
+    fi
+
+    pr_snapshot="$(_mayor_stale_polecat_pr_snapshot "$repo" "$branch")"
+    IFS='|' read -r pr_number pr_state <<< "$pr_snapshot"
+    reason_code=""
+    if [[ "$issue_state" == "CLOSED" ]]; then
+      reason_code="stale-issue-closed"
+    elif [[ "$pr_state" == "MERGED" ]]; then
+      reason_code="stale-pr-merged"
+    fi
+    [[ -n "$reason_code" ]] || continue
+
+    _mayor_cleanup_stale_polecat "$pfile" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "$worktree" "$reason_code" "$issue_state" "$pr_number" "$pr_state"
+  done
+}
+
 _mayor_wake_dedupe_ttl_secs() {
   local raw="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}"
   if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
@@ -4715,6 +4863,20 @@ _mayor_loop() {
         log_event "MAYOR_CI_CHECK_WATCHDOG_SUPPRESS rig=$cw_rig repo=$cw_owner_repo pr=#$cw_pr check=\"$(_escape_quotes "$cw_check")\" state=$cw_state stale_seconds=${cw_age} threshold=${cw_threshold} check_url=\"$(_escape_quotes "$cw_check_url")\" dedupe_window=${ci_watch_dedupe}"
       fi
     done < <(_mayor_ci_check_watchdog_collect_stale)
+
+    # === 2d. Reconcile stale in-flight polecats after merge/close transitions ===
+    if _mayor_reconcile_triggered_by_transition "$wake_reason" "${cycle_events[@]+"${cycle_events[@]}"}"; then
+      local stale_cleanup_line
+      while IFS= read -r stale_cleanup_line; do
+        [[ -n "$stale_cleanup_line" ]] || continue
+        local cleanup_status cleanup_polecat cleanup_reason cleanup_action cleanup_issue cleanup_pr
+        IFS='|' read -r cleanup_status cleanup_polecat cleanup_reason cleanup_action cleanup_issue cleanup_pr <<< "$stale_cleanup_line"
+        if [[ "$cleanup_status" == "CLEANED" ]]; then
+          issues_found+="  - stale polecat $cleanup_polecat detected ($cleanup_reason)\n"
+          actions_taken+="  - cleaned stale polecat $cleanup_polecat (action=$cleanup_action issue=#${cleanup_issue:-unknown} pr=#${cleanup_pr:-unknown})\n"
+        fi
+      done < <(_mayor_reconcile_stale_polecats)
+    fi
 
     # === 3. Check for stale polecats (running > 30min) ===
     for pf in "$SGT_CONFIG/polecats"/*; do
