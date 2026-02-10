@@ -4107,10 +4107,7 @@ _mayor_loop() {
         if [[ -n "$event_key" ]]; then
           wake_seen_at["$event_key"]="$now_ts"
         fi
-        wake_summary=$(_mayor_wake_summary "$event_reason")
-        if [[ -n "$wake_summary" ]]; then
-          _mayor_notify_rigger "$wake_summary"
-        fi
+        local suppress_wake_summary="false"
         # Trigger at most one AI dispatch decision per cycle, even if
         # merged/dog-approved wake events are replayed within that cycle.
         if _wake_requires_dispatch_decision "$event_reason"; then
@@ -4137,6 +4134,8 @@ _mayor_loop() {
                 fi
                 echo "[mayor] dispatch skipped duplicate merged trigger key=$duplicate_key reason_code=$duplicate_reason_code trigger_event_key=$duplicate_event_key"
                 log_event "MAYOR_DISPATCH_SKIPPED_DUPLICATE reason_code=$duplicate_reason_code skip_reason=\"$(_escape_quotes "$duplicate_reason")\" trigger_event_key=\"$(_escape_quotes "$duplicate_event_key")\" rig=$duplicate_rig repo=\"$(_escape_quotes "$duplicate_repo")\" pr=#${duplicate_pr:-unknown} issue=#${duplicate_issue:-unknown} merged_head=\"$(_escape_quotes "$duplicate_merged_head")\" key=\"$(_escape_quotes "$duplicate_key")\" wake=\"$(_escape_quotes "$event_reason")\""
+                _mayor_record_decision "MAYOR WAKE SKIP (duplicate-merged-trigger) reason_code=$duplicate_reason_code trigger_key=$duplicate_key trigger_event_key=$duplicate_event_key wake=$event_reason" "dispatch-trigger-duplicate" "$SGT_ROOT" || true
+                suppress_wake_summary="true"
               else
                 needs_ai=true
               fi
@@ -4144,6 +4143,10 @@ _mayor_loop() {
           else
             needs_ai=true
           fi
+        fi
+        wake_summary=$(_mayor_wake_summary "$event_reason")
+        if [[ -n "$wake_summary" && "$suppress_wake_summary" != "true" ]]; then
+          _mayor_notify_rigger "$wake_summary"
         fi
       done
     fi
