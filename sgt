@@ -1425,7 +1425,7 @@ _mayor_merge_queue_count() {
 _mayor_snapshot_resolve_counts() {
   local snapshot_raw="${1:-}" live_raw="${2:-}"
   local snapshot="$snapshot_raw" live="$live_raw"
-  local chosen source status
+  local chosen source status selection_reason
 
   [[ "$snapshot" =~ ^[0-9]+$ ]] || snapshot=-1
   [[ "$live" =~ ^[0-9]+$ ]] || live=-1
@@ -1438,21 +1438,25 @@ _mayor_snapshot_resolve_counts() {
     chosen="$snapshot"
     source="snapshot"
     status="live-unavailable"
+    selection_reason="live-count-unavailable-fell-back-to-snapshot"
   elif [[ "$snapshot" -lt 0 ]]; then
     chosen="$live"
     source="live"
     status="snapshot-invalid"
+    selection_reason="snapshot-invalid-used-live"
   elif [[ "$snapshot" -eq "$live" ]]; then
     chosen="$snapshot"
     source="snapshot"
     status="in-sync"
+    selection_reason="snapshot-matches-live"
   else
     chosen="$live"
     source="live"
     status="stale-snapshot"
+    selection_reason="live-differs-from-snapshot"
   fi
 
-  echo "${snapshot}|${live}|${chosen}|${source}|${status}"
+  echo "${snapshot}|${live}|${chosen}|${source}|${status}|${selection_reason}"
 }
 
 _mayor_merge_queue_revalidate_once() {
@@ -1460,6 +1464,17 @@ _mayor_merge_queue_revalidate_once() {
   local live_count
   live_count="$(_mayor_merge_queue_count)"
   _mayor_snapshot_resolve_counts "$snapshot_count" "$live_count"
+}
+
+_mayor_merge_queue_issue_line() {
+  local chosen_count="${1:-}" context="${2:-}"
+  if [[ "$chosen_count" =~ ^[0-9]+$ && "$chosen_count" -gt 0 ]]; then
+    if [[ -n "$context" ]]; then
+      echo "  - merge queue has $chosen_count item(s) [$context]"
+    else
+      echo "  - merge queue has $chosen_count item(s)"
+    fi
+  fi
 }
 
 _normalize_label() {
@@ -6676,18 +6691,19 @@ _mayor_loop() {
     done
 
     # === 2. Check merge queue (refinery handles review + merge) ===
-    local mq_snapshot_count mq_live_count mq_count mq_source mq_status mq_resolution mq_guard_line
+    local mq_snapshot_count mq_live_count mq_count mq_source mq_status mq_selection_reason mq_resolution mq_guard_line mq_issue_line
     mq_snapshot_count="$(_mayor_merge_queue_count)"
     mq_resolution="$(_mayor_merge_queue_revalidate_once "$mq_snapshot_count")"
-    IFS='|' read -r mq_snapshot_count mq_live_count mq_count mq_source mq_status <<< "$mq_resolution"
-    mq_guard_line="merge_queue_count snapshot=$mq_snapshot_count live=$mq_live_count chosen=$mq_count source=$mq_source status=$mq_status"
+    IFS='|' read -r mq_snapshot_count mq_live_count mq_count mq_source mq_status mq_selection_reason <<< "$mq_resolution"
+    mq_guard_line="merge_queue_count snapshot=$mq_snapshot_count live=$mq_live_count chosen=$mq_count source=$mq_source status=$mq_status reason=$mq_selection_reason"
     echo "[mayor] snapshot guard $mq_guard_line"
     log_event "MAYOR_SNAPSHOT_GUARD $mq_guard_line"
     if [[ "$mq_status" == "stale-snapshot" ]]; then
       snapshot_freshness+="  - stale snapshot: $mq_guard_line\n"
     fi
-    if [[ "$mq_count" =~ ^[0-9]+$ && "$mq_count" -gt 0 ]]; then
-      issues_found+="  - merge queue has $mq_count item(s)\n"
+    mq_issue_line="$(_mayor_merge_queue_issue_line "$mq_count" "$mq_guard_line")"
+    if [[ -n "$mq_issue_line" ]]; then
+      issues_found+="$mq_issue_line\n"
     fi
 
     # === 2b. Watchdog: stalled REVIEW_UNCLEAR refinery queue items ===
