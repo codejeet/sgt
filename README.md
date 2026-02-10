@@ -358,6 +358,12 @@ Merge-queue enqueueing is also idempotent at `repo+PR` granularity (witness + ma
   - status line: `[merge-queue/<rig>] duplicate queue skipped — reason_code=duplicate-queue-key ...`
   - activity log: `MERGE_QUEUE_DUPLICATE_SKIP rig=<rig> repo=<owner/repo> pr=#<n> ...`
 
+Rig naming conventions for query/revalidation paths:
+- A rig name can be an alias (for example `oadm`), but it must map to exactly one canonical GitHub repo in `~/.sgt/rigs/<rig>`.
+- Status/mayor/refinery open-PR and open-issue checks always resolve `rig -> canonical repo` before querying GitHub.
+- If queue/polecat metadata contains an unknown rig, missing repo, invalid repo format, or repo that does not match the rig mapping, SGT now hard-fails that query path instead of treating it as an empty result.
+- Resolver failures emit explicit telemetry: `RIG_REPO_RESOLVE_ERROR ... reason_code=<unknown-rig|missing-repo|invalid-repo|repo-mismatch|...>`.
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.
