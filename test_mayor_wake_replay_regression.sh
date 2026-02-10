@@ -83,4 +83,7 @@ echo "=== mayor decision log durability ==="
 echo "=== refinery stale queue item guard ==="
 "$REPO_ROOT/test_refinery_stale_queue_item.sh"
 
+echo "=== refinery stale post-merge redispatch guard ==="
+"$REPO_ROOT/test_refinery_stale_post_merge_redispatch.sh"
+
 echo "ALL TESTS PASSED"
