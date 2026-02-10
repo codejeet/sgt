@@ -134,6 +134,8 @@ log_event() {
 _MAYOR_DECISION_LOG_LAST_ERROR=""
 _MAYOR_DISPATCH_TRIGGER_KEY=""
 _MAYOR_DISPATCH_TRIGGER_FILE=""
+_MAYOR_DISPATCH_ATTEMPT_KEY=""
+_MAYOR_DISPATCH_ATTEMPT_FILE=""
 _MAYOR_PRE_DISPATCH_REASON_CODE=""
 _MAYOR_PRE_DISPATCH_REASON=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
@@ -404,6 +406,216 @@ REASON=$reason
 CLAIMED_AT=$(date -Iseconds)
 EOF
   return 0
+}
+
+_mayor_dispatch_attempts_dir() {
+  echo "$SGT_CONFIG/mayor-dispatch-attempts"
+}
+
+_mayor_dispatch_verify_timeout_secs() {
+  local raw="${SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS:-120}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw="120"
+  echo "$raw"
+}
+
+_mayor_dispatch_attempt_key() {
+  local repo="${1:-}" issue="${2:-}" trigger_key="${3:-}"
+  local owner_repo
+  [[ -n "$repo" && -n "$issue" && -n "$trigger_key" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  echo "${owner_repo}|issue=${issue}|trigger=${trigger_key}"
+}
+
+_mayor_dispatch_attempt_claim() {
+  local repo="${1:-}" issue="${2:-}" trigger_key="${3:-}" trigger_reason="${4:-}"
+  local rig="${5:-}" issue_url="${6:-}" polecat="${7:-}" session="${8:-}" status="${9:-PENDING}"
+  local key key_id dir file now_iso now_ts timeout_secs deadline_ts
+  _MAYOR_DISPATCH_ATTEMPT_KEY=""
+  _MAYOR_DISPATCH_ATTEMPT_FILE=""
+  key="$(_mayor_dispatch_attempt_key "$repo" "$issue" "$trigger_key" || true)"
+  [[ -n "$key" ]] || return 2
+  key_id="$(_mayor_dispatch_trigger_key_id "$key")"
+  dir="$(_mayor_dispatch_attempts_dir)"
+  file="$dir/$key_id.state"
+  mkdir -p "$dir" || return 2
+  _MAYOR_DISPATCH_ATTEMPT_KEY="$key"
+  _MAYOR_DISPATCH_ATTEMPT_FILE="$file"
+  if ! ( set -o noclobber; : > "$file" ) 2>/dev/null; then
+    return 1
+  fi
+  now_iso="$(date -Iseconds)"
+  now_ts="$(date +%s)"
+  timeout_secs="$(_mayor_dispatch_verify_timeout_secs)"
+  deadline_ts=$((now_ts + timeout_secs))
+  cat > "$file" <<EOF
+KEY=$key
+REPO=$repo
+ISSUE=$issue
+RIG=$rig
+ISSUE_URL=$issue_url
+TRIGGER_KEY=$trigger_key
+TRIGGER_REASON=$trigger_reason
+DISPATCHED_POLECAT=$polecat
+DISPATCHED_SESSION=$session
+VERIFY_TIMEOUT_SECS=$timeout_secs
+VERIFY_STARTED_TS=$now_ts
+VERIFY_STARTED_AT=$now_iso
+VERIFY_DEADLINE_TS=$deadline_ts
+VERIFY_STATUS=$status
+VERIFY_REASON=awaiting-active-polecat
+RETRY_COUNT=0
+RETRY_STATUS=none
+LAST_UPDATED_AT=$now_iso
+EOF
+  return 0
+}
+
+_mayor_dispatch_attempt_mark() {
+  local file="${1:-}" status="${2:-}" reason="${3:-}" deadline_ts="${4:-}"
+  [[ -n "$file" && -f "$file" && -n "$status" ]] || return 1
+  _merge_queue_set_field "$file" "VERIFY_STATUS" "$status" || return 1
+  _merge_queue_set_field "$file" "VERIFY_REASON" "$reason" || return 1
+  if [[ -n "$deadline_ts" ]]; then
+    _merge_queue_set_field "$file" "VERIFY_DEADLINE_TS" "$deadline_ts" || return 1
+  fi
+  _merge_queue_set_field "$file" "LAST_UPDATED_AT" "$(date -Iseconds)" || return 1
+}
+
+_mayor_dispatch_attempt_active_signal() {
+  local repo="${1:-}" issue="${2:-}" rig="${3:-}" session="${4:-}"
+  local existing_polecat
+  if existing_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue" 2>/dev/null || true)" && [[ -n "$existing_polecat" ]]; then
+    echo "active-polecat|$existing_polecat"
+    return 0
+  fi
+  if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+    echo "active-session|$session"
+    return 0
+  fi
+  echo "inactive|none"
+  return 1
+}
+
+_mayor_dispatch_attempt_retry_once() {
+  local file="${1:-}"
+  local repo="" issue="" rig="" trigger_key="" retry_count="" session="" verify_timeout="" issue_title=""
+  local now_ts now_iso deadline_ts
+  [[ -n "$file" && -f "$file" ]] || return 1
+  eval "$(grep -E '^(REPO|ISSUE|RIG|TRIGGER_KEY|RETRY_COUNT|DISPATCHED_SESSION|VERIFY_TIMEOUT_SECS)=' "$file" 2>/dev/null || true)"
+  repo="${REPO:-}"
+  issue="${ISSUE:-}"
+  rig="${RIG:-}"
+  trigger_key="${TRIGGER_KEY:-}"
+  retry_count="${RETRY_COUNT:-0}"
+  session="${DISPATCHED_SESSION:-}"
+  verify_timeout="${VERIFY_TIMEOUT_SECS:-$(_mayor_dispatch_verify_timeout_secs)}"
+  [[ "$retry_count" =~ ^[0-9]+$ ]] || retry_count=0
+  [[ "$verify_timeout" =~ ^[0-9]+$ ]] || verify_timeout="$(_mayor_dispatch_verify_timeout_secs)"
+  if (( retry_count >= 1 )); then
+    _mayor_dispatch_attempt_mark "$file" "FAILED_TIMEOUT" "retry-budget-exhausted" || true
+    log_event "MAYOR_DISPATCH_VERIFY_FAIL reason=retry-budget-exhausted issue=#${issue:-unknown} trigger_key=\"$(_escape_quotes "$trigger_key")\" record=\"$(_escape_quotes "$file")\""
+    return 1
+  fi
+  now_ts="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  _merge_queue_set_field "$file" "RETRY_COUNT" "1" || true
+  _merge_queue_set_field "$file" "RETRY_STATUS" "in-progress" || true
+  _merge_queue_set_field "$file" "RETRY_STARTED_TS" "$now_ts" || true
+  _merge_queue_set_field "$file" "RETRY_STARTED_AT" "$now_iso" || true
+  _merge_queue_set_field "$file" "LAST_UPDATED_AT" "$now_iso" || true
+
+  issue_title="$(gh issue view "$issue" --repo "$repo" --json title --jq '.title // ""' 2>/dev/null || true)"
+  if [[ -z "$issue_title" ]]; then
+    _merge_queue_set_field "$file" "RETRY_STATUS" "failed-title-lookup" || true
+    _mayor_dispatch_attempt_mark "$file" "FAILED_TIMEOUT" "retry-title-lookup-failed" || true
+    log_event "MAYOR_DISPATCH_VERIFY_FAIL reason=retry-title-lookup-failed issue=#${issue:-unknown} repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\""
+    return 1
+  fi
+
+  if _resling_existing_issue "$rig" "$issue" "$issue_title" "$repo" "$(_ai_backend_default)" "" "mayor-dispatch-verify-timeout" "${trigger_key:-mayor-dispatch-verify-timeout}"; then
+    deadline_ts=$((now_ts + verify_timeout))
+    _merge_queue_set_field "$file" "DISPATCHED_POLECAT" "${_RESLING_LAST_POLECAT:-}" || true
+    if [[ -n "${_RESLING_LAST_POLECAT:-}" ]]; then
+      _merge_queue_set_field "$file" "DISPATCHED_SESSION" "sgt-${_RESLING_LAST_POLECAT}" || true
+    fi
+    _merge_queue_set_field "$file" "RETRY_STATUS" "dispatched" || true
+    _merge_queue_set_field "$file" "RETRY_COMPLETED_AT" "$(date -Iseconds)" || true
+    _mayor_dispatch_attempt_mark "$file" "RETRY_PENDING" "retry-dispatched-awaiting-active-polecat" "$deadline_ts" || true
+    log_event "MAYOR_DISPATCH_VERIFY_RETRY issue=#${issue:-unknown} repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\" retry_count=1 status=dispatched"
+    return 0
+  fi
+
+  if _mayor_dispatch_attempt_active_signal "$repo" "$issue" "$rig" "$session" >/dev/null; then
+    _merge_queue_set_field "$file" "RETRY_STATUS" "deduped-active" || true
+    _mayor_dispatch_attempt_mark "$file" "VERIFIED" "active-work-exists-after-retry-guard" || true
+    log_event "MAYOR_DISPATCH_VERIFY_SUCCESS issue=#${issue:-unknown} repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\" reason=active-work-exists-after-retry-guard"
+    return 0
+  fi
+
+  _merge_queue_set_field "$file" "RETRY_STATUS" "failed-dispatch" || true
+  _mayor_dispatch_attempt_mark "$file" "FAILED_TIMEOUT" "retry-dispatch-failed" || true
+  log_event "MAYOR_DISPATCH_VERIFY_FAIL reason=retry-dispatch-failed issue=#${issue:-unknown} repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\""
+  return 1
+}
+
+_mayor_dispatch_verify_replay() {
+  local dir file repo issue rig trigger_key verify_status verify_deadline session retry_count now_ts timeout_reason signal_type signal_value
+  dir="$(_mayor_dispatch_attempts_dir)"
+  [[ -d "$dir" ]] || return 0
+  now_ts="$(date +%s)"
+  for file in "$dir"/*.state; do
+    [[ -f "$file" ]] || continue
+    repo=""
+    issue=""
+    rig=""
+    trigger_key=""
+    verify_status=""
+    verify_deadline=""
+    session=""
+    retry_count=""
+    eval "$(grep -E '^(REPO|ISSUE|RIG|TRIGGER_KEY|VERIFY_STATUS|VERIFY_DEADLINE_TS|DISPATCHED_SESSION|RETRY_COUNT)=' "$file" 2>/dev/null || true)"
+    repo="${REPO:-}"
+    issue="${ISSUE:-}"
+    rig="${RIG:-}"
+    trigger_key="${TRIGGER_KEY:-}"
+    verify_status="${VERIFY_STATUS:-PENDING}"
+    verify_deadline="${VERIFY_DEADLINE_TS:-0}"
+    session="${DISPATCHED_SESSION:-}"
+    retry_count="${RETRY_COUNT:-0}"
+    [[ "$retry_count" =~ ^[0-9]+$ ]] || retry_count=0
+    [[ "$verify_deadline" =~ ^[0-9]+$ ]] || verify_deadline=0
+
+    case "$verify_status" in
+      VERIFIED|FAILED_TIMEOUT|SKIPPED)
+        continue
+        ;;
+    esac
+
+    if [[ -z "$repo" || -z "$issue" || -z "$trigger_key" ]]; then
+      _mayor_dispatch_attempt_mark "$file" "SKIPPED" "invalid-record-missing-required-fields" || true
+      log_event "MAYOR_DISPATCH_VERIFY_SKIP reason=invalid-record-missing-required-fields record=\"$(_escape_quotes "$file")\""
+      continue
+    fi
+
+    local signal_line=""
+    if signal_line="$(_mayor_dispatch_attempt_active_signal "$repo" "$issue" "$rig" "$session" 2>/dev/null)"; then
+      IFS='|' read -r signal_type signal_value <<< "$signal_line"
+      _mayor_dispatch_attempt_mark "$file" "VERIFIED" "$signal_type:${signal_value:-unknown}" || true
+      log_event "MAYOR_DISPATCH_VERIFY_SUCCESS issue=#$issue repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\" signal=$signal_type value=\"$(_escape_quotes "$signal_value")\""
+      _mayor_record_decision "MAYOR DISPATCH VERIFY success issue=#$issue trigger_key=$trigger_key signal=$signal_type value=${signal_value:-unknown}" "dispatch-verify-success" "$SGT_ROOT" || true
+      continue
+    fi
+
+    if (( verify_deadline > 0 && now_ts < verify_deadline )); then
+      continue
+    fi
+
+    timeout_reason="verify-timeout-no-active-work"
+    log_event "MAYOR_DISPATCH_VERIFY_TIMEOUT issue=#$issue repo=\"$(_escape_quotes "$repo")\" trigger_key=\"$(_escape_quotes "$trigger_key")\" retry_count=$retry_count reason=$timeout_reason"
+    _mayor_record_decision "MAYOR DISPATCH VERIFY timeout issue=#$issue trigger_key=$trigger_key retry_count=$retry_count reason=$timeout_reason" "dispatch-verify-timeout" "$SGT_ROOT" || true
+    _mayor_dispatch_attempt_retry_once "$file" || true
+  done
 }
 
 _mayor_reconcile_triggered_by_transition() {
@@ -2581,6 +2793,10 @@ cmd_sling() {
   issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
   info "issue #$issue_number created: $issue_url"
 
+  local mayor_dispatch_trigger_key mayor_dispatch_trigger_reason
+  mayor_dispatch_trigger_key="${SGT_MAYOR_DISPATCH_TRIGGER_KEY:-}"
+  mayor_dispatch_trigger_reason="${SGT_MAYOR_DISPATCH_TRIGGER_REASON:-}"
+
   # ── 2. Add to milestone if convoy specified ──
   if [[ -n "$convoy" ]]; then
     local owner_repo="${repo#https://github.com/}"
@@ -2628,6 +2844,21 @@ BACKEND=$backend
 CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
+
+  if [[ -n "$mayor_dispatch_trigger_key" ]]; then
+    local claim_rc
+    if _mayor_dispatch_attempt_claim "$repo" "$issue_number" "$mayor_dispatch_trigger_key" "$mayor_dispatch_trigger_reason" "$rig" "$issue_url" "$pname" "$session_name" "PENDING"; then
+      log_event "MAYOR_DISPATCH_VERIFY_ENQUEUE issue=#$issue_number repo=\"$(_escape_quotes "$repo")\" rig=$rig trigger_key=\"$(_escape_quotes "$mayor_dispatch_trigger_key")\" trigger_reason=\"$(_escape_quotes "$mayor_dispatch_trigger_reason")\" polecat=$pname"
+      _mayor_record_decision "MAYOR DISPATCH VERIFY enqueued issue=#$issue_number trigger_key=$mayor_dispatch_trigger_key rig=$rig polecat=$pname" "dispatch-verify-enqueue" "$SGT_ROOT" || true
+    else
+      claim_rc=$?
+      if [[ "$claim_rc" -eq 1 ]]; then
+        log_event "MAYOR_DISPATCH_VERIFY_DUPLICATE issue=#$issue_number repo=\"$(_escape_quotes "$repo")\" rig=$rig trigger_key=\"$(_escape_quotes "$mayor_dispatch_trigger_key")\""
+      else
+        log_event "MAYOR_DISPATCH_VERIFY_SKIP issue=#$issue_number repo=\"$(_escape_quotes "$repo")\" rig=$rig reason=attempt-claim-failed trigger_key=\"$(_escape_quotes "$mayor_dispatch_trigger_key")\""
+      fi
+    fi
+  fi
 
   # ── 5. Spawn AI agent in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
@@ -4719,6 +4950,8 @@ _mayor_loop() {
     fi
 
     local needs_ai=false
+    local ai_dispatch_trigger_key=""
+    local ai_dispatch_trigger_reason=""
     local issues_found=""
     local actions_taken=""
     local notify_rigger=""
@@ -4760,6 +4993,10 @@ _mayor_loop() {
           if [[ "$event_reason" == merged:* ]]; then
             if _mayor_dispatch_trigger_claim "$event_reason"; then
               needs_ai=true
+              if [[ -z "$ai_dispatch_trigger_key" ]]; then
+                ai_dispatch_trigger_key="$(_wake_trigger_key "$event_reason")"
+                ai_dispatch_trigger_reason="$(_wake_trigger_key "$event_reason")"
+              fi
             else
               claim_rc=$?
               if [[ "$claim_rc" -eq 1 ]]; then
@@ -4784,10 +5021,18 @@ _mayor_loop() {
                 suppress_wake_summary="true"
               else
                 needs_ai=true
+                if [[ -z "$ai_dispatch_trigger_key" ]]; then
+                  ai_dispatch_trigger_key="$(_wake_trigger_key "$event_reason")"
+                  ai_dispatch_trigger_reason="$(_wake_trigger_key "$event_reason")"
+                fi
               fi
             fi
           else
             needs_ai=true
+            if [[ -z "$ai_dispatch_trigger_key" ]]; then
+              ai_dispatch_trigger_key="$(_wake_trigger_key "$event_reason")"
+              ai_dispatch_trigger_reason="$(_wake_trigger_key "$event_reason")"
+            fi
           fi
         fi
         wake_summary=$(_mayor_wake_summary "$event_reason")
@@ -5070,6 +5315,8 @@ _mayor_loop() {
       fi
     done
 
+    _mayor_dispatch_verify_replay || true
+
     # === Decision & Log ===
     if [[ -z "$issues_found" && -z "$actions_taken" ]]; then
       # Only log periodic all-clears, not event-triggered ones
@@ -5143,7 +5390,7 @@ MAYORMD
 
       local backend="$(_ai_backend_default)"
 
-      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
+      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
@@ -6086,6 +6333,7 @@ Environment:
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
+  SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)

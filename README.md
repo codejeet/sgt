@@ -146,6 +146,21 @@ Mayor proactive post-merge dispatches also use a durable idempotency fence:
   - activity log: `MAYOR_DISPATCH_SKIPPED_DUPLICATE reason_code=duplicate-dispatch-trigger-key skip_reason="..." trigger_event_key="merged:..." rig=<rig> repo="<repo>" pr=#<n> issue=#<n> merged_head="<sha>" key="<key>" wake="merged:..."`
   - decision log: `MAYOR WAKE SKIP (duplicate-merged-trigger) reason_code=duplicate-dispatch-trigger-key trigger_key=<owner/repo|pr=<n>|merged_head=<sha>> trigger_event_key="merged:..." wake="merged:..."`
 
+Mayor dispatch-start verification fence (restart-safe):
+- Mayor-tagged proactive dispatches write durable attempt records under `~/.sgt/mayor-dispatch-attempts/`, keyed by `repo+issue+trigger` (`owner/repo|issue=<n>|trigger=<wake-key>`).
+- Each record carries a bounded verification deadline (`VERIFY_DEADLINE_TS`). Mayor replays pending records every cycle, including after restart.
+- Success is recorded when active work is observed (`active-polecat` state file or active tmux session for the dispatched polecat).
+- If verification times out before active work appears, mayor emits explicit timeout telemetry and performs one idempotent retry via re-sling guardrails.
+- Retry budget is strictly one attempt per record (`RETRY_COUNT<=1`), with terminal fail reasons such as:
+  - `retry-dispatch-failed`
+  - `retry-title-lookup-failed`
+  - `retry-budget-exhausted`
+- Configure verification window with:
+
+```bash
+export SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS=120
+```
+
 Troubleshooting duplicate merged-trigger dispatch skips:
 1. Confirm the durable trigger key exists (key should match `repo+PR+merged_head`):
 
@@ -172,6 +187,26 @@ sgt peek mayor
 ```
 
 5. If a new post-merge window is expected but skips continue, confirm the upstream event is for a new head SHA; dispatch dedupe is intentionally sticky per `repo+PR+merged_head` across mayor restarts.
+
+Troubleshooting dispatch-start verification fence:
+1. Inspect pending/terminal verifier records:
+
+```bash
+ls -1 ~/.sgt/mayor-dispatch-attempts/
+tail -100 ~/.sgt/mayor-dispatch-attempts/*.state
+```
+
+2. Correlate verifier telemetry in activity log:
+
+```bash
+grep 'MAYOR_DISPATCH_VERIFY_' ~/.sgt/sgt.log | tail -50
+```
+
+3. Correlate durable decision-log timeout/success entries:
+
+```bash
+grep 'MAYOR DISPATCH VERIFY' ~/.sgt/mayor-decisions.log | tail -50
+```
 
 Troubleshooting dispatch-cooldown suppressions (replayed merged wake events):
 1. Inspect structured cooldown suppression telemetry:

@@ -68,6 +68,9 @@ echo "=== mayor post-merge dispatch cooldown audit trail ==="
 echo "=== mayor post-merge dispatch durable dedupe fence ==="
 "$REPO_ROOT/test_mayor_post_merge_dispatch_fence.sh"
 
+echo "=== mayor dispatch-start verification fence ==="
+"$REPO_ROOT/test_mayor_dispatch_start_verification_fence.sh"
+
 echo "=== mayor cycle lease lock recovery ==="
 "$REPO_ROOT/test_mayor_cycle_lock_lease.sh"
 

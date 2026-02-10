@@ -47,6 +47,7 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
   case "$json_fields" in
     body) echo "Closes #12" ;;
     mergeable) echo "MERGEABLE" ;;
+    state) echo "OPEN" ;;
     headRefOid) echo "head84abc" ;;
     *) echo "" ;;
   esac
