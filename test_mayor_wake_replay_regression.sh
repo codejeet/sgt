@@ -74,6 +74,9 @@ echo "=== stale snapshot dispatch race guard ==="
 echo "=== mayor snapshot freshness guard ==="
 "$REPO_ROOT/test_mayor_snapshot_freshness_guard.sh"
 
+echo "=== mayor orphan stale snapshot guard ==="
+"$REPO_ROOT/test_mayor_orphan_stale_snapshot_guard.sh"
+
 echo "=== mayor critical alert cooldown dedupe ==="
 "$REPO_ROOT/test_mayor_critical_alert_cooldown.sh"
 

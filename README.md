@@ -91,6 +91,10 @@ Mayor cycle decisions also protect against stale snapshot text in generated `CLA
   - `[mayor] snapshot guard merge_queue_count snapshot=<n> live=<n> chosen=<n> source=<snapshot|live> status=<...>`
 - When a stale snapshot is detected, mayor records a `Snapshot Freshness` note in decision output instead of treating the stale snapshot value as an active issue.
 
+Mayor orphan-PR queueing also revalidates live PR state at queue time:
+- If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
+- Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
+
 Mayor decision logging is durable:
 - Decision entries are appended atomically under a file lock.
 - Each append is explicitly flushed with `fsync` before returning.
