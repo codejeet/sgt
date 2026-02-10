@@ -20,6 +20,15 @@ SGT replaces that with a simpler mental model: GitHub Issues/PRs + tmux + `gh`.
 
 ## OpenClaw notifications
 
+## Security gate (sgt-authorized label)
+By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.
+
+To disable this gate (not recommended on public repos), set:
+
+```bash
+export SGT_REQUIRE_AUTH_LABEL=0
+```
+
 SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued); periodic all-clear checks stay quiet.
 
 1. Create a notification config at `$SGT_ROOT/.sgt/notify.json` (default `~/sgt/.sgt/notify.json`).

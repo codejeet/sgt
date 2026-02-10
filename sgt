@@ -320,8 +320,12 @@ rig_path() {
 }
 
 # Check if an issue has the sgt-authorized label
+# Security gate can be disabled by setting: SGT_REQUIRE_AUTH_LABEL=0
 _has_sgt_authorized() {
   local repo="$1" issue="$2"
+  if [[ "${SGT_REQUIRE_AUTH_LABEL:-1}" == "0" ]]; then
+    return 0
+  fi
   [[ -n "$issue" && "$issue" != "0" ]] || return 1
   local labels
   labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)
