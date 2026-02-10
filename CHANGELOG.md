@@ -13,6 +13,8 @@
 - Mayor decision-log appends now use a lock + `fsync` durability path and route wake-dedupe skip logging through the same hardened append helper.
 - Decision-log write failures are now non-fatal in mayor cycles, emit structured warning metadata, surface in `sgt status`, and notify Rigger at most once per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`).
 - Added/expanded regression coverage for concurrent mayor decision-log appends plus simulated write-error warning/notify cooldown behavior in `test_mayor_decision_log_durability.sh`.
+- Mayor merged-trigger dispatch idempotency logs now include structured duplicate-skip context (`reason_code`, `skip_reason`, `trigger_event_key`, `repo`, `pr`, `issue`, `merged_head`, `key`) to make replay diagnostics deterministic.
+- Expanded mayor post-merge dispatch fence regression coverage for rapid duplicate trigger bursts plus restart replay in `test_mayor_post_merge_dispatch_fence.sh`.
 - Mayor now runs a stalled refinery review watchdog: PR queue items stuck in `REVIEW_UNCLEAR` past `SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS` trigger one escalated notify per PR review-state transition, with age surfaced in `sgt status`.
 - Added regression coverage for watchdog threshold boundary and transition dedupe in `test_mayor_review_watchdog.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Added witness/refinery heartbeat watchdog coverage for stuck-but-running agent loops: mayor now escalates stale heartbeat incidents with exact `stale_seconds` + `last_heartbeat`, deduped once per agent per configurable window (`SGT_AGENT_HEARTBEAT_STALE_SECS`, `SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS`) and reset on recovery.

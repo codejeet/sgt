@@ -124,8 +124,29 @@ Mayor proactive post-merge dispatches also use a durable idempotency fence:
 - Mayor keys merged-trigger dispatch eligibility by `repo+PR+merged head SHA` (`owner/repo|pr=<n>|merged_head=<sha>`), persisted under `~/.sgt/mayor-dispatch-triggers/`.
 - The key is claimed before triggering proactive AI dispatch from merged wake events, so replayed merged events (including after mayor restart) become no-op.
 - Duplicate merged-trigger replays emit explicit operator/log observability:
-  - status line: `[mayor] dispatch skipped duplicate merged trigger key=<key>`
-  - activity log: `MAYOR_DISPATCH_SKIPPED_DUPLICATE key="<key>" wake="merged:..."`
+  - status line: `[mayor] dispatch skipped duplicate merged trigger key=<key> reason_code=duplicate-dispatch-trigger-key trigger_event_key=<event-key>`
+  - activity log: `MAYOR_DISPATCH_SKIPPED_DUPLICATE reason_code=duplicate-dispatch-trigger-key skip_reason="..." trigger_event_key="merged:..." rig=<rig> repo="<repo>" pr=#<n> issue=#<n> merged_head="<sha>" key="<key>" wake="merged:..."`
+
+Troubleshooting duplicate merged-trigger dispatch skips:
+1. Confirm the durable trigger key exists (key should match `repo+PR+merged_head`):
+
+```bash
+ls -1 ~/.sgt/mayor-dispatch-triggers/
+```
+
+2. Inspect the structured duplicate-skip event for exact context and reason:
+
+```bash
+grep 'MAYOR_DISPATCH_SKIPPED_DUPLICATE' ~/.sgt/sgt.log | tail -20
+```
+
+3. Verify the wake payload carried `merged_head=...` (required for keying):
+
+```bash
+sgt peek mayor
+```
+
+4. If a new post-merge window is expected but skips continue, confirm the upstream event is for a new head SHA; dispatch dedupe is intentionally sticky per `repo+PR+merged_head` across mayor restarts.
 
 Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
 - Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.

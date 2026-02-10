@@ -4025,9 +4025,23 @@ _mayor_loop() {
             else
               claim_rc=$?
               if [[ "$claim_rc" -eq 1 ]]; then
+                local duplicate_key duplicate_reason_code duplicate_reason duplicate_event_key duplicate_repo duplicate_pr duplicate_issue duplicate_rig duplicate_merged_head
                 duplicate_key="${_MAYOR_DISPATCH_TRIGGER_KEY:-unknown}"
-                echo "[mayor] dispatch skipped duplicate merged trigger key=$duplicate_key"
-                log_event "MAYOR_DISPATCH_SKIPPED_DUPLICATE key=\"$(_escape_quotes "$duplicate_key")\" wake=\"$(_escape_quotes "$event_reason")\""
+                duplicate_reason_code="duplicate-dispatch-trigger-key"
+                duplicate_reason="duplicate merged dispatch trigger key (repo+pr+merged_head) already claimed"
+                duplicate_event_key="$(_wake_trigger_key "$event_reason")"
+                duplicate_repo="$(_wake_field "$event_reason" "repo")"
+                duplicate_merged_head="$(_wake_field "$event_reason" "merged_head")"
+                duplicate_pr=""
+                duplicate_issue=""
+                duplicate_rig=""
+                if [[ "$event_reason" =~ ^merged:pr#([0-9]+):#([0-9]+):([^|]+) ]]; then
+                  duplicate_pr="${BASH_REMATCH[1]}"
+                  duplicate_issue="${BASH_REMATCH[2]}"
+                  duplicate_rig="${BASH_REMATCH[3]}"
+                fi
+                echo "[mayor] dispatch skipped duplicate merged trigger key=$duplicate_key reason_code=$duplicate_reason_code trigger_event_key=$duplicate_event_key"
+                log_event "MAYOR_DISPATCH_SKIPPED_DUPLICATE reason_code=$duplicate_reason_code skip_reason=\"$(_escape_quotes "$duplicate_reason")\" trigger_event_key=\"$(_escape_quotes "$duplicate_event_key")\" rig=$duplicate_rig repo=\"$(_escape_quotes "$duplicate_repo")\" pr=#${duplicate_pr:-unknown} issue=#${duplicate_issue:-unknown} merged_head=\"$(_escape_quotes "$duplicate_merged_head")\" key=\"$(_escape_quotes "$duplicate_key")\" wake=\"$(_escape_quotes "$event_reason")\""
               else
                 needs_ai=true
               fi
