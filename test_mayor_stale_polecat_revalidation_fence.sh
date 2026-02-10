@@ -18,6 +18,11 @@ extract_fn() {
 }
 
 eval "$(extract_fn _repo_owner_repo)"
+eval "$(extract_fn _repo_owner_repo_strict)"
+eval "$(extract_fn _repo_owner_repo_url)"
+eval "$(extract_fn _rig_repo_resolve_error)"
+eval "$(extract_fn _rig_repo_resolve_error_unpack)"
+eval "$(extract_fn _resolve_rig_repo_canonical)"
 eval "$(extract_fn _escape_quotes)"
 eval "$(extract_fn _one_line)"
 eval "$(extract_fn _mayor_dispatch_trigger_key_id)"
@@ -30,8 +35,10 @@ eval "$(extract_fn _mayor_reconcile_stale_polecats)"
 export SGT_ROOT="$TMP_ROOT/root"
 export SGT_CONFIG="$SGT_ROOT/.sgt"
 export SGT_POLECATS="$SGT_CONFIG/polecats"
+export SGT_RIGS="$SGT_CONFIG/rigs"
 export SGT_LOG="$SGT_ROOT/sgt.log"
-mkdir -p "$SGT_POLECATS" "$SGT_ROOT/rigs/rig-one" "$SGT_ROOT/worktree"
+mkdir -p "$SGT_POLECATS" "$SGT_RIGS" "$SGT_ROOT/rigs/rig-one" "$SGT_ROOT/worktree"
+printf 'https://github.com/acme/demo\n' > "$SGT_RIGS/rig-one"
 
 DECISION_LOG="$TMP_ROOT/mayor-decisions.log"
 KILL_COUNT_FILE="$TMP_ROOT/kill-count"
@@ -56,6 +63,11 @@ _mayor_record_decision() {
 rig_path() {
   local rig="${1:-}"
   echo "$SGT_ROOT/rigs/$rig"
+}
+
+rig_repo() {
+  local rig="${1:-}"
+  cat "$SGT_RIGS/$rig"
 }
 
 gh() {

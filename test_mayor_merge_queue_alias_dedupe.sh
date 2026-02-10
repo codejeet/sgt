@@ -48,6 +48,7 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
     body) echo "Closes #12" ;;
     mergeable) echo "MERGEABLE" ;;
     headRefOid) echo "head84abc" ;;
+    state) echo "OPEN" ;;
     *) echo "" ;;
   esac
   exit 0
@@ -159,7 +160,15 @@ MQ
 # Run mayor briefly; it will try to queue orphan PR #84 using sgt-pr84 alias.
 sgt _mayor > "$SGT_ROOT/mayor.out" 2>&1 &
 mayor_pid=$!
-sleep 4
+
+# Wait until duplicate queue-key telemetry appears (or timeout) before stopping mayor.
+for _ in $(seq 1 40); do
+  if grep -q "duplicate queue skipped — reason_code=duplicate-queue-key" "$SGT_ROOT/mayor.out" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+
 kill "$mayor_pid" 2>/dev/null || true
 for _ in 1 2 3 4 5; do
   if ! kill -0 "$mayor_pid" 2>/dev/null; then

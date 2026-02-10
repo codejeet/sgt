@@ -286,6 +286,98 @@ _repo_owner_repo() {
   echo "$repo"
 }
 
+_repo_owner_repo_strict() {
+  local repo="${1:-}"
+  repo="${repo#https://github.com/}"
+  repo="${repo#http://github.com/}"
+  repo="${repo%/}"
+  if [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "$repo"
+    return 0
+  fi
+  return 1
+}
+
+_repo_owner_repo_url() {
+  local owner_repo="${1:-}"
+  [[ -n "$owner_repo" ]] || return 1
+  echo "https://github.com/$owner_repo"
+}
+
+_rig_repo_resolve_error() {
+  local context="${1:-unknown}" rig="${2:-}" observed_repo="${3:-}" canonical_repo="${4:-}" reason_code="${5:-unknown}" reason="${6:-unknown}"
+  _RIG_REPO_RESOLVE_REASON_CODE="$reason_code"
+  _RIG_REPO_RESOLVE_REASON="$reason"
+  if declare -F log_event >/dev/null; then
+    log_event "RIG_REPO_RESOLVE_ERROR context=$context rig=${rig:-unknown} observed_repo=\"$(_escape_quotes "${observed_repo:-}")\" canonical_repo=\"$(_escape_quotes "${canonical_repo:-}")\" reason_code=$reason_code reason=\"$(_escape_quotes "$reason")\""
+  fi
+  echo "ERROR|$reason_code|$reason"
+  return 1
+}
+
+_rig_repo_resolve_error_unpack() {
+  local payload="${1:-}" code reason
+  if [[ "$payload" == ERROR\|* ]]; then
+    IFS='|' read -r _ code reason <<< "$payload"
+    echo "${code:-unknown}|${reason:-unable to resolve rig repo}"
+    return 0
+  fi
+  echo "unknown|unable to resolve rig repo"
+}
+
+_resolve_rig_repo_canonical() {
+  local context="${1:-unknown}" rig="${2:-}" observed_repo="${3:-}" require_observed="${4:-0}"
+  local canonical_repo canonical_owner_repo observed_owner_repo
+  _RIG_REPO_RESOLVE_REASON_CODE=""
+  _RIG_REPO_RESOLVE_REASON=""
+
+  if [[ -z "$rig" ]]; then
+    if [[ -z "$observed_repo" ]]; then
+      _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "" "missing-rig-and-repo" "missing rig and repo"
+      return 1
+    fi
+    if ! observed_owner_repo="$(_repo_owner_repo_strict "$observed_repo")"; then
+      _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "" "invalid-repo" "invalid repo '$observed_repo'"
+      return 1
+    fi
+    _repo_owner_repo_url "$observed_owner_repo"
+    return 0
+  fi
+
+  if [[ ! -f "$SGT_RIGS/$rig" ]]; then
+    _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "" "unknown-rig" "rig '$rig' not found"
+    return 1
+  fi
+
+  canonical_repo="$(rig_repo "$rig" 2>/dev/null || true)"
+  if ! canonical_owner_repo="$(_repo_owner_repo_strict "$canonical_repo")"; then
+    _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "$canonical_repo" "invalid-rig-repo" "rig '$rig' has invalid configured repo '$canonical_repo'"
+    return 1
+  fi
+  canonical_repo="$(_repo_owner_repo_url "$canonical_owner_repo")"
+
+  if [[ -z "$observed_repo" ]]; then
+    if [[ "$require_observed" == "1" ]]; then
+      _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "$canonical_repo" "missing-repo" "missing repo for rig '$rig'"
+      return 1
+    fi
+    echo "$canonical_repo"
+    return 0
+  fi
+
+  if ! observed_owner_repo="$(_repo_owner_repo_strict "$observed_repo")"; then
+    _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "$canonical_repo" "invalid-repo" "invalid repo '$observed_repo'"
+    return 1
+  fi
+
+  if [[ "$observed_owner_repo" != "$canonical_owner_repo" ]]; then
+    _rig_repo_resolve_error "$context" "$rig" "$observed_repo" "$canonical_repo" "repo-mismatch" "repo mismatch for rig '$rig': observed='$observed_owner_repo' canonical='$canonical_owner_repo'"
+    return 1
+  fi
+
+  echo "$canonical_repo"
+}
+
 _repo_pr_url() {
   local repo="${1:-}" pr="${2:-}"
   local owner_repo
@@ -433,16 +525,22 @@ _mayor_stale_polecat_fence_key() {
 }
 
 _mayor_stale_polecat_pr_snapshot() {
-  local repo="${1:-}" branch="${2:-}"
-  local snapshot
+  local rig="${1:-}" repo="${2:-}" branch="${3:-}"
+  local canonical_repo snapshot resolve_meta resolve_code resolve_reason
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "mayor-stale-polecat-open-pr" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    echo "ERROR|${resolve_code:-unknown}|${resolve_reason:-unable to resolve rig repo}"
+    return 1
+  fi
   snapshot=$(
-    gh pr list --repo "$repo" --head "$branch" --state all \
+    gh pr list --repo "$canonical_repo" --head "$branch" --state all \
       --json number,state \
       --jq 'if length == 0 then "0|" else ((.[0].number|tostring) + "|" + (.[0].state // "")) end' 2>/dev/null || true
   )
   if [[ -z "$snapshot" || "$snapshot" != *"|"* ]]; then
-    echo "0|"
-    return 0
+    echo "ERROR|live-query-failed|unable to query live PR state"
+    return 1
   fi
   echo "$snapshot"
 }
@@ -521,7 +619,7 @@ EOF
 }
 
 _mayor_reconcile_stale_polecats() {
-  local pfile pname snapshot rig repo issue branch session worktree status
+  local pfile pname snapshot rig repo issue branch session worktree status canonical_repo resolve_meta resolve_code resolve_reason
   for pfile in "$SGT_POLECATS"/*; do
     [[ -f "$pfile" ]] || continue
     pname="$(basename "$pfile")"
@@ -532,15 +630,24 @@ _mayor_reconcile_stale_polecats() {
       ) 2>/dev/null
     )"
     IFS='|' read -r rig repo issue branch session worktree status <<< "$snapshot"
-    [[ -n "$repo" && -n "$branch" ]] || continue
+    [[ -n "$branch" ]] || continue
+    if ! canonical_repo="$(_resolve_rig_repo_canonical "mayor-stale-polecat-open-issue" "$rig" "$repo" "1")"; then
+      resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+      IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+      echo "[mayor] stale polecat skip $pname — ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})" >&2
+      continue
+    fi
 
     local issue_state pr_snapshot pr_number pr_state reason_code
     issue_state=""
     if [[ "$issue" =~ ^[0-9]+$ && "$issue" != "0" ]]; then
-      issue_state=$(gh issue view "$issue" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)
+      issue_state=$(gh issue view "$issue" --repo "$canonical_repo" --json state --jq '.state // ""' 2>/dev/null || true)
     fi
 
-    pr_snapshot="$(_mayor_stale_polecat_pr_snapshot "$repo" "$branch")"
+    if ! pr_snapshot="$(_mayor_stale_polecat_pr_snapshot "$rig" "$canonical_repo" "$branch")"; then
+      echo "[mayor] stale polecat skip $pname — ${pr_snapshot#ERROR|}" >&2
+      continue
+    fi
     IFS='|' read -r pr_number pr_state <<< "$pr_snapshot"
     reason_code=""
     if [[ "$issue_state" == "CLOSED" ]]; then
@@ -1366,10 +1473,19 @@ _mayor_review_watchdog_status_snapshot() {
 
 _mayor_pre_dispatch_revalidate() {
   local repo="${1:-}" rig="${2:-}"
-  local owner_repo owner name snapshot open_prs open_authorized open_polecats parallel_budget parallel_in_flight
+  local canonical_repo owner_repo owner name snapshot open_prs open_authorized open_polecats parallel_budget parallel_in_flight resolve_meta resolve_code resolve_reason
   _MAYOR_PRE_DISPATCH_REASON_CODE=""
   _MAYOR_PRE_DISPATCH_REASON=""
-  owner_repo="$(_repo_owner_repo "$repo")"
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "mayor-pre-dispatch-revalidate" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    _MAYOR_PRE_DISPATCH_REASON_CODE="${resolve_code:-repo-resolve-failed}"
+    _MAYOR_PRE_DISPATCH_REASON="revalidation failed: ${resolve_reason:-unable to resolve rig repo}"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
+    return 1
+  fi
+
+  owner_repo="$(_repo_owner_repo "$canonical_repo")"
   owner="${owner_repo%%/*}"
   name="${owner_repo#*/}"
 
@@ -1883,7 +1999,7 @@ _refinery_conflict_resling_resume() {
     elif ! _has_sgt_authorized "$repo" "$issue"; then
       skip_status="SKIPPED_UNAUTHORIZED"
       skip_reason="issue lacks sgt-authorized label"
-    elif ! stale_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue" "$source_pr"); then
+    elif ! stale_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue" "$source_pr"); then
       skip_status="SKIPPED_STALE"
       skip_reason="$stale_reason"
     fi
@@ -2029,9 +2145,15 @@ _refinery_merge_error_requires_auto_retry_reason() {
 }
 
 _refinery_revalidate_pr_open_head() {
-  local repo="${1:-}" pr="${2:-}" expected_head_sha="${3:-}" queue_file="${4:-}"
-  local live_snapshot live_state live_head_sha
-  live_snapshot=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" expected_head_sha="${4:-}" queue_file="${5:-}"
+  local canonical_repo live_snapshot live_state live_head_sha resolve_meta resolve_code resolve_reason
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "refinery-open-pr-revalidate" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    echo "${resolve_reason:-unable to resolve rig repo}"
+    return 1
+  fi
+  live_snapshot=$(gh pr view "$pr" --repo "$canonical_repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
   if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
     echo "unable to query live PR state"
     return 1
@@ -2052,9 +2174,15 @@ _refinery_revalidate_pr_open_head() {
 }
 
 _refinery_premerge_revalidate_reviewed_head() {
-  local repo="${1:-}" pr="${2:-}" reviewed_head_sha="${3:-}" queue_file="${4:-}"
-  local live_snapshot live_state live_head_sha
-  live_snapshot=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" reviewed_head_sha="${4:-}" queue_file="${5:-}"
+  local canonical_repo live_snapshot live_state live_head_sha resolve_meta resolve_code resolve_reason
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "refinery-open-pr-reviewed-head-revalidate" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    echo "${resolve_reason:-unable to resolve rig repo}"
+    return 1
+  fi
+  live_snapshot=$(gh pr view "$pr" --repo "$canonical_repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
   if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
     echo "unable to query live PR state"
     return 1
@@ -2079,10 +2207,17 @@ _refinery_premerge_revalidate_reviewed_head() {
 }
 
 _resling_pre_dispatch_revalidate() {
-  local repo="${1:-}" issue_number="${2:-}" source_pr="${3:-}"
-  local issue_state pr_snapshot pr_state pr_mergeable
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}" source_pr="${4:-}"
+  local canonical_repo issue_state pr_snapshot pr_state pr_mergeable resolve_meta resolve_code resolve_reason
 
-  issue_state=$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "resling-open-issue-revalidate" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    echo "${resolve_reason:-unable to resolve rig repo}"
+    return 1
+  fi
+
+  issue_state=$(gh issue view "$issue_number" --repo "$canonical_repo" --json state --jq '.state' 2>/dev/null || true)
   if [[ -z "$issue_state" ]]; then
     echo "unable to query live issue state for #$issue_number"
     return 1
@@ -2093,7 +2228,7 @@ _resling_pre_dispatch_revalidate() {
   fi
 
   if [[ -n "$source_pr" && "$source_pr" != "0" ]]; then
-    pr_snapshot=$(gh pr view "$source_pr" --repo "$repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
+    pr_snapshot=$(gh pr view "$source_pr" --repo "$canonical_repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
     if [[ -z "$pr_snapshot" || "$pr_snapshot" != *"|"* ]]; then
       echo "unable to query live PR state for #$source_pr"
       return 1
@@ -2783,14 +2918,16 @@ cmd_status() {
     local pname
     pname="$(basename "$f")"
     (
-      local session repo branch issue missing_fields
+      local session rig repo branch issue missing_fields
       local pr_number pr_state pr_title pr_chunk pr_meta pr_title_cols
+      local canonical_repo resolve_meta resolve_code resolve_reason
       if ! source "$f" 2>/dev/null; then
         printf "  %s%-14s%s %s\n" "$(_bold)" "$pname" "$(_reset)" "$(_status_badge "unknown")"
         printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ metadata unreadable (possibly mid-write race); retry 'sgt status'." "$(_reset)"
         return 0
       fi
       session="${SESSION:-}"
+      rig="${RIG:-}"
       repo="${REPO:-}"
       branch="${BRANCH:-}"
       issue="${ISSUE:-?}"
@@ -2812,9 +2949,15 @@ cmd_status() {
       pr_number=""
       pr_state=""
       pr_title=""
-      pr_meta="$(gh pr list --repo "$repo" --head "$branch" --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
-      if [[ -n "$pr_meta" ]]; then
-        IFS=$'\t' read -r pr_number pr_state pr_title <<< "$pr_meta"
+      if canonical_repo="$(_resolve_rig_repo_canonical "status-open-pr-check" "$rig" "$repo" "1")"; then
+        pr_meta="$(gh pr list --repo "$canonical_repo" --head "$branch" --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
+        if [[ -n "$pr_meta" ]]; then
+          IFS=$'\t' read -r pr_number pr_state pr_title <<< "$pr_meta"
+        fi
+      else
+        resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+        IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+        printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ PR metadata skipped: ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})." "$(_reset)"
       fi
 
       pr_chunk=""
@@ -3383,11 +3526,21 @@ _resling_existing_issue() {
   local source_pr="${6:-}"
   local source_event="${7:-unknown}"
   local source_event_key="${8:-$source_event}"
+  local canonical_repo resolve_meta resolve_code resolve_reason
   source_event_key="$(_wake_trigger_key "$source_event_key")"
   [[ -n "$source_event_key" ]] || source_event_key="${source_event:-unknown}"
 
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "resling-dispatch" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: ${resolve_reason:-unable to resolve rig repo}"
+    log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "${resolve_reason:-unable to resolve rig repo}")\""
+    return 1
+  fi
+  repo="$canonical_repo"
+
   local stale_reason=""
-  if ! stale_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
+  if ! stale_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue_number" "$source_pr"); then
     echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: $stale_reason"
     log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$stale_reason")\""
     return 1
@@ -3429,7 +3582,7 @@ _resling_existing_issue() {
   _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
 
   local final_gate_reason=""
-  if ! final_gate_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
+  if ! final_gate_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue_number" "$source_pr"); then
     echo "[resling] dispatch-instant gate ($source_event) for issue #$issue_number — skipping: $final_gate_reason"
     log_event "RESLING_SKIP_FINAL_GATE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$final_gate_reason")\""
     git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree"
@@ -3757,6 +3910,16 @@ _refinery_loop() {
       [[ "$mq_unclear_next_retry_at" =~ ^[0-9]+$ ]] || mq_unclear_next_retry_at=0
       [[ "$mq_unclear_escalated" =~ ^[01]$ ]] || mq_unclear_escalated=0
 
+      local canonical_mq_repo resolve_meta resolve_code resolve_reason
+      if ! canonical_mq_repo="$(_resolve_rig_repo_canonical "refinery-queue-open-pr-open-issue-checks" "$rig" "$mq_repo" "1")"; then
+        resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_mq_repo")"
+        IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+        echo "[refinery/$rig] queue item $mqname skipped — ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})"
+        log_event "REFINERY_QUEUE_SKIP_REPO_RESOLVE queue=$mqname rig=$rig reason_code=${resolve_code:-unknown} reason=\"$(_escape_quotes "${resolve_reason:-unable to resolve rig repo}")\""
+        continue
+      fi
+      mq_repo="$canonical_mq_repo"
+
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
       mq_owner_repo="$(_repo_owner_repo "$mq_repo")"
@@ -3908,7 +4071,7 @@ _refinery_loop() {
         local reviewed_head_sha reviewed_head_reason="" premerge_live_head premerge_reason=""
         if [[ -z "$mq_reviewed_head_sha" ]]; then
           # Capture reviewed head SHA at review-ready time and persist durably before merge.
-          if ! reviewed_head_sha=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "" "$f"); then
+          if ! reviewed_head_sha=$(_refinery_revalidate_pr_open_head "$rig" "$mq_repo" "$mq_pr" "" "$f"); then
             reviewed_head_reason="$reviewed_head_sha"
           fi
           if [[ -n "$reviewed_head_reason" ]]; then
@@ -3936,7 +4099,7 @@ _refinery_loop() {
           continue
         fi
 
-        if ! premerge_live_head=$(_refinery_premerge_revalidate_reviewed_head "$mq_repo" "$mq_pr" "$mq_reviewed_head_sha" "$f"); then
+        if ! premerge_live_head=$(_refinery_premerge_revalidate_reviewed_head "$rig" "$mq_repo" "$mq_pr" "$mq_reviewed_head_sha" "$f"); then
           premerge_reason="$premerge_live_head"
         fi
         if [[ -n "$premerge_reason" ]]; then
@@ -3972,7 +4135,7 @@ _refinery_loop() {
           if [[ "$merge_auto_retry_attempted" != "true" ]] && merge_auto_retry_reason="$(_refinery_merge_error_requires_auto_retry_reason "$merge_result")"; then
             local auto_retry_live_head
             merge_auto_retry_attempted=true
-            if ! auto_retry_live_head=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
+            if ! auto_retry_live_head=$(_refinery_revalidate_pr_open_head "$rig" "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
               merge_skip_reason="$auto_retry_live_head"
               echo "[refinery/$rig] PR #$mq_pr auto-merge retry skipped — $merge_skip_reason"
               log_event "REFINERY_MERGE_RETRY_AUTO repo=$mq_owner_repo pr=#$mq_pr reason=$merge_auto_retry_reason outcome=skipped final_reason=\"$(_escape_quotes "$merge_skip_reason")\""
@@ -4008,7 +4171,7 @@ _refinery_loop() {
           fi
 
           local retry_delay_s retry_live_head
-          if ! retry_live_head=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
+          if ! retry_live_head=$(_refinery_revalidate_pr_open_head "$rig" "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
             merge_skip_reason="$retry_live_head"
             echo "[refinery/$rig] PR #$mq_pr merge retry skipped — $merge_skip_reason"
             log_event "REFINERY_MERGE_RETRY_SKIP pr=#$mq_pr attempt=$merge_attempt/$max_attempts reason=\"$(_escape_quotes "$merge_skip_reason")\""
