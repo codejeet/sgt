@@ -119,7 +119,8 @@ _notify_openclaw() {
   local notify_out=""
 
   if command -v python3 &>/dev/null; then
-    notify_out=$(python3 - "$SGT_NOTIFY" <<'PY' 2>/dev/null) || return 0
+    notify_out="$(
+      python3 - "$SGT_NOTIFY" 2>/dev/null <<'PY'
 import json
 import sys
 
@@ -147,8 +148,10 @@ print(channel)
 print(to)
 print(reply_to)
 PY
+    )" || return 0
   elif command -v python &>/dev/null; then
-    notify_out=$(python - "$SGT_NOTIFY" <<'PY' 2>/dev/null) || return 0
+    notify_out="$(
+      python - "$SGT_NOTIFY" 2>/dev/null <<'PY'
 import json
 import sys
 
@@ -176,6 +179,7 @@ print(channel)
 print(to)
 print(reply_to)
 PY
+    )" || return 0
   else
     return 0
   fi
