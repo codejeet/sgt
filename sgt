@@ -128,6 +128,8 @@ log_event() {
 }
 
 _MAYOR_DECISION_LOG_LAST_ERROR=""
+_MAYOR_DISPATCH_TRIGGER_KEY=""
+_MAYOR_DISPATCH_TRIGGER_FILE=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 
@@ -331,6 +333,55 @@ _dedupe_wake_reasons() {
 _wake_requires_dispatch_decision() {
   local reason="${1:-}"
   [[ "$reason" == merged:* || "$reason" == dog-approved:* ]]
+}
+
+_mayor_dispatch_trigger_key() {
+  local reason="${1:-}" pr repo merged_head owner_repo
+  if [[ "$reason" =~ ^merged:pr#([0-9]+):# ]]; then
+    pr="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  repo="$(_wake_field "$reason" "repo")"
+  merged_head="$(_wake_field "$reason" "merged_head")"
+  [[ -n "$repo" && -n "$merged_head" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  echo "${owner_repo}|pr=${pr}|merged_head=${merged_head}"
+}
+
+_mayor_dispatch_trigger_key_id() {
+  local key="${1:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$key" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$key" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$key" | tr -c '[:alnum:]_.-' '_'
+  fi
+}
+
+_mayor_dispatch_trigger_claim() {
+  local reason="${1:-}" key key_id key_dir key_file
+  _MAYOR_DISPATCH_TRIGGER_KEY=""
+  _MAYOR_DISPATCH_TRIGGER_FILE=""
+  key="$(_mayor_dispatch_trigger_key "$reason" || true)"
+  [[ -n "$key" ]] || return 2
+  key_id="$(_mayor_dispatch_trigger_key_id "$key")"
+  key_dir="$SGT_CONFIG/mayor-dispatch-triggers"
+  key_file="$key_dir/$key_id"
+  mkdir -p "$key_dir" || return 2
+  _MAYOR_DISPATCH_TRIGGER_KEY="$key"
+  _MAYOR_DISPATCH_TRIGGER_FILE="$key_file"
+  if ! ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+    return 1
+  fi
+  cat > "$key_file" <<EOF
+KEY=$key
+REASON=$reason
+CLAIMED_AT=$(date -Iseconds)
+EOF
+  return 0
 }
 
 _mayor_wake_dedupe_ttl_secs() {
@@ -2945,7 +2996,7 @@ _refinery_loop() {
           echo "[refinery/$rig] PR #$mq_pr merged successfully"
           log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
           _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
-          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url"
+          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$merge_expected_head_sha")"
           rm -f "$f"
         else
           echo "[refinery/$rig] merge failed: $merge_result"
@@ -3613,7 +3664,7 @@ _mayor_loop() {
     local review_watchdog_notes=""
 
     if [[ "$wake_reason" != "periodic" ]]; then
-      local event_reason wake_summary event_key now_ts last_seen age skip_reason
+      local event_reason wake_summary event_key now_ts last_seen age skip_reason claim_rc duplicate_key
       for event_reason in "${cycle_events[@]+"${cycle_events[@]}"}"; do
         event_key="$(_wake_trigger_key "$event_reason")"
         now_ts="$(date +%s)"
@@ -3640,7 +3691,22 @@ _mayor_loop() {
         # Trigger at most one AI dispatch decision per cycle, even if
         # merged/dog-approved wake events are replayed within that cycle.
         if _wake_requires_dispatch_decision "$event_reason"; then
-          needs_ai=true
+          if [[ "$event_reason" == merged:* ]]; then
+            if _mayor_dispatch_trigger_claim "$event_reason"; then
+              needs_ai=true
+            else
+              claim_rc=$?
+              if [[ "$claim_rc" -eq 1 ]]; then
+                duplicate_key="${_MAYOR_DISPATCH_TRIGGER_KEY:-unknown}"
+                echo "[mayor] dispatch skipped duplicate merged trigger key=$duplicate_key"
+                log_event "MAYOR_DISPATCH_SKIPPED_DUPLICATE key=\"$(_escape_quotes "$duplicate_key")\" wake=\"$(_escape_quotes "$event_reason")\""
+              else
+                needs_ai=true
+              fi
+            fi
+          else
+            needs_ai=true
+          fi
         fi
       done
     fi

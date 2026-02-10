@@ -119,6 +119,13 @@ export SGT_MAYOR_WAKE_DEDUPE_TTL=15
 Set `SGT_MAYOR_WAKE_DEDUPE_TTL=0` to disable wake-trigger dedupe.
 - Suppressed stale triggers emit an explicit skip reason in mayor output, Rigger notification status, and `~/.sgt/mayor-decisions.log` (`MAYOR WAKE SKIP (duplicate-trigger)`).
 
+Mayor proactive post-merge dispatches also use a durable idempotency fence:
+- Mayor keys merged-trigger dispatch eligibility by `repo+PR+merged head SHA` (`owner/repo|pr=<n>|merged_head=<sha>`), persisted under `~/.sgt/mayor-dispatch-triggers/`.
+- The key is claimed before triggering proactive AI dispatch from merged wake events, so replayed merged events (including after mayor restart) become no-op.
+- Duplicate merged-trigger replays emit explicit operator/log observability:
+  - status line: `[mayor] dispatch skipped duplicate merged trigger key=<key>`
+  - activity log: `MAYOR_DISPATCH_SKIPPED_DUPLICATE key="<key>" wake="merged:..."`
+
 Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
 - Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.
 - On startup/refresh, Mayor emits explicit lock decisions: `acquired`, `reused`, or `stolen`.
