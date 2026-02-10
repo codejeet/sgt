@@ -138,6 +138,9 @@ _MAYOR_DISPATCH_ATTEMPT_KEY=""
 _MAYOR_DISPATCH_ATTEMPT_FILE=""
 _MAYOR_PRE_DISPATCH_REASON_CODE=""
 _MAYOR_PRE_DISPATCH_REASON=""
+_MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES=""
+_MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY=""
+_MAYOR_PRE_DISPATCH_LIVE_SUMMARY=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
@@ -1135,6 +1138,78 @@ _active_polecat_count() {
   echo "$count"
 }
 
+_mayor_merge_queue_count_for_rig() {
+  local rig="${1:-}"
+  local mq_count=0
+  local merge_dir="$SGT_CONFIG/merge-queue"
+  [[ -d "$merge_dir" ]] || {
+    echo "0"
+    return 0
+  }
+
+  local mqf mq_rig
+  for mqf in "$merge_dir"/*; do
+    [[ -f "$mqf" ]] || continue
+    mq_rig=""
+    eval "$(grep -E '^(RIG)=' "$mqf" 2>/dev/null || true)"
+    if [[ -n "$rig" && "${RIG:-}" != "$rig" ]]; then
+      continue
+    fi
+    mq_count=$((mq_count + 1))
+  done
+  echo "$mq_count"
+}
+
+_mayor_dispatch_snapshot_file() {
+  local snapshot_file="${1:-$SGT_CONFIG/mayor-dispatch-snapshot.tsv}"
+  local rig_file rname repo canonical_repo owner_repo owner name live_counts open_prs open_authorized open_polecats queue_count
+
+  : > "$snapshot_file"
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    rname="$(basename "$rig_file")"
+    repo="$(cat "$rig_file")"
+    canonical_repo="$(_resolve_rig_repo_canonical "mayor-dispatch-snapshot" "$rname" "$repo" "0")"
+    if [[ -n "$canonical_repo" ]]; then
+      owner_repo="$(_repo_owner_repo "$canonical_repo")"
+      owner="${owner_repo%%/*}"
+      name="${owner_repo#*/}"
+    else
+      owner=""
+      name=""
+    fi
+
+    open_prs="-1"
+    open_authorized="-1"
+    if [[ -n "$owner" && -n "$name" && "$owner" != "$name" ]]; then
+      live_counts=$(
+        gh api graphql \
+          -f query='query($owner:String!, $name:String!) {
+            repository(owner:$owner, name:$name) {
+              openPullRequests: pullRequests(states: OPEN) { totalCount }
+              openAuthorizedIssues: issues(states: OPEN, labels: ["sgt-authorized"]) { totalCount }
+            }
+          }' \
+          -F owner="$owner" \
+          -F name="$name" \
+          --jq '.data.repository | "\(.openPullRequests.totalCount)|\(.openAuthorizedIssues.totalCount)"' \
+          2>/dev/null || true
+      )
+      if [[ -n "$live_counts" && "$live_counts" == *"|"* ]]; then
+        IFS='|' read -r open_prs open_authorized <<< "$live_counts"
+      fi
+    fi
+
+    [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs="-1"
+    [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized="-1"
+    open_polecats="$(_active_polecat_count "$rname")"
+    [[ "$open_polecats" =~ ^[0-9]+$ ]] || open_polecats="-1"
+    queue_count="$(_mayor_merge_queue_count_for_rig "$rname")"
+    [[ "$queue_count" =~ ^[0-9]+$ ]] || queue_count="-1"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rname" "$canonical_repo" "$open_prs" "$open_authorized" "$open_polecats" "$queue_count" >> "$snapshot_file"
+  done
+}
+
 _deacon_heartbeat_stale_secs() {
   local raw="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}"
   if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
@@ -1685,9 +1760,14 @@ _mayor_review_watchdog_status_snapshot() {
 
 _mayor_pre_dispatch_revalidate() {
   local repo="${1:-}" rig="${2:-}"
-  local canonical_repo owner_repo owner name snapshot open_prs open_authorized open_polecats parallel_budget parallel_in_flight resolve_meta resolve_code resolve_reason
+  local canonical_repo owner_repo owner name snapshot open_prs open_authorized open_polecats queue_count parallel_budget parallel_in_flight resolve_meta resolve_code resolve_reason
+  local snapshot_file snapshot_state snapshot_open_prs snapshot_open_authorized snapshot_open_polecats snapshot_queue_count
+  local mismatch_categories mismatch_reason mismatch_suffix
   _MAYOR_PRE_DISPATCH_REASON_CODE=""
   _MAYOR_PRE_DISPATCH_REASON=""
+  _MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES=""
+  _MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY=""
+  _MAYOR_PRE_DISPATCH_LIVE_SUMMARY=""
   if ! canonical_repo="$(_resolve_rig_repo_canonical "mayor-pre-dispatch-revalidate" "$rig" "$repo" "1")"; then
     resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
     IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
@@ -1747,6 +1827,61 @@ _mayor_pre_dispatch_revalidate() {
     _MAYOR_PRE_DISPATCH_REASON="revalidation failed: unable to count active polecats for rig=${rig:-all}"
     echo "$_MAYOR_PRE_DISPATCH_REASON"
     return 1
+  fi
+  queue_count="$(_mayor_merge_queue_count_for_rig "$rig")"
+  [[ "$queue_count" =~ ^[0-9]+$ ]] || queue_count=-1
+  _MAYOR_PRE_DISPATCH_LIVE_SUMMARY="open_prs=$open_prs open_authorized_issues=$open_authorized open_polecats=$open_polecats merge_queue_items=$queue_count"
+
+  snapshot_file="${SGT_MAYOR_DISPATCH_SNAPSHOT_FILE:-}"
+  if [[ -n "$snapshot_file" && -f "$snapshot_file" ]]; then
+    snapshot_state="$(awk -F '\t' -v target_rig="$rig" -v target_repo="$canonical_repo" '
+      function owner_repo(raw, val) {
+        val = raw
+        gsub(/^https:\/\/github.com\//, "", val)
+        return val
+      }
+      {
+        if ($1 != target_rig) next
+        if (owner_repo($2) != owner_repo(target_repo)) next
+        print $3 "|" $4 "|" $5 "|" $6
+        exit
+      }
+    ' "$snapshot_file" 2>/dev/null || true)"
+    if [[ -n "$snapshot_state" && "$snapshot_state" == *"|"* ]]; then
+      IFS='|' read -r snapshot_open_prs snapshot_open_authorized snapshot_open_polecats snapshot_queue_count <<< "$snapshot_state"
+      [[ "$snapshot_open_prs" =~ ^[0-9]+$ ]] || snapshot_open_prs=-1
+      [[ "$snapshot_open_authorized" =~ ^[0-9]+$ ]] || snapshot_open_authorized=-1
+      [[ "$snapshot_open_polecats" =~ ^[0-9]+$ ]] || snapshot_open_polecats=-1
+      [[ "$snapshot_queue_count" =~ ^[0-9]+$ ]] || snapshot_queue_count=-1
+      _MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY="open_prs=$snapshot_open_prs open_authorized_issues=$snapshot_open_authorized open_polecats=$snapshot_open_polecats merge_queue_items=$snapshot_queue_count"
+
+      mismatch_categories=()
+      if [[ "$snapshot_open_prs" -ge 0 && "$snapshot_open_prs" -ne "$open_prs" ]]; then
+        mismatch_categories+=("pr-state")
+      fi
+      if [[ "$snapshot_open_polecats" -ge 0 && "$snapshot_open_polecats" -ne "$open_polecats" ]]; then
+        mismatch_categories+=("polecat-liveness")
+      fi
+      if [[ "$snapshot_open_authorized" -ge 0 && "$snapshot_open_authorized" -ne "$open_authorized" ]]; then
+        mismatch_categories+=("queue-contents")
+      fi
+      if [[ "$snapshot_queue_count" -ge 0 && "$snapshot_queue_count" -ne "$queue_count" ]]; then
+        mismatch_categories+=("queue-contents")
+      fi
+
+      if [[ "${#mismatch_categories[@]}" -gt 0 ]]; then
+        _MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES="$(printf '%s\n' "${mismatch_categories[@]}" | awk '!seen[$0]++' | paste -sd ',' -)"
+        _MAYOR_PRE_DISPATCH_REASON_CODE="consistency-mismatch"
+        mismatch_reason="consistency revalidation mismatch categories=${_MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES}"
+        mismatch_suffix=""
+        if [[ "${SGT_MAYOR_DISPATCH_REVALIDATE:-0}" == "1" ]]; then
+          mismatch_suffix="; no-op, retry next mayor cycle after revalidation"
+        fi
+        _MAYOR_PRE_DISPATCH_REASON="${mismatch_reason}${mismatch_suffix}"
+        echo "$_MAYOR_PRE_DISPATCH_REASON"
+        return 1
+      fi
+    fi
   fi
 
   parallel_budget="$(_mayor_dispatch_parallel_budget)"
@@ -2884,10 +3019,13 @@ cmd_sling() {
   fi
 
   if [[ "${SGT_MAYOR_DISPATCH_REVALIDATE:-0}" == "1" ]]; then
-    local revalidation_reason reason_code skip_context skip_header skip_event
+    local revalidation_reason reason_code skip_context skip_header skip_event snapshot_summary live_summary mismatch_categories
     if ! _mayor_pre_dispatch_revalidate "$repo" "$rig"; then
       revalidation_reason="${_MAYOR_PRE_DISPATCH_REASON:-revalidation failed: unknown}"
       reason_code="${_MAYOR_PRE_DISPATCH_REASON_CODE:-unknown}"
+      mismatch_categories="${_MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES:-}"
+      snapshot_summary="${_MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY:-unavailable}"
+      live_summary="${_MAYOR_PRE_DISPATCH_LIVE_SUMMARY:-unavailable}"
       skip_context="dispatch-skip-stale"
       skip_header="MAYOR DISPATCH SKIP (stale-state)"
       skip_event="MAYOR_DISPATCH_SKIP_STALE"
@@ -2895,6 +3033,10 @@ cmd_sling() {
         skip_context="dispatch-skip-budget"
         skip_header="MAYOR DISPATCH SKIP (parallel-budget)"
         skip_event="MAYOR_DISPATCH_SKIP_BUDGET"
+      elif [[ "$reason_code" == "consistency-mismatch" ]]; then
+        skip_context="dispatch-skip-consistency"
+        skip_header="MAYOR DISPATCH SKIP (consistency-mismatch)"
+        skip_event="MAYOR_DISPATCH_SKIP_CONSISTENCY"
       fi
       echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
       local stale_entry=""
@@ -2902,9 +3044,15 @@ cmd_sling() {
       stale_entry+="  rig=$rig"$'\n'
       stale_entry+="  reason_code=$reason_code"$'\n'
       stale_entry+="  reason=$revalidation_reason"$'\n'
+      if [[ "$reason_code" == "consistency-mismatch" ]]; then
+        stale_entry+="  mismatch_categories=${mismatch_categories:-unknown}"$'\n'
+        stale_entry+="  snapshot_summary=$snapshot_summary"$'\n'
+        stale_entry+="  live_summary=$live_summary"$'\n'
+        stale_entry+="  retry=next-mayor-cycle"$'\n'
+      fi
       stale_entry+="  task=\"$(_escape_quotes "$task")\""
       _mayor_record_decision "$stale_entry" "$skip_context" "$SGT_ROOT" || true
-      log_event "$skip_event reason_code=$reason_code rig=$rig reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
+      log_event "$skip_event reason_code=$reason_code rig=$rig mismatch_categories=\"${mismatch_categories:-}\" snapshot=\"$(_escape_quotes "$snapshot_summary")\" live=\"$(_escape_quotes "$live_summary")\" reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\" retry=next-mayor-cycle"
       return 0
     fi
   fi
@@ -5516,7 +5664,9 @@ _mayor_loop() {
     if [[ "$needs_ai" == "true" ]]; then
       echo "[mayor] complex issues detected — invoking AI decision..."
       local mayor_workspace="$SGT_CONFIG/mayor-workspace"
+      local dispatch_snapshot_file="$SGT_CONFIG/mayor-dispatch-snapshot.tsv"
       mkdir -p "$mayor_workspace"
+      _mayor_dispatch_snapshot_file "$dispatch_snapshot_file"
 
       local briefing
       briefing=$(_mayor_build_briefing)
@@ -5553,7 +5703,7 @@ MAYORMD
 
       local backend="$(_ai_backend_default)"
 
-      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
+      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_DISPATCH_SNAPSHOT_FILE='$dispatch_snapshot_file' SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
