@@ -4620,6 +4620,46 @@ _sweep_probe_polecat() {
   )
 }
 
+_sweep_try_resilient_cleanup() {
+  local pfile="${1:-}" pname="${2:-}"
+  local snapshot rig repo issue branch session worktree
+  local canonical_repo resolve_meta resolve_code resolve_reason
+  local issue_state cleanup_reason cleanup_line owner_repo
+
+  snapshot="$(
+    (
+      source "$pfile"
+      printf '%s|%s|%s|%s|%s|%s\n' "${RIG:-}" "${REPO:-}" "${ISSUE:-}" "${BRANCH:-}" "${SESSION:-}" "${WORKTREE:-}"
+    ) 2>/dev/null
+  )"
+  IFS='|' read -r rig repo issue branch session worktree <<< "$snapshot"
+  [[ -n "$repo" && -n "$branch" ]] || return 1
+  [[ "$issue" =~ ^[0-9]+$ && "$issue" != "0" ]] || return 1
+
+  if ! canonical_repo="$(_resolve_rig_repo_canonical "sweep-resilient-cleanup-issue-check" "$rig" "$repo" "1")"; then
+    resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+    IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    log_event "SWEEP_RESILIENT_SKIP polecat=$pname issue=#${issue:-unknown} reason_code=${resolve_code:-unknown} reason=\"$(_escape_quotes "${resolve_reason:-unable to resolve rig repo}")\""
+    return 1
+  fi
+
+  issue_state="$(gh issue view "$issue" --repo "$canonical_repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+  if [[ "$issue_state" != "CLOSED" ]]; then
+    log_event "SWEEP_RESILIENT_SKIP polecat=$pname issue=#${issue:-unknown} reason_code=issue-not-closed issue_state=${issue_state:-unknown}"
+    return 1
+  fi
+
+  cleanup_reason="sweep-pr-lookup-race-issue-closed"
+  cleanup_line="$(_mayor_cleanup_stale_polecat "$pfile" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "$worktree" "$cleanup_reason" "$issue_state" "" "UNAVAILABLE" 2>/dev/null || true)"
+  if [[ "$cleanup_line" == CLEANED\|* ]]; then
+    owner_repo="$(_repo_owner_repo "$repo")"
+    log_event "SWEEP_RESILIENT_CLEANUP reason_code=$cleanup_reason polecat=$pname repo=$owner_repo issue=#${issue:-unknown} branch=\"$(_escape_quotes "$branch")\" pr_state=UNAVAILABLE issue_state=$issue_state"
+    printf '%s\n' "$cleanup_line"
+    return 0
+  fi
+  return 1
+}
+
 cmd_sweep() {
   ensure_init
   local cleaned=0
@@ -4685,6 +4725,15 @@ cmd_sweep() {
         local reason
         reason="${probe_output#*|}"
         if [[ "$reason" == "dead-no-pr" ]]; then
+          local resilient_cleanup_line
+          resilient_cleanup_line="$(_sweep_try_resilient_cleanup "$f" "$pname" 2>/dev/null || true)"
+          if [[ "$resilient_cleanup_line" == CLEANED\|* ]]; then
+            local _ cleanup_polecat cleanup_reason cleanup_action cleanup_issue cleanup_pr
+            IFS='|' read -r _ cleanup_polecat cleanup_reason cleanup_action cleanup_issue cleanup_pr <<< "$resilient_cleanup_line"
+            info "polecat $pname completed (fallback: reason_code=$cleanup_reason) — cleaning up"
+            cleaned=$((cleaned + 1))
+            continue
+          fi
           warn "polecat $pname is dead but no PR found — use 'sgt nuke $pname' to clean up"
         fi
         ;;

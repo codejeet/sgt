@@ -31,8 +31,34 @@ cat > "$MOCK_BIN/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then
-  echo "OPEN"
+mode="${SGT_TEST_GH_MODE:-open}"
+args=" $* "
+
+if [[ "$args" == *" pr list "* ]]; then
+  case "$mode" in
+    open)
+      echo "OPEN"
+      ;;
+    lookup_race)
+      echo ""
+      ;;
+    *)
+      echo "unknown gh mode: $mode" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+
+if [[ "$args" == *" issue view "* && "$args" == *" --json state "* ]]; then
+  case "$mode" in
+    lookup_race)
+      echo "CLOSED"
+      ;;
+    *)
+      echo "OPEN"
+      ;;
+  esac
   exit 0
 fi
 
@@ -47,6 +73,7 @@ ENV_PREFIX=(
   PATH="$MOCK_BIN:$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
   TERM="${TERM:-xterm}"
   SGT_ROOT="$HOME_DIR/sgt"
+  SGT_TEST_GH_MODE="open"
 )
 
 "${ENV_PREFIX[@]}" bash --noprofile --norc -c '
@@ -103,6 +130,72 @@ fi
 
 if [[ -d "$worktree" ]]; then
   echo "expected polecat worktree to be removed after successful sweep" >&2
+  exit 1
+fi
+'
+
+"${ENV_PREFIX[@]}" bash --noprofile --norc -c '
+set -euo pipefail
+
+worktree="$SGT_ROOT/polecats/test-race1111"
+mkdir -p "$worktree"
+cat > "$SGT_ROOT/.sgt/polecats/test-race1111" <<STATE
+RIG=test
+REPO=https://github.com/acme/demo
+ISSUE=71
+BRANCH=sgt/test-race1111
+WORKTREE=$worktree
+SESSION=sgt-test-race1111
+DEFAULT_BRANCH=master
+STATE
+
+set +e
+SGT_TEST_GH_MODE=lookup_race sgt sweep > "$SGT_ROOT/sweep-race.out" 2> "$SGT_ROOT/sweep-race.err"
+sweep_rc=$?
+set -e
+
+if [[ "$sweep_rc" -ne 0 ]]; then
+  echo "expected sweep to recover from lookup race and succeed, got exit $sweep_rc" >&2
+  exit 1
+fi
+
+if [[ -s "$SGT_ROOT/sweep-race.err" ]]; then
+  echo "expected no stderr for resilient lookup-race cleanup path" >&2
+  cat "$SGT_ROOT/sweep-race.err" >&2
+  exit 1
+fi
+
+if ! grep -q "completed (fallback: reason_code=sweep-pr-lookup-race-issue-closed) — cleaning up" "$SGT_ROOT/sweep-race.out"; then
+  echo "expected explicit fallback cleanup line in sweep output" >&2
+  cat "$SGT_ROOT/sweep-race.out" >&2
+  exit 1
+fi
+
+if ! grep -q "swept 1 completed polecat(s)" "$SGT_ROOT/sweep-race.out"; then
+  echo "expected final sweep summary line for fallback cleanup path" >&2
+  cat "$SGT_ROOT/sweep-race.out" >&2
+  exit 1
+fi
+
+if [[ -f "$SGT_ROOT/.sgt/polecats/test-race1111" ]]; then
+  echo "expected lookup-race fallback cleanup to remove polecat state file" >&2
+  exit 1
+fi
+
+if [[ -d "$worktree" ]]; then
+  echo "expected lookup-race fallback cleanup to remove polecat worktree" >&2
+  exit 1
+fi
+
+if ! grep -q "SWEEP_RESILIENT_CLEANUP reason_code=sweep-pr-lookup-race-issue-closed polecat=test-race1111" "$SGT_ROOT/sgt.log"; then
+  echo "expected sweep resilient cleanup activity log entry" >&2
+  cat "$SGT_ROOT/sgt.log" >&2
+  exit 1
+fi
+
+if ! grep -q "MAYOR POLECAT CLEANUP reason_code=sweep-pr-lookup-race-issue-closed polecat=test-race1111" "$SGT_ROOT/.sgt/mayor-decisions.log"; then
+  echo "expected decision-log reason code for fallback cleanup path" >&2
+  cat "$SGT_ROOT/.sgt/mayor-decisions.log" >&2
   exit 1
 fi
 '
