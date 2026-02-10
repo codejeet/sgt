@@ -1615,6 +1615,41 @@ cmd_nuke() {
 
 # ─── Sweep ────────────────────────────────────────────────────────────
 
+_sweep_probe_polecat() {
+  local pfile="${1:-}"
+  (
+    source "$pfile"
+
+    if [[ -z "${SESSION:-}" ]]; then
+      echo "ERROR|missing SESSION in polecat state"
+      exit 2
+    fi
+
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      echo "SKIP|alive"
+      exit 0
+    fi
+
+    if [[ -z "${REPO:-}" || -z "${BRANCH:-}" ]]; then
+      echo "ERROR|missing REPO/BRANCH in polecat state"
+      exit 3
+    fi
+
+    local pr_state
+    pr_state=$(gh pr list --repo "$REPO" --head "$BRANCH" --json state --jq '.[0].state' 2>/dev/null || true)
+
+    if [[ "$pr_state" == "OPEN" || "$pr_state" == "MERGED" ]]; then
+      printf "CLEAN|%s|%s|%s\n" "$pr_state" "${RIG:-}" "${WORKTREE:-}"
+    else
+      if [[ -z "$pr_state" ]]; then
+        echo "SKIP|dead-no-pr"
+      else
+        echo "SKIP|dead-pr-${pr_state}"
+      fi
+    fi
+  )
+}
+
 cmd_sweep() {
   ensure_init
   local cleaned=0
@@ -1622,36 +1657,74 @@ cmd_sweep() {
     [[ -f "$f" ]] || continue
     local pname
     pname="$(basename "$f")"
-    (
-      source "$f"
-      if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-        local pr_state
-        pr_state=$(gh pr list --repo "$REPO" --head "$BRANCH" --json state --jq '.[0].state' 2>/dev/null || true)
+    local probe_output probe_rc
+    set +e
+    probe_output="$(_sweep_probe_polecat "$f")"
+    probe_rc=$?
+    set -e
 
-        if [[ "$pr_state" == "OPEN" || "$pr_state" == "MERGED" ]]; then
-          info "polecat $pname completed (PR $pr_state) — cleaning up"
-          if [[ -d "$WORKTREE" ]]; then
-            local rpath
-            rpath="$(rig_path "$RIG")"
-            git -C "$rpath" worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
-          fi
-          # Signal to parent to clean
-          echo "CLEAN"
-        else
-          warn "polecat $pname is dead but no PR found — use 'sgt nuke $pname' to clean up"
-          echo "SKIP"
-        fi
-      else
-        echo "SKIP"
+    if [[ "$probe_rc" -eq 141 ]]; then
+      info "polecat $pname had a benign closed stream — skipping"
+      continue
+    fi
+    if [[ "$probe_rc" -ne 0 ]]; then
+      if [[ -z "$probe_output" ]]; then
+        die "sweep failed for polecat '$pname': no action emitted (exit $probe_rc). Use 'sgt nuke $pname' if stale."
       fi
-    ) | {
-      read -r action
-      if [[ "$action" == "CLEAN" ]]; then
-        rm -f "$f"
+      die "sweep failed for polecat '$pname': $probe_output. Use 'sgt nuke $pname' if stale."
+    fi
+    if [[ -z "$probe_output" ]]; then
+      info "polecat $pname emitted no sweep action — skipping"
+      continue
+    fi
+
+    local action
+    action="${probe_output%%|*}"
+    case "$action" in
+      CLEAN)
+        local _ pr_state rig_name worktree rpath
+        IFS='|' read -r _ pr_state rig_name worktree <<< "$probe_output"
+
+        info "polecat $pname completed (PR $pr_state) — cleaning up"
+        if [[ -n "$worktree" && -d "$worktree" ]]; then
+          rpath=""
+          if [[ -n "$rig_name" ]]; then
+            rpath="$(rig_path "$rig_name" 2>/dev/null || true)"
+          fi
+
+          if [[ -n "$rpath" ]]; then
+            if ! git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null; then
+              if ! rm -rf "$worktree" 2>/dev/null; then
+                die "failed to remove worktree '$worktree' for polecat '$pname'. Use 'sgt nuke $pname'."
+              fi
+            fi
+          else
+            if ! rm -rf "$worktree" 2>/dev/null; then
+              die "failed to remove worktree '$worktree' for polecat '$pname'. Use 'sgt nuke $pname'."
+            fi
+          fi
+        fi
+
+        if ! rm -f "$f"; then
+          die "failed to remove polecat state '$f' for '$pname'. Use 'sgt nuke $pname'."
+        fi
         cleaned=$((cleaned + 1))
         log_event "SWEEP $pname"
-      fi
-    }
+        ;;
+      SKIP)
+        local reason
+        reason="${probe_output#*|}"
+        if [[ "$reason" == "dead-no-pr" ]]; then
+          warn "polecat $pname is dead but no PR found — use 'sgt nuke $pname' to clean up"
+        fi
+        ;;
+      ERROR)
+        die "sweep failed for polecat '$pname': ${probe_output#*|}. Use 'sgt nuke $pname' if stale."
+        ;;
+      *)
+        die "sweep failed for polecat '$pname': unexpected probe output '$probe_output'."
+        ;;
+    esac
   done
 
   if [[ "$cleaned" -eq 0 ]]; then
