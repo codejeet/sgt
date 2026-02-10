@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Mayor orphan-PR queueing now live-revalidates PR state (`OPEN` required) immediately before queueing; stale open-list snapshots that already became `MERGED`/`CLOSED` are skipped with explicit reason logging (`MAYOR_ORPHAN_SKIP_STALE`).
+- Added regression coverage for stale orphan PR snapshot false-positives in `test_mayor_orphan_stale_snapshot_guard.sh`.
 - Mayor dispatch hardening: added a pre-dispatch live revalidation guard to `sgt sling` (mayor context) that atomically checks for open PRs and open `sgt-authorized` issues before issue creation.
 - Mayor decision flow now skips dispatch when revalidation is dirty/stale and logs a clear reason in both terminal output and `~/.sgt/mayor-decisions.log`.
 - Added regression coverage for stale snapshot races and no-duplicate dispatch behavior in `test_mayor_stale_dispatch_race.sh`.

@@ -3540,6 +3540,21 @@ _mayor_loop() {
             local pr_num
             pr_num=$(echo "$pr_info" | grep -oP '#\d+' | tr -d '#')
 
+            # Live-revalidate state before queueing so stale list snapshots
+            # (e.g., PR merged after list) cannot enqueue orphan work.
+            local live_pr_state
+            live_pr_state=$(gh pr view "$pr_num" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)
+            if [[ -z "$live_pr_state" ]]; then
+              echo "[mayor] orphaned PR #$pr_num state revalidation failed — skipping"
+              log_event "MAYOR_ORPHAN_SKIP_REVALIDATE pr=#$pr_num rig=$rname branch=$pr_branch snapshot_state=OPEN reason=\"unable to query live PR state\""
+              continue
+            fi
+            if [[ "$live_pr_state" != "OPEN" ]]; then
+              echo "[mayor] orphaned PR #$pr_num stale snapshot (listed open, live state=$live_pr_state) — skipping"
+              log_event "MAYOR_ORPHAN_SKIP_STALE pr=#$pr_num rig=$rname branch=$pr_branch snapshot_state=OPEN live_state=$live_pr_state reason=\"live PR state no longer open\""
+              continue
+            fi
+
             # Security gate: check linked issue has sgt-authorized label
             local linked_issue
             linked_issue=$(gh pr view "$pr_num" --repo "$repo" --json body --jq '.body' 2>/dev/null | grep -oP 'Closes #\K[0-9]+' || true)
