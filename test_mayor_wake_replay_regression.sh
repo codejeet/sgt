@@ -86,4 +86,7 @@ echo "=== refinery stale queue item guard ==="
 echo "=== refinery stale post-merge redispatch guard ==="
 "$REPO_ROOT/test_refinery_stale_post_merge_redispatch.sh"
 
+echo "=== refinery duplicate PR-ready replay dedupe ==="
+"$REPO_ROOT/test_refinery_pr_ready_dedupe.sh"
+
 echo "ALL TESTS PASSED"

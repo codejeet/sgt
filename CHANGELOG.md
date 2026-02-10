@@ -13,5 +13,8 @@
 - Added/expanded regression coverage for concurrent mayor decision-log appends plus simulated write-error warning/notify cooldown behavior in `test_mayor_decision_log_durability.sh`.
 - Refinery merge processing now retries transient `gh pr merge` failures with bounded attempts + jitter (`SGT_REFINERY_MERGE_MAX_ATTEMPTS`, `SGT_REFINERY_MERGE_RETRY_BASE_MS`, `SGT_REFINERY_MERGE_RETRY_JITTER_MS`), revalidates PR open/head state before each retry, and emits structured final-failure notify metadata including attempts/error class.
 - Added refinery merge resilience regression coverage for transient-then-success and retry-time head-drift skip paths in `test_refinery_merge_retry_resilience.sh`.
+- Refinery merge attempts now claim an idempotency key (`repo+PR+head SHA`) so duplicate PR-ready queue replays for the same head are explicitly skipped before merge/conflict/reject side effects run.
+- Duplicate replay skips now emit explicit status output (`duplicate event ignored`) and structured activity log events (`REFINERY_DUPLICATE_SKIP ... key="owner/repo|pr=<n>|head=<sha>"`).
+- Added regression coverage for duplicate PR-ready queue replay dedupe in `test_refinery_pr_ready_dedupe.sh` (also wired into `test_mayor_wake_replay_regression.sh`).
 - `sgt status` now guards terminal-width initialization for non-TTY/narrow environments, avoids nounset crashes in PR-title truncation, and always exits `0` after rendering.
 - Added regression coverage for status rendering with unset/narrow `COLUMNS` in `test_status_non_tty_term_cols_guard.sh`.
