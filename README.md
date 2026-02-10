@@ -108,6 +108,19 @@ export SGT_MAYOR_WAKE_DEDUPE_TTL=15
 Set `SGT_MAYOR_WAKE_DEDUPE_TTL=0` to disable wake-trigger dedupe.
 - Suppressed stale triggers emit an explicit skip reason in mayor output, Rigger notification status, and `~/.sgt/mayor-decisions.log` (`MAYOR WAKE SKIP (duplicate-trigger)`).
 
+Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
+- Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.
+- On startup/refresh, Mayor emits explicit lock decisions: `acquired`, `reused`, or `stolen`.
+- If lock owner is still live with a valid lease, a competing Mayor exits and respects the existing owner.
+- If owner is dead or lease is expired, a new Mayor safely steals the stale lock and continues.
+- Lease length is tunable via:
+
+```bash
+export SGT_MAYOR_LOCK_LEASE_SECS=720
+```
+
+Default lease is `SGT_MAYOR_INTERVAL + 120` seconds.
+
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
 

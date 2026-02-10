@@ -17,6 +17,7 @@ SGT_DAEMON_LOCK="$SGT_CONFIG/daemon.lock"
 SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
+SGT_MAYOR_LOCK_LEASE_SECS="${SGT_MAYOR_LOCK_LEASE_SECS:-}" # defaults to interval + 120s
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
 SGT_MAYOR_WAKE_DEDUPE_TTL="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}" # 15 seconds
 SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
@@ -24,6 +25,7 @@ SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" #
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
+SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
@@ -349,6 +351,134 @@ _wake_trigger_should_suppress() {
   fi
   local age=$((now - last_seen))
   [[ "$age" -lt "$ttl" ]]
+}
+
+_mayor_lock_lease_secs() {
+  local raw="${SGT_MAYOR_LOCK_LEASE_SECS:-}"
+  local interval="${SGT_MAYOR_INTERVAL:-600}"
+  local fallback=$((interval + 120))
+  if [[ -z "$raw" ]]; then
+    raw="$fallback"
+  fi
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -eq 0 ]]; then
+    raw="$fallback"
+  fi
+  echo "$raw"
+}
+
+_mayor_lock_owner_live() {
+  local owner_pid="${1:-}"
+  [[ "$owner_pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$owner_pid" 2>/dev/null
+}
+
+_mayor_lock_read() {
+  local lock_file="${1:-$SGT_MAYOR_LOCK}"
+  local owner_pid="" started_at="" lease_until=""
+
+  if [[ -f "$lock_file" ]]; then
+    owner_pid="$(awk -F= '$1=="ownerPid"{print $2; exit}' "$lock_file" 2>/dev/null || true)"
+    started_at="$(awk -F= '$1=="startedAt"{print $2; exit}' "$lock_file" 2>/dev/null || true)"
+    lease_until="$(awk -F= '$1=="leaseUntil"{print $2; exit}' "$lock_file" 2>/dev/null || true)"
+  fi
+
+  echo "${owner_pid}|${started_at}|${lease_until}"
+}
+
+_mayor_lock_write() {
+  local lock_file="${1:-$SGT_MAYOR_LOCK}"
+  local owner_pid="${2:-}"
+  local started_at="${3:-}"
+  local lease_until="${4:-}"
+
+  cat > "$lock_file" <<EOF
+ownerPid=$owner_pid
+startedAt=$started_at
+leaseUntil=$lease_until
+EOF
+}
+
+_mayor_lock_claim() {
+  local lock_file="${SGT_MAYOR_LOCK:-$SGT_CONFIG/mayor.lock}"
+  local now lease_secs lease_until
+  now="$(date +%s)"
+  lease_secs="$(_mayor_lock_lease_secs)"
+  lease_until=$((now + lease_secs))
+
+  mkdir -p "$SGT_CONFIG"
+  exec {lock_fd}<>"$lock_file"
+  flock -x "$lock_fd"
+
+  local owner_pid started_at existing_lease
+  IFS='|' read -r owner_pid started_at existing_lease <<< "$(_mayor_lock_read "$lock_file")"
+
+  local decision reason new_started_at
+  decision="acquired"
+  reason="empty-or-invalid"
+  new_started_at="$now"
+
+  if [[ "$owner_pid" =~ ^[0-9]+$ && "$started_at" =~ ^[0-9]+$ && "$existing_lease" =~ ^[0-9]+$ ]]; then
+    if [[ "$owner_pid" -eq "$$" ]]; then
+      decision="reused"
+      reason="same-owner"
+      new_started_at="$started_at"
+    elif _mayor_lock_owner_live "$owner_pid" && [[ "$existing_lease" -gt "$now" ]]; then
+      decision="blocked-live"
+      reason="owner-live-with-valid-lease"
+      echo "${decision}|${owner_pid}|${started_at}|${existing_lease}|${reason}"
+      flock -u "$lock_fd"
+      exec {lock_fd}>&-
+      return 1
+    else
+      decision="stolen"
+      if _mayor_lock_owner_live "$owner_pid"; then
+        reason="lease-expired"
+      else
+        reason="owner-dead"
+      fi
+      new_started_at="$now"
+    fi
+  fi
+
+  _mayor_lock_write "$lock_file" "$$" "$new_started_at" "$lease_until"
+  echo "${decision}|$$|${new_started_at}|${lease_until}|${reason}"
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+}
+
+_mayor_lock_release() {
+  local owner_pid="${1:-$$}"
+  local lock_file="${SGT_MAYOR_LOCK:-$SGT_CONFIG/mayor.lock}"
+  [[ -f "$lock_file" ]] || return 0
+
+  exec {lock_fd}<>"$lock_file" || return 0
+  flock -x "$lock_fd"
+  local current_owner current_started current_lease
+  IFS='|' read -r current_owner current_started current_lease <<< "$(_mayor_lock_read "$lock_file")"
+  if [[ "$current_owner" == "$owner_pid" ]]; then
+    rm -f "$lock_file"
+  fi
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+}
+
+_mayor_lock_snapshot() {
+  local now owner_pid started_at lease_until
+  now="$(date +%s)"
+  IFS='|' read -r owner_pid started_at lease_until <<< "$(_mayor_lock_read "$SGT_MAYOR_LOCK")"
+  if [[ ! "$owner_pid" =~ ^[0-9]+$ || ! "$started_at" =~ ^[0-9]+$ || ! "$lease_until" =~ ^[0-9]+$ ]]; then
+    echo "none|||"
+    return 0
+  fi
+
+  local owner_live="dead" lease_state="expired"
+  if _mayor_lock_owner_live "$owner_pid"; then
+    owner_live="live"
+  fi
+  if [[ "$lease_until" -gt "$now" ]]; then
+    lease_state="valid"
+  fi
+  echo "${owner_live}/${lease_state}|${owner_pid}|${started_at}|${lease_until}"
 }
 
 _mayor_merge_queue_count() {
@@ -1202,6 +1332,13 @@ cmd_status() {
   local mayor_alive="off"
   tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
   printf "  %-16s %s\n" "mayor" "$(_status_badge "$mayor_alive")"
+  local mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until
+  IFS='|' read -r mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until <<< "$(_mayor_lock_snapshot)"
+  if [[ "$mayor_lock_state" == "none" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "lock: none" "$(_reset)"
+  else
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "lock: state=$mayor_lock_state ownerPid=$mayor_lock_owner startedAt=$mayor_lock_started leaseUntil=$mayor_lock_until" "$(_reset)"
+  fi
   local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
   IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
   if [[ "$log_fail_ts" =~ ^[0-9]+$ ]]; then
@@ -2794,6 +2931,19 @@ _mayor_wake_summary() {
 _mayor_loop() {
   set +e  # Mayor loop must never exit on errors
   log_event "MAYOR_START"
+  local lock_claim lock_rc lock_decision lock_owner lock_started lock_until lock_reason
+  lock_claim="$(_mayor_lock_claim)"
+  lock_rc=$?
+  IFS='|' read -r lock_decision lock_owner lock_started lock_until lock_reason <<< "$lock_claim"
+  if [[ "$lock_rc" -ne 0 ]]; then
+    echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner:-unknown} startedAt=${lock_started:-unknown} leaseUntil=${lock_until:-unknown} reason=${lock_reason:-unknown})"
+    log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner:-unknown} startedAt=${lock_started:-unknown} leaseUntil=${lock_until:-unknown} reason=${lock_reason:-unknown}"
+    return 0
+  fi
+  echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason})"
+  log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason}"
+  trap '_mayor_lock_release "$$"' EXIT INT TERM
+
   local wake_dedupe_ttl
   wake_dedupe_ttl="$(_mayor_wake_dedupe_ttl_secs)"
   local -A wake_seen_at=()
@@ -2805,6 +2955,19 @@ _mayor_loop() {
   echo "[mayor] started — event-driven (fallback every ${SGT_MAYOR_INTERVAL}s)"
 
   while true; do
+    lock_claim="$(_mayor_lock_claim)"
+    lock_rc=$?
+    IFS='|' read -r lock_decision lock_owner lock_started lock_until lock_reason <<< "$lock_claim"
+    if [[ "$lock_rc" -ne 0 ]]; then
+      echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner:-unknown} startedAt=${lock_started:-unknown} leaseUntil=${lock_until:-unknown} reason=${lock_reason:-unknown})"
+      log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner:-unknown} startedAt=${lock_started:-unknown} leaseUntil=${lock_until:-unknown} reason=${lock_reason:-unknown}"
+      break
+    fi
+    if [[ "$lock_decision" == "reused" || "$lock_decision" == "stolen" || "$lock_decision" == "acquired" ]]; then
+      echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason})"
+      log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason}"
+    fi
+
     # Block on fd 3 with timeout — wakes on event OR periodic check
     local wake_reason=""
     local wake_events=()
@@ -4071,6 +4234,7 @@ Environment:
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
+  SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
