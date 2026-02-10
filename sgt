@@ -117,74 +117,37 @@ _notify_openclaw() {
 
   local channel="" to="" reply_to=""
   local notify_out=""
+  local py_bin=""
+  local py_parse_notify='import json, sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+def get(keys):
+    for k in keys:
+        v = data.get(k)
+        if v is None:
+            continue
+        v = str(v).strip()
+        if v:
+            return v
+    return ""
+print(get(["channel"]))
+print(get(["to"]))
+print(get(["reply_to", "reply-to", "replyTo"]))'
 
-  # Keep `2>/dev/null` before `<<'PY'` inside $(...) to avoid bash's
-  # "unterminated here-document" parser warning from the legacy ordering.
+  # Avoid heredoc inside command substitution to prevent bash parser warnings.
   if command -v python3 &>/dev/null; then
-    notify_out="$(
-      python3 - "$SGT_NOTIFY" 2>/dev/null <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    sys.exit(1)
-
-def get(keys):
-    for k in keys:
-        v = data.get(k)
-        if v is None:
-            continue
-        v = str(v).strip()
-        if v:
-            return v
-    return ""
-
-channel = get(["channel"])
-to = get(["to"])
-reply_to = get(["reply_to", "reply-to", "replyTo"])
-print(channel)
-print(to)
-print(reply_to)
-PY
-    )" || return 0
+    py_bin="python3"
   elif command -v python &>/dev/null; then
-    notify_out="$(
-      python - "$SGT_NOTIFY" 2>/dev/null <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    sys.exit(1)
-
-def get(keys):
-    for k in keys:
-        v = data.get(k)
-        if v is None:
-            continue
-        v = str(v).strip()
-        if v:
-            return v
-    return ""
-
-channel = get(["channel"])
-to = get(["to"])
-reply_to = get(["reply_to", "reply-to", "replyTo"])
-print(channel)
-print(to)
-print(reply_to)
-PY
-    )" || return 0
+    py_bin="python"
   else
     return 0
   fi
+
+  notify_out="$("$py_bin" -c "$py_parse_notify" "$SGT_NOTIFY" 2>/dev/null)" || return 0
 
   local fields=()
   while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
