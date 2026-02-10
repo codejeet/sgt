@@ -86,6 +86,9 @@ echo "=== mayor critical alert cooldown dedupe ==="
 echo "=== mayor stalled refinery REVIEW_UNCLEAR watchdog ==="
 "$REPO_ROOT/test_mayor_review_watchdog.sh"
 
+echo "=== mayor stale required CI watchdog ==="
+"$REPO_ROOT/test_mayor_ci_watchdog.sh"
+
 echo "=== mayor decision log durability ==="
 "$REPO_ROOT/test_mayor_decision_log_durability.sh"
 

@@ -171,6 +171,23 @@ Mayor also watches refinery queue items that are stuck in `REVIEW_UNCLEAR`:
 export SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS=900
 ```
 
+Mayor also watches required CI checks on open PRs:
+- Required checks stuck in `QUEUED` or `IN_PROGRESS` for at least the stale threshold are escalated with exact elapsed seconds and direct `check_url`.
+- Escalations are deduped per `rig+repo+pr+check` for one dedupe window, then can re-notify if still stale.
+- Dedupe state resets automatically when that check recovers/completes (no longer stale).
+- `sgt status` surfaces CI watchdog health with stale age (`oldest=<n>s`), threshold, and dedupe window.
+- Defaults: stale threshold `900` seconds (`15` minutes), dedupe window `1800` seconds (`30` minutes), configurable with:
+
+```bash
+export SGT_MAYOR_CI_CHECK_STALE_SECS=900
+export SGT_MAYOR_CI_WATCHDOG_DEDUPE_SECS=1800
+```
+
+Runbook action mapping (notify vs retry vs nuke):
+- `notify`: stale required CI checks (`QUEUED`/`IN_PROGRESS`) beyond threshold; include elapsed seconds + check URL.
+- `retry`: transient merge/check races after a live revalidation pass.
+- `nuke`: only for irrecoverably stale/dead polecat runtime state.
+
 ## Refinery merge retries
 
 Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.

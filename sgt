@@ -29,6 +29,7 @@ SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
+SGT_MAYOR_CI_WATCHDOG_STATE="$SGT_CONFIG/mayor-ci-watchdog.state"
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
@@ -778,6 +779,166 @@ _mayor_review_unclear_stale_secs() {
   local raw="${SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS:-900}"
   [[ "$raw" =~ ^[0-9]+$ ]] || raw=900
   echo "$raw"
+}
+
+_mayor_ci_check_stale_secs() {
+  local raw="${SGT_MAYOR_CI_CHECK_STALE_SECS:-900}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=900
+  echo "$raw"
+}
+
+_mayor_ci_watchdog_dedupe_window_secs() {
+  local raw="${SGT_MAYOR_CI_WATCHDOG_DEDUPE_SECS:-1800}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=1800
+  echo "$raw"
+}
+
+_mayor_ci_watchdog_signature() {
+  local state="${1:-}" since_epoch="${2:-}" check_url="${3:-}"
+  printf 'state=%s|since=%s|url=%s' "${state:-unknown}" "${since_epoch:-0}" "${check_url:-unknown}"
+}
+
+_mayor_ci_watchdog_state_key() {
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" check_name="${4:-}"
+  printf '%s|%s|%s|%s' "${rig:-unknown}" "${repo:-unknown}" "${pr:-0}" "${check_name:-unknown}"
+}
+
+_mayor_should_notify_ci_watchdog() {
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" check_name="${4:-}" state="${5:-}" since_epoch="${6:-}" check_url="${7:-}" now_epoch="${8:-}"
+  [[ -n "$rig" && -n "$repo" && -n "$pr" && -n "$check_name" && -n "$state" ]] || return 1
+
+  local key signature now prev_line prev_signature prev_notified state_tmp dedupe_window age
+  key="$(_mayor_ci_watchdog_state_key "$rig" "$repo" "$pr" "$check_name")"
+  signature="$(_mayor_ci_watchdog_signature "$state" "$since_epoch" "$check_url")"
+  now="${now_epoch:-$(date +%s)}"
+  [[ "$now" =~ ^[0-9]+$ ]] || now="$(date +%s)"
+  dedupe_window="$(_mayor_ci_watchdog_dedupe_window_secs)"
+  [[ "$dedupe_window" =~ ^[0-9]+$ ]] || dedupe_window=0
+  prev_signature=""
+  prev_notified=""
+
+  if [[ -f "$SGT_MAYOR_CI_WATCHDOG_STATE" ]]; then
+    prev_line=$(awk -F'\t' -v key="$key" '$1==key {print; exit}' "$SGT_MAYOR_CI_WATCHDOG_STATE" 2>/dev/null || true)
+    if [[ -n "$prev_line" ]]; then
+      IFS=$'\t' read -r _ prev_signature prev_notified <<< "$prev_line"
+    fi
+  fi
+
+  if [[ "$dedupe_window" -gt 0 && "$prev_signature" == "$signature" && "$prev_notified" =~ ^[0-9]+$ ]]; then
+    age=$((now - prev_notified))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -lt "$dedupe_window" ]]; then
+      return 1
+    fi
+  fi
+
+  state_tmp="$(mktemp)"
+  if [[ -f "$SGT_MAYOR_CI_WATCHDOG_STATE" ]]; then
+    awk -F'\t' -v key="$key" '$1!=key {print $0}' "$SGT_MAYOR_CI_WATCHDOG_STATE" > "$state_tmp" 2>/dev/null || true
+  fi
+  printf '%s\t%s\t%s\n' "$key" "$signature" "$now" >> "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_CI_WATCHDOG_STATE"
+  return 0
+}
+
+_mayor_ci_watchdog_reconcile_state() {
+  local line rig repo pr check_name key state_tmp
+  declare -A active_keys=()
+  for line in "${@+"$@"}"; do
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r rig repo pr _ check_name _ _ _ _ _ _ _ <<< "$line"
+    key="$(_mayor_ci_watchdog_state_key "$rig" "$repo" "$pr" "$check_name")"
+    active_keys["$key"]=1
+  done
+
+  [[ -f "$SGT_MAYOR_CI_WATCHDOG_STATE" ]] || return 0
+  state_tmp="$(mktemp)"
+  while IFS=$'\t' read -r key signature notified_at; do
+    [[ -n "$key" ]] || continue
+    if [[ -n "${active_keys[$key]:-}" ]]; then
+      printf '%s\t%s\t%s\n' "$key" "$signature" "$notified_at" >> "$state_tmp"
+    fi
+  done < "$SGT_MAYOR_CI_WATCHDOG_STATE"
+  mv "$state_tmp" "$SGT_MAYOR_CI_WATCHDOG_STATE"
+}
+
+_mayor_ci_watchdog_collect_from_check_stream() {
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" issue="${4:-0}" pr_url="${5:-}" issue_url="${6:-}" now_epoch="${7:-$(date +%s)}" threshold="${8:-$(_mayor_ci_check_stale_secs)}"
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=0
+
+  local check_name check_state started_at check_link started_epoch age check_url
+  while IFS=$'\t' read -r check_name check_state started_at check_link; do
+    [[ -n "$check_name" ]] || continue
+    [[ "$check_state" == "QUEUED" || "$check_state" == "IN_PROGRESS" ]] || continue
+    [[ -n "$started_at" ]] || continue
+    started_epoch="$(date -d "$started_at" +%s 2>/dev/null || true)"
+    [[ "$started_epoch" =~ ^[0-9]+$ ]] || continue
+    age=$((now_epoch - started_epoch))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -ge "$threshold" ]]; then
+      check_url="${check_link:-$pr_url}"
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "${rig:-unknown}" "${repo:-unknown}" "${pr:-0}" "${issue:-0}" "${check_name}" "${check_state}" \
+        "${started_epoch}" "${age}" "${threshold}" "${check_url:-unknown}" "${pr_url:-unknown}" "${issue_url:-unknown}"
+    fi
+  done
+}
+
+_mayor_ci_watchdog_collect_stale() {
+  local now_epoch="${1:-$(date +%s)}"
+  local threshold="${2:-$(_mayor_ci_check_stale_secs)}"
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=0
+  [[ -d "$SGT_RIGS" ]] || return 0
+
+  local rig_file rig repo owner_repo pr_num pr_url checks_stream
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    rig="$(basename "$rig_file")"
+    repo="$(cat "$rig_file" 2>/dev/null || true)"
+    [[ -n "$repo" ]] || continue
+    owner_repo="$(_repo_owner_repo "$repo")"
+    [[ -n "$owner_repo" ]] || continue
+
+    while IFS=$'\t' read -r pr_num pr_url; do
+      [[ "$pr_num" =~ ^[0-9]+$ ]] || continue
+      checks_stream="$(
+        gh pr checks "$pr_num" --repo "$repo" --required \
+          --json name,state,startedAt,link \
+          --jq '.[] | "\(.name // \"\")\t\(.state // \"\")\t\(.startedAt // \"\")\t\(.link // \"\")"' \
+          2>/dev/null || true
+      )"
+      [[ -n "$checks_stream" ]] || continue
+      _mayor_ci_watchdog_collect_from_check_stream "$rig" "$owner_repo" "$pr_num" "0" "$pr_url" "unknown" "$now_epoch" "$threshold" <<< "$checks_stream"
+    done < <(
+      gh pr list --repo "$repo" --state open --limit 100 --json number,url \
+        --jq '.[] | "\(.number)\t\(.url // \"\")"' \
+        2>/dev/null || true
+    )
+  done
+}
+
+_mayor_ci_watchdog_status_snapshot() {
+  local threshold now_epoch line count oldest_age age
+  threshold="$(_mayor_ci_check_stale_secs)"
+  now_epoch="$(date +%s)"
+  count=0
+  oldest_age=0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r _ _ _ _ _ _ _ age _ _ _ _ <<< "$line"
+    [[ "$age" =~ ^[0-9]+$ ]] || age=0
+    count=$((count + 1))
+    if [[ "$age" -gt "$oldest_age" ]]; then
+      oldest_age="$age"
+    fi
+  done < <(_mayor_ci_watchdog_collect_stale "$now_epoch" "$threshold")
+  printf '%s|%s|%s\n' "$count" "$oldest_age" "$threshold"
 }
 
 _mayor_review_watchdog_signature() {
@@ -1812,6 +1973,14 @@ cmd_status() {
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "review watchdog: ${review_watch_count} stalled REVIEW_UNCLEAR (oldest=${review_watch_oldest}s threshold>=${review_watch_threshold}s)" "$(_reset)"
   else
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
+  fi
+  local ci_watch_count ci_watch_oldest ci_watch_threshold ci_watch_dedupe
+  IFS='|' read -r ci_watch_count ci_watch_oldest ci_watch_threshold <<< "$(_mayor_ci_watchdog_status_snapshot)"
+  ci_watch_dedupe="$(_mayor_ci_watchdog_dedupe_window_secs)"
+  if [[ "$ci_watch_count" =~ ^[0-9]+$ && "$ci_watch_count" -gt 0 ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "ci watchdog: ${ci_watch_count} stalled required checks (oldest=${ci_watch_oldest}s threshold>=${ci_watch_threshold}s dedupe=${ci_watch_dedupe}s)" "$(_reset)"
+  else
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "ci watchdog: clear (threshold>=${ci_watch_threshold}s dedupe=${ci_watch_dedupe}s)" "$(_reset)"
   fi
 
   _section "Dogs"
@@ -3675,6 +3844,7 @@ _mayor_loop() {
     local notify_rigger=""
     local snapshot_freshness=""
     local review_watchdog_notes=""
+    local ci_watchdog_notes=""
 
     if [[ "$wake_reason" != "periodic" ]]; then
       local event_reason wake_summary event_key now_ts last_seen age skip_reason claim_rc duplicate_key
@@ -3816,6 +3986,27 @@ _mayor_loop() {
         log_event "MAYOR_REVIEW_WATCHDOG_SUPPRESS rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s"
       fi
     done < <(_mayor_review_watchdog_collect_stale)
+
+    # === 2c. Watchdog: stale required CI checks on open PRs ===
+    local ci_watch_line
+    local ci_watch_lines=()
+    mapfile -t ci_watch_lines < <(_mayor_ci_watchdog_collect_stale)
+    _mayor_ci_watchdog_reconcile_state "${ci_watch_lines[@]+"${ci_watch_lines[@]}"}"
+    for ci_watch_line in "${ci_watch_lines[@]+"${ci_watch_lines[@]}"}"; do
+      [[ -n "$ci_watch_line" ]] || continue
+      local cw_rig cw_repo cw_pr cw_issue cw_check cw_state cw_since cw_age cw_threshold cw_check_url cw_pr_url cw_issue_url
+      IFS='|' read -r cw_rig cw_repo cw_pr cw_issue cw_check cw_state cw_since cw_age cw_threshold cw_check_url cw_pr_url cw_issue_url <<< "$ci_watch_line"
+      issues_found+="  - required CI check stale: ${cw_repo} PR #${cw_pr} check=\"${cw_check}\" state=${cw_state} elapsed=${cw_age}s threshold>=${cw_threshold}s check_url=${cw_check_url}\n"
+      ci_watchdog_notes+="  - rig=${cw_rig} repo=${cw_repo} pr=#${cw_pr} check=\"$(_escape_quotes "$cw_check")\" state=${cw_state} elapsed=${cw_age}s threshold>=${cw_threshold}s check_url=${cw_check_url}\n"
+      needs_ai=true
+      if _mayor_should_notify_ci_watchdog "$cw_rig" "$cw_repo" "$cw_pr" "$cw_check" "$cw_state" "$cw_since" "$cw_check_url"; then
+        _mayor_notify_rigger "mayor escalated: stale required check rig=$cw_rig repo=$cw_repo pr=#$cw_pr check=\"$(_escape_quotes "$cw_check")\" state=$cw_state elapsed=${cw_age}s threshold=${cw_threshold}s check_url=${cw_check_url} pr_url=${cw_pr_url}"
+        actions_taken+="  - escalated stale required check for PR #$cw_pr ($cw_repo check=\"$cw_check\" elapsed=${cw_age}s)\n"
+        log_event "MAYOR_CI_WATCHDOG_NOTIFY rig=$cw_rig repo=$cw_repo pr=#$cw_pr check=\"$(_escape_quotes "$cw_check")\" state=$cw_state elapsed=${cw_age}s threshold=${cw_threshold}s check_url=$cw_check_url"
+      else
+        log_event "MAYOR_CI_WATCHDOG_SUPPRESS rig=$cw_rig repo=$cw_repo pr=#$cw_pr check=\"$(_escape_quotes "$cw_check")\" state=$cw_state elapsed=${cw_age}s check_url=$cw_check_url"
+      fi
+    done
 
     # === 3. Check for stale polecats (running > 30min) ===
     for pf in "$SGT_CONFIG/polecats"/*; do
@@ -3961,6 +4152,9 @@ _mayor_loop() {
       if [[ -n "$review_watchdog_notes" ]]; then
         cycle_entry+="$(printf '  Review Watchdog:\n%b' "$review_watchdog_notes")"
       fi
+      if [[ -n "$ci_watchdog_notes" ]]; then
+        cycle_entry+="$(printf '  CI Watchdog:\n%b' "$ci_watchdog_notes")"
+      fi
       if _mayor_record_decision "$cycle_entry" "cycle-summary" "$SGT_ROOT"; then
         echo "[mayor] logged issues/actions"
       fi
@@ -4000,6 +4194,11 @@ $(cat "$briefing")
 - \`sgt nuke <polecat>\` — Kill stuck worker
 - \`sgt sweep\` — Clean finished workers
 - \`gh pr merge <pr#> --repo <repo> --squash --delete-branch\` — Merge PR
+
+Runbook action mapping:
+- notify: stale required CI checks (`QUEUED`/`IN_PROGRESS`) past threshold; include elapsed seconds + `check_url`
+- retry: transient merge/check races after live revalidation
+- nuke: only for irrecoverably stale/dead polecat runtime state
 
 Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
 
