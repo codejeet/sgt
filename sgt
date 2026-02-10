@@ -17,6 +17,7 @@ SGT_DAEMON_LOCK="$SGT_CONFIG/daemon.lock"
 SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
+SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
@@ -167,6 +168,97 @@ _wake_field() {
     fi
   done
   echo ""
+}
+
+_normalize_label() {
+  local label="${1:-}"
+  label="$(_one_line "$label")"
+  label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+  echo "$label"
+}
+
+_symptom_signature() {
+  local raw="${1:-}"
+  raw="$(_one_line "$raw")"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[0-9]+/ num /g; s/[^a-z]+/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  echo "$raw"
+}
+
+_dispatch_cooldown_secs() {
+  local raw="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="21600"
+  fi
+  echo "$raw"
+}
+
+_find_recent_duplicate_issue() {
+  local repo="${1:-}" title="${2:-}" cooldown_secs="${3:-0}"
+  shift 3 || true
+  local labels=("$@")
+  [[ -n "$repo" && -n "$title" ]] || return 1
+  [[ "$cooldown_secs" =~ ^[0-9]+$ ]] || cooldown_secs=0
+  [[ "$cooldown_secs" -gt 0 ]] || return 1
+
+  local target_signature
+  target_signature="$(_symptom_signature "$title")"
+  [[ -n "$target_signature" ]] || return 1
+
+  local required_labels=() label norm_label
+  for label in "${labels[@]+"${labels[@]}"}"; do
+    norm_label="$(_normalize_label "$label")"
+    [[ -n "$norm_label" ]] && required_labels+=("$norm_label")
+  done
+
+  local issues_tsv
+  issues_tsv=$(
+    gh issue list --repo "$repo" --state all --limit 100 \
+      --json number,title,state,url,createdAt,closedAt,labels \
+      --jq '.[] | [
+        (.number|tostring),
+        .url,
+        .state,
+        (.title | ascii_downcase | gsub("[0-9]+";" num ") | gsub("[^a-z]+";" ") | gsub(" +";" ") | sub("^ ";"") | sub(" $";"")),
+        (.labels | map(.name | ascii_downcase) | join(",")),
+        .createdAt,
+        (.closedAt // "")
+      ] | @tsv' 2>/dev/null || true
+  )
+  [[ -n "$issues_tsv" ]] || return 1
+
+  local now_epoch best_ref=0 best_match=""
+  now_epoch=$(date +%s)
+  local issue_number issue_url issue_state issue_sig issue_labels created_at closed_at
+  while IFS=$'\t' read -r issue_number issue_url issue_state issue_sig issue_labels created_at closed_at; do
+    [[ -n "$issue_number" ]] || continue
+    [[ "$issue_sig" == "$target_signature" ]] || continue
+
+    local labels_ok=true required
+    for required in "${required_labels[@]+"${required_labels[@]}"}"; do
+      if [[ ",$issue_labels," != *",$required,"* ]]; then
+        labels_ok=false
+        break
+      fi
+    done
+    [[ "$labels_ok" == "true" ]] || continue
+
+    local reference_at="$created_at"
+    if [[ "${issue_state^^}" == "CLOSED" && -n "$closed_at" ]]; then
+      reference_at="$closed_at"
+    fi
+    local reference_epoch
+    reference_epoch=$(date -d "$reference_at" +%s 2>/dev/null || echo 0)
+    [[ "$reference_epoch" -gt 0 ]] || continue
+
+    local age=$((now_epoch - reference_epoch))
+    [[ "$age" -lt 0 ]] && age=0
+    if [[ "$age" -le "$cooldown_secs" && "$reference_epoch" -ge "$best_ref" ]]; then
+      best_ref="$reference_epoch"
+      best_match="${issue_number}|${issue_url}|${issue_state}|${age}"
+    fi
+  done <<< "$issues_tsv"
+
+  [[ -n "$best_match" ]] && echo "$best_match"
 }
 
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
@@ -511,6 +603,20 @@ cmd_sling() {
   for l in "${labels[@]+"${labels[@]}"}"; do
     label_args="$label_args --label $l"
   done
+
+  local dispatch_cooldown duplicate_issue
+  dispatch_cooldown="$(_dispatch_cooldown_secs)"
+  if [[ "$dispatch_cooldown" -gt 0 ]]; then
+    duplicate_issue=$(_find_recent_duplicate_issue "$repo" "$task" "$dispatch_cooldown" "${labels[@]+"${labels[@]}"}" || true)
+    if [[ -n "$duplicate_issue" ]]; then
+      local dup_number dup_url dup_state dup_age
+      IFS='|' read -r dup_number dup_url dup_state dup_age <<< "$duplicate_issue"
+      warn "suppressing duplicate dispatch: #$dup_number ($dup_state, ${dup_age}s ago) matches symptom signature"
+      log_event "SLING_SUPPRESS_DUPLICATE rig=$rig match=#$dup_number cooldown=${dispatch_cooldown}s title=\"$(_escape_quotes "$task")\""
+      info "duplicate issue within cooldown: $dup_url"
+      return 0
+    fi
+  fi
 
   local issue_url issue_number
   local issue_body
@@ -3380,6 +3486,7 @@ Environment:
   SGT_ROOT              Workspace root (default: ~/sgt)
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
+  SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
 
