@@ -379,6 +379,11 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 - If merge fails specifically because branch policy requires auto-merge, refinery revalidates PR state/head and retries exactly once with `--auto`.
 - Refinery also enforces a durable per-attempt idempotency key of `repo+PR+head SHA`, persisted under `~/.sgt/refinery-merge-attempts/`.
 - Once a merge action has been attempted for that key, the fence is kept across retries, future refinery cycles, and process restarts.
+- After any successful `gh pr merge` return, refinery immediately runs a post-merge live verification fence and writes a durable receipt under `~/.sgt/refinery-merge-receipts/`.
+- Receipt fields include: `REPO`, `PR`, `ISSUE`, `EXPECTED_STATE`, `OBSERVED_STATE`, `MERGED_SHA`, `BRANCH_DELETED`, `VERIFIED_AT`, `OUTCOME`, `RETRY_DECISION`, and `KEY` (merge key).
+- The expected post-merge state is `pr_state=MERGED;issue_state=OPEN;branch_deleted=true`.
+- If live verification mismatches expected state, refinery records a non-success receipt with explicit retry/no-op decision and does not emit merged-complete telemetry (`REFINERY_MERGED`) until a success receipt is recorded.
+- Replay/restart paths use the same merge key (`repo+PR+head SHA`) and recover from stale/partial receipts idempotently; duplicate success receipts for the same key are treated as replay no-op.
 - Duplicate PR-ready queue replays for the same key are skipped before any additional merge action runs.
 - If a replayed queue candidate is marked `REVIEW_APPROVED` but lacks `REVIEWED_HEAD_SHA`, refinery blocks merge, emits explicit telemetry, and resets it to `REVIEW_PENDING` for a fresh review/revalidation path.
 - When mergeability is `CONFLICTING`, refinery now writes durable conflict evidence under `~/.sgt/refinery-conflicts/` including original PR/head/attempt/timestamp context (`ORIGIN_PR`, `ORIGIN_HEAD_SHA`, `ORIGIN_ATTEMPT_KEY`, `ORIGIN_TS`).
@@ -407,6 +412,8 @@ Observability:
 - `REFINERY_MERGE_RETRY pr=#... attempt=<n>/<max> class=<class> delay_s=<seconds>`
 - `REFINERY_MERGE_RETRY_SKIP pr=#... attempt=<n>/<max> reason="..."`
 - `REFINERY_MERGE_RETRY_AUTO repo=<owner/repo> pr=#... reason=branch-policy-requires-auto-merge outcome=<success|failed|skipped> ...`
+- `REFINERY_MERGE_RECEIPT success repo=<owner/repo> pr=#... issue=#... expected_state="..." observed_state="..." merged_sha=<sha> branch_deleted=<true|false|unknown> verified_at=<iso> outcome=success retry=no-op merge_key="owner/repo|pr=<n>|head=<sha>"`
+- `REFINERY_MERGE_RECEIPT non-success reason=post-merge-live-mismatch retry=<retry-post-merge-revalidate|no-op-...> repo=<owner/repo> pr=#... issue=#... expected_state="..." observed_state="..." ...`
 - `REFINERY_MERGE_FAILED pr=#... attempt=<n>/<max> class=<class> transient=<true|false> error="..."`
 - `REFINERY_DUPLICATE_SKIP pr=#... issue=#... reason_code=duplicate-merge-attempt-key reason="duplicate merge-attempt key (repo+pr+head) already processed" key="owner/repo|pr=<n>|head=<sha>"`
 - `REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA pr=#... issue=#... queue=<queue-file> ...`
@@ -422,6 +429,20 @@ Observability:
 When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`
 - a structured activity log event: `REFINERY_DUPLICATE_SKIP ...`
+
+Troubleshooting refinery merge receipts:
+1. Inspect durable receipt files and correlate by merge key:
+```bash
+ls -1 ~/.sgt/refinery-merge-receipts/
+tail -100 ~/.sgt/refinery-merge-receipts/*.state
+```
+2. Correlate receipt outcomes in activity logs:
+```bash
+grep 'REFINERY_MERGE_RECEIPT' ~/sgt/sgt.log | tail -50
+```
+3. If `OUTCOME=mismatch` with `RETRY_DECISION=retry-post-merge-revalidate`, keep the queue item and re-run refinery; do not force a new merge attempt for the same merge key.
+4. If `OUTCOME=mismatch` with `RETRY_DECISION=no-op-*`, treat as manual remediation path (for example issue-state drift) and resolve drift before re-queueing.
+5. If duplicate replay occurs with existing success receipt, expected behavior is no-op dedupe; verify no additional `gh pr merge` was attempted for that merge key.
 
 Merge-queue enqueueing is also idempotent at `repo+PR` granularity (witness + mayor orphan dispatch paths):
 - Queue items are keyed by `owner/repo|pr=<n>`, so the same PR cannot be queued under multiple aliases.

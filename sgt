@@ -153,6 +153,18 @@ _MAYOR_ACTION_RECEIPT_STATUS=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
+_REFINERY_MERGE_RECEIPT_FILE=""
+_REFINERY_MERGE_RECEIPT_KEY=""
+_REFINERY_MERGE_RECEIPT_REPO=""
+_REFINERY_MERGE_RECEIPT_PR=""
+_REFINERY_MERGE_RECEIPT_ISSUE=""
+_REFINERY_MERGE_RECEIPT_EXPECTED_STATE=""
+_REFINERY_MERGE_RECEIPT_OBSERVED_STATE=""
+_REFINERY_MERGE_RECEIPT_MERGED_SHA=""
+_REFINERY_MERGE_RECEIPT_BRANCH_DELETED=""
+_REFINERY_MERGE_RECEIPT_VERIFIED_AT=""
+_REFINERY_MERGE_RECEIPT_OUTCOME=""
+_REFINERY_MERGE_RECEIPT_RETRY_DECISION=""
 _RESLING_LAST_POLECAT=""
 _RESLING_ISSUE_CLAIM_FILE=""
 
@@ -2235,6 +2247,207 @@ _refinery_merge_attempt_release() {
   [[ -n "$key_file" ]] || key_file="${_REFINERY_MERGE_ATTEMPT_FILE:-}"
   [[ -n "$key_file" ]] || return 0
   rm -f "$key_file" 2>/dev/null || true
+}
+
+_refinery_merge_receipts_dir() {
+  echo "$SGT_CONFIG/refinery-merge-receipts"
+}
+
+_refinery_merge_receipt_file_by_key() {
+  local key="${1:-}" key_id
+  [[ -n "$key" ]] || return 1
+  key_id="$(_refinery_merge_attempt_key_id "$key")"
+  printf '%s/%s.state\n' "$(_refinery_merge_receipts_dir)" "$key_id"
+}
+
+_refinery_merge_receipt_clear_loaded() {
+  _REFINERY_MERGE_RECEIPT_FILE=""
+  _REFINERY_MERGE_RECEIPT_KEY=""
+  _REFINERY_MERGE_RECEIPT_REPO=""
+  _REFINERY_MERGE_RECEIPT_PR=""
+  _REFINERY_MERGE_RECEIPT_ISSUE=""
+  _REFINERY_MERGE_RECEIPT_EXPECTED_STATE=""
+  _REFINERY_MERGE_RECEIPT_OBSERVED_STATE=""
+  _REFINERY_MERGE_RECEIPT_MERGED_SHA=""
+  _REFINERY_MERGE_RECEIPT_BRANCH_DELETED=""
+  _REFINERY_MERGE_RECEIPT_VERIFIED_AT=""
+  _REFINERY_MERGE_RECEIPT_OUTCOME=""
+  _REFINERY_MERGE_RECEIPT_RETRY_DECISION=""
+}
+
+_refinery_merge_receipt_summary() {
+  printf 'repo=%s pr=#%s issue=#%s expected_state=%s observed_state=%s merged_sha=%s branch_deleted=%s verified_at=%s outcome=%s retry=%s merge_key=%s' \
+    "${_REFINERY_MERGE_RECEIPT_REPO:-unknown}" \
+    "${_REFINERY_MERGE_RECEIPT_PR:-unknown}" \
+    "${_REFINERY_MERGE_RECEIPT_ISSUE:-unknown}" \
+    "$(_escape_quotes "${_REFINERY_MERGE_RECEIPT_EXPECTED_STATE:-unknown}")" \
+    "$(_escape_quotes "${_REFINERY_MERGE_RECEIPT_OBSERVED_STATE:-unknown}")" \
+    "${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-none}" \
+    "${_REFINERY_MERGE_RECEIPT_BRANCH_DELETED:-unknown}" \
+    "${_REFINERY_MERGE_RECEIPT_VERIFIED_AT:-unknown}" \
+    "${_REFINERY_MERGE_RECEIPT_OUTCOME:-unknown}" \
+    "${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-unknown}" \
+    "$(_escape_quotes "${_REFINERY_MERGE_RECEIPT_KEY:-unknown}")"
+}
+
+_refinery_merge_receipt_load() {
+  local file="${1:-}"
+  local KEY="" REPO="" PR="" ISSUE="" EXPECTED_STATE="" OBSERVED_STATE="" MERGED_SHA="" BRANCH_DELETED="" VERIFIED_AT="" OUTCOME="" RETRY_DECISION=""
+  local missing=0
+  _refinery_merge_receipt_clear_loaded
+  [[ -n "$file" && -f "$file" ]] || return 1
+  eval "$(grep -E '^(KEY|REPO|PR|ISSUE|EXPECTED_STATE|OBSERVED_STATE|MERGED_SHA|BRANCH_DELETED|VERIFIED_AT|OUTCOME|RETRY_DECISION)=' "$file" 2>/dev/null || true)"
+  _REFINERY_MERGE_RECEIPT_FILE="$file"
+  _REFINERY_MERGE_RECEIPT_KEY="${KEY:-}"
+  _REFINERY_MERGE_RECEIPT_REPO="${REPO:-}"
+  _REFINERY_MERGE_RECEIPT_PR="${PR:-}"
+  _REFINERY_MERGE_RECEIPT_ISSUE="${ISSUE:-}"
+  _REFINERY_MERGE_RECEIPT_EXPECTED_STATE="${EXPECTED_STATE:-}"
+  _REFINERY_MERGE_RECEIPT_OBSERVED_STATE="${OBSERVED_STATE:-}"
+  _REFINERY_MERGE_RECEIPT_MERGED_SHA="${MERGED_SHA:-}"
+  _REFINERY_MERGE_RECEIPT_BRANCH_DELETED="${BRANCH_DELETED:-}"
+  _REFINERY_MERGE_RECEIPT_VERIFIED_AT="${VERIFIED_AT:-}"
+  _REFINERY_MERGE_RECEIPT_OUTCOME="${OUTCOME:-}"
+  _REFINERY_MERGE_RECEIPT_RETRY_DECISION="${RETRY_DECISION:-}"
+  [[ -n "${_REFINERY_MERGE_RECEIPT_KEY:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_REPO:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_PR:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_ISSUE:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_EXPECTED_STATE:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_OBSERVED_STATE:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_BRANCH_DELETED:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_VERIFIED_AT:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_OUTCOME:-}" ]] || missing=1
+  [[ -n "${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-}" ]] || missing=1
+  if [[ "$missing" -ne 0 ]]; then
+    _refinery_merge_receipt_clear_loaded
+    return 2
+  fi
+  return 0
+}
+
+_refinery_merge_receipt_record() {
+  local key="${1:-}" repo="${2:-}" pr="${3:-}" issue="${4:-}" expected_state="${5:-}" observed_state="${6:-}" merged_sha="${7:-}" branch_deleted="${8:-}" outcome="${9:-}" retry_decision="${10:-}"
+  local dir file receipt_tmp now_iso existing_outcome load_rc
+  _refinery_merge_receipt_clear_loaded
+  [[ -n "$key" && -n "$repo" && -n "$pr" && -n "$issue" && -n "$expected_state" && -n "$observed_state" && -n "$merged_sha" && -n "$branch_deleted" && -n "$outcome" && -n "$retry_decision" ]] || return 1
+  dir="$(_refinery_merge_receipts_dir)"
+  file="$(_refinery_merge_receipt_file_by_key "$key")" || return 1
+  mkdir -p "$dir" || return 1
+
+  existing_outcome=""
+  if [[ -f "$file" ]]; then
+    _refinery_merge_receipt_load "$file"
+    load_rc=$?
+    if [[ "$load_rc" -eq 0 ]]; then
+      existing_outcome="${_REFINERY_MERGE_RECEIPT_OUTCOME:-}"
+      if [[ "$outcome" == "success" && "$existing_outcome" == "success" ]]; then
+        return 2
+      fi
+    fi
+  fi
+
+  now_iso="$(date -Iseconds)"
+  receipt_tmp="${file}.tmp.$$"
+  cat > "$receipt_tmp" <<EOF
+KEY=$(_escape_wake_value "$key")
+REPO=$(_escape_wake_value "$repo")
+PR=$(_escape_wake_value "$pr")
+ISSUE=$(_escape_wake_value "$issue")
+EXPECTED_STATE=$(_escape_wake_value "$expected_state")
+OBSERVED_STATE=$(_escape_wake_value "$observed_state")
+MERGED_SHA=$(_escape_wake_value "$merged_sha")
+BRANCH_DELETED=$(_escape_wake_value "$branch_deleted")
+VERIFIED_AT=$(_escape_wake_value "$now_iso")
+OUTCOME=$(_escape_wake_value "$outcome")
+RETRY_DECISION=$(_escape_wake_value "$retry_decision")
+EOF
+  mv "$receipt_tmp" "$file"
+  _refinery_merge_receipt_load "$file" || return 1
+  return 0
+}
+
+_refinery_branch_deleted_state() {
+  local repo="${1:-}" branch="${2:-}"
+  local owner_repo encoded_branch api_out api_rc
+  [[ -n "$repo" && -n "$branch" ]] || {
+    echo "unknown"
+    return 0
+  }
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  encoded_branch="${branch//\//%2F}"
+  set +e
+  api_out="$(gh api "repos/$owner_repo/branches/$encoded_branch" 2>&1 >/dev/null)"
+  api_rc=$?
+  set -e
+  if [[ "$api_rc" -eq 0 ]]; then
+    echo "false"
+    return 0
+  fi
+  if printf '%s' "$api_out" | grep -qiE '404|not[[:space:]]+found'; then
+    echo "true"
+  else
+    echo "unknown"
+  fi
+}
+
+_refinery_post_merge_verify_and_receipt() {
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" issue="${4:-}" branch="${5:-}" merge_key="${6:-}" fallback_head_sha="${7:-}"
+  local pr_snapshot pr_state merged_sha issue_state branch_deleted expected_state observed_state outcome retry_decision
+  local record_rc owner_repo
+  [[ -n "$repo" && -n "$pr" && -n "$issue" && -n "$merge_key" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+
+  pr_snapshot="$(gh pr view "$pr" --repo "$repo" --json state,mergeCommit --jq '.state + "|" + (.mergeCommit.oid // "")' 2>/dev/null || true)"
+  pr_state="unknown"
+  merged_sha="${fallback_head_sha:-none}"
+  if [[ -n "$pr_snapshot" && "$pr_snapshot" == *"|"* ]]; then
+    IFS='|' read -r pr_state merged_sha <<< "$pr_snapshot"
+  fi
+  [[ -n "$pr_state" ]] || pr_state="unknown"
+  [[ -n "$merged_sha" ]] || merged_sha="${fallback_head_sha:-none}"
+
+  issue_state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+  [[ -n "$issue_state" ]] || issue_state="unknown"
+  branch_deleted="$(_refinery_branch_deleted_state "$repo" "$branch")"
+  [[ -n "$branch_deleted" ]] || branch_deleted="unknown"
+
+  expected_state="pr_state=MERGED;issue_state=OPEN;branch_deleted=true"
+  observed_state="pr_state=${pr_state:-unknown};issue_state=${issue_state:-unknown};branch_deleted=${branch_deleted:-unknown}"
+  outcome="mismatch"
+  retry_decision="retry-post-merge-revalidate"
+
+  if [[ "$pr_state" == "MERGED" && "$issue_state" == "OPEN" && "$branch_deleted" == "true" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
+    outcome="success"
+    retry_decision="no-op"
+  elif [[ "$pr_state" == "MERGED" && "$issue_state" != "OPEN" ]]; then
+    retry_decision="no-op-manual-issue-state-drift"
+  elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "unknown" ]]; then
+    retry_decision="retry-post-merge-revalidate"
+  elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "false" ]]; then
+    retry_decision="retry-post-merge-revalidate"
+  fi
+
+  _refinery_merge_receipt_record "$merge_key" "$owner_repo" "$pr" "$issue" "$expected_state" "$observed_state" "${merged_sha:-none}" "${branch_deleted:-unknown}" "$outcome" "$retry_decision"
+  record_rc=$?
+  if [[ "$record_rc" -ne 0 ]]; then
+    if [[ "$record_rc" -eq 2 ]]; then
+      log_event "REFINERY_MERGE_RECEIPT replay reason=replayed-merge-key-existing-success retry=no-op $(_refinery_merge_receipt_summary)"
+      return 0
+    fi
+    log_event "REFINERY_MERGE_RECEIPT non-success reason=receipt-write-failed retry=retry-post-merge-revalidate repo=$owner_repo pr=#$pr issue=#$issue merge_key=\"$(_escape_quotes "$merge_key")\""
+    return 1
+  fi
+
+  if [[ "${_REFINERY_MERGE_RECEIPT_OUTCOME:-mismatch}" == "success" ]]; then
+    log_event "REFINERY_MERGE_RECEIPT success $(_refinery_merge_receipt_summary)"
+    return 0
+  fi
+  log_event "REFINERY_MERGE_RECEIPT non-success reason=post-merge-live-mismatch retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-retry-post-merge-revalidate} $(_refinery_merge_receipt_summary)"
+  return 1
 }
 
 _resling_issue_key() {
@@ -4632,9 +4845,60 @@ _refinery_loop() {
       local claimed_attempt_key=""
       if ! _refinery_merge_attempt_claim "$mq_repo" "$mq_pr" "$mq_head_sha" "$mqname"; then
         local duplicate_key duplicate_reason duplicate_reason_code
+        local duplicate_receipt_file duplicate_receipt_rc
         duplicate_key="${_REFINERY_MERGE_ATTEMPT_KEY:-unknown}"
         duplicate_reason_code="duplicate-merge-attempt-key"
         duplicate_reason="duplicate merge-attempt key (repo+pr+head) already processed"
+        duplicate_receipt_file="$(_refinery_merge_receipt_file_by_key "$duplicate_key" || true)"
+        if [[ -n "$duplicate_receipt_file" && -f "$duplicate_receipt_file" ]]; then
+          set +e
+          _refinery_merge_receipt_load "$duplicate_receipt_file"
+          duplicate_receipt_rc=$?
+          set -e
+          if [[ "$duplicate_receipt_rc" -eq 0 ]]; then
+            if [[ "${_REFINERY_MERGE_RECEIPT_OUTCOME:-}" == "success" ]]; then
+              echo "[refinery/$rig] PR #$mq_pr duplicate merge key already verified — no-op"
+              log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason_code=duplicate-merge-verified-success reason=\"duplicate merge key already has success receipt\" key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
+              rm -f "$f"
+              continue
+            fi
+            if [[ "${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-}" == retry-* ]]; then
+              echo "[refinery/$rig] PR #$mq_pr replaying post-merge verification receipt fence (retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION})"
+              if _refinery_post_merge_verify_and_receipt "$rig" "$mq_repo" "$mq_pr" "$mq_issue" "$mq_branch" "$duplicate_key" "$mq_head_sha"; then
+                local verified_merged_sha
+                verified_merged_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$mq_head_sha}"
+                echo "[refinery/$rig] PR #$mq_pr merged successfully"
+                log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
+                _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+                _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$verified_merged_sha")"
+                rm -f "$f"
+              else
+                echo "[refinery/$rig] PR #$mq_pr post-merge verification mismatch — retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-retry-post-merge-revalidate}"
+              fi
+              continue
+            fi
+            echo "[refinery/$rig] PR #$mq_pr duplicate merge key has non-retry receipt — no-op (retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-no-op})"
+            log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason_code=duplicate-merge-receipt-noop reason=\"duplicate merge key has non-retry receipt\" retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-no-op} key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
+            rm -f "$f"
+            continue
+          fi
+          if [[ "$duplicate_receipt_rc" -eq 2 ]]; then
+            echo "[refinery/$rig] PR #$mq_pr recovering partial merge receipt write — replaying post-merge verification"
+            log_event "REFINERY_MERGE_RECEIPT non-success reason=partial-receipt-write retry=retry-post-merge-revalidate repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue merge_key=\"$(_escape_quotes "$duplicate_key")\""
+            if _refinery_post_merge_verify_and_receipt "$rig" "$mq_repo" "$mq_pr" "$mq_issue" "$mq_branch" "$duplicate_key" "$mq_head_sha"; then
+              local verified_merged_sha
+              verified_merged_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$mq_head_sha}"
+              echo "[refinery/$rig] PR #$mq_pr merged successfully"
+              log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
+              _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+              _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$verified_merged_sha")"
+              rm -f "$f"
+            else
+              echo "[refinery/$rig] PR #$mq_pr post-merge verification mismatch — retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-retry-post-merge-revalidate}"
+            fi
+            continue
+          fi
+        fi
         echo "[refinery/$rig] PR #$mq_pr duplicate merge skipped — reason_code=$duplicate_reason_code reason=\"$duplicate_reason\" key=$duplicate_key"
         log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason_code=$duplicate_reason_code reason=\"$(_escape_quotes "$duplicate_reason")\" key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
         rm -f "$f"
@@ -4807,11 +5071,17 @@ _refinery_loop() {
         fi
 
         if [[ "$merge_success" == "true" ]]; then
-          echo "[refinery/$rig] PR #$mq_pr merged successfully"
-          log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
-          _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
-          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$merge_expected_head_sha")"
-          rm -f "$f"
+          if _refinery_post_merge_verify_and_receipt "$rig" "$mq_repo" "$mq_pr" "$mq_issue" "$mq_branch" "$claimed_attempt_key" "$merge_expected_head_sha"; then
+            local verified_merged_sha
+            verified_merged_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$merge_expected_head_sha}"
+            echo "[refinery/$rig] PR #$mq_pr merged successfully"
+            log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
+            _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+            _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$verified_merged_sha")"
+            rm -f "$f"
+          else
+            echo "[refinery/$rig] PR #$mq_pr post-merge verification mismatch — retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-retry-post-merge-revalidate}"
+          fi
         else
           echo "[refinery/$rig] merge failed: $merge_result"
           log_event "REFINERY_MERGE_FAILED pr=#$mq_pr attempt=$merge_attempt/$max_attempts class=$merge_error_class transient=$merge_error_transient error=\"$(_escape_quotes "$merge_result")\""
