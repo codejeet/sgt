@@ -1200,6 +1200,9 @@ _mayor_reconcile_stale_polecats() {
     )"
     IFS='|' read -r rig repo issue branch session worktree status <<< "$snapshot"
     [[ -n "$branch" ]] || continue
+    if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+      continue
+    fi
     if ! canonical_repo="$(_resolve_rig_repo_canonical "mayor-stale-polecat-open-issue" "$rig" "$repo" "1")"; then
       resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
       IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
@@ -1223,6 +1226,8 @@ _mayor_reconcile_stale_polecats() {
       reason_code="stale-issue-closed"
     elif [[ "$pr_state" == "MERGED" ]]; then
       reason_code="stale-pr-merged"
+    elif [[ "$pr_state" == "CLOSED" ]]; then
+      reason_code="stale-pr-closed"
     fi
     [[ -n "$reason_code" ]] || continue
 
@@ -4045,7 +4050,6 @@ cmd_status() {
   local count=0
   for f in "$SGT_POLECATS"/*; do
     [[ -f "$f" ]] || continue
-    count=$((count + 1))
 
     local pname
     pname="$(basename "$f")"
@@ -4082,7 +4086,7 @@ cmd_status() {
       pr_state=""
       pr_title=""
       if canonical_repo="$(_resolve_rig_repo_canonical "status-open-pr-check" "$rig" "$repo" "1")"; then
-        pr_meta="$(gh pr list --repo "$canonical_repo" --head "$branch" --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
+        pr_meta="$(gh pr list --repo "$canonical_repo" --head "$branch" --state all --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
         if [[ -n "$pr_meta" ]]; then
           IFS=$'\t' read -r pr_number pr_state pr_title <<< "$pr_meta"
         fi
@@ -4090,6 +4094,19 @@ cmd_status() {
         resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
         IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
         printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ PR metadata skipped: ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})." "$(_reset)"
+      fi
+
+      if [[ "$alive" == "dead" && -n "$pr_number" && ( "$pr_state" == "MERGED" || "$pr_state" == "CLOSED" ) ]]; then
+        local cleanup_reason cleanup_line
+        cleanup_reason="stale-pr-merged"
+        if [[ "$pr_state" == "CLOSED" ]]; then
+          cleanup_reason="stale-pr-closed"
+        fi
+        cleanup_line="$(_mayor_cleanup_stale_polecat "$f" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "${WORKTREE:-}" "$cleanup_reason" "" "$pr_number" "$pr_state" 2>/dev/null || true)"
+        if [[ "$cleanup_line" == CLEANED\|* ]]; then
+          log_event "POLECAT_AUTO_PRUNE source=status polecat=$pname pr=#${pr_number:-unknown} state=${pr_state:-unknown} reason_code=$cleanup_reason"
+          return 0
+        fi
       fi
 
       pr_chunk=""
@@ -4114,6 +4131,9 @@ cmd_status() {
         printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:pr_title_cols}" "$(_reset)"
       fi
     )
+    if [[ -f "$f" ]]; then
+      count=$((count + 1))
+    fi
   done
 
   if [[ "$count" -eq 0 ]]; then

@@ -146,15 +146,31 @@ if [[ -f "$DECISION_LOG" ]]; then
   exit 1
 fi
 
-# Case 2: merged transition => stale cleanup + one structured decision entry.
+# Case 2: active session + merged PR => no cleanup (active polecats must survive).
 GH_PR_STATE="MERGED"
 mapfile -t case2_lines < <(_mayor_reconcile_stale_polecats)
-if [[ "${#case2_lines[@]}" -ne 1 ]]; then
+if [[ "${#case2_lines[@]}" -ne 0 ]]; then
+  echo "expected no stale cleanup while polecat session is still active" >&2
+  exit 1
+fi
+if [[ ! -f "$polecat_file" ]]; then
+  echo "expected active merged polecat state to remain untouched" >&2
+  exit 1
+fi
+if [[ "$(cat "$KILL_COUNT_FILE")" -ne 0 ]]; then
+  echo "expected no session kills while polecat is active" >&2
+  exit 1
+fi
+
+# Case 3: merged transition on dead session => stale cleanup + one structured decision entry.
+echo "0" > "$TMUX_ACTIVE_FILE"
+mapfile -t case3_lines < <(_mayor_reconcile_stale_polecats)
+if [[ "${#case3_lines[@]}" -ne 1 ]]; then
   echo "expected exactly one merged-transition stale-polecat cleanup action" >&2
   exit 1
 fi
-if [[ "${case2_lines[0]}" != CLEANED\|rig-one-cat\|stale-pr-merged\|* ]]; then
-  echo "unexpected merged cleanup payload: ${case2_lines[0]}" >&2
+if [[ "${case3_lines[0]}" != CLEANED\|rig-one-cat\|stale-pr-merged\|* ]]; then
+  echo "unexpected merged cleanup payload: ${case3_lines[0]}" >&2
   exit 1
 fi
 if [[ -f "$polecat_file" ]]; then
@@ -165,8 +181,8 @@ if [[ -d "$worktree" ]]; then
   echo "expected merged-transition stale polecat worktree to be removed" >&2
   exit 1
 fi
-if [[ "$(cat "$KILL_COUNT_FILE")" -ne 1 ]]; then
-  echo "expected exactly one stale-polecat session kill after merged transition" >&2
+if [[ "$(cat "$KILL_COUNT_FILE")" -ne 0 ]]; then
+  echo "expected no stale-polecat session kills after merged transition when session is already dead" >&2
   exit 1
 fi
 if [[ ! -f "$DECISION_LOG" ]]; then
@@ -182,7 +198,7 @@ if [[ "$(grep -c 'MAYOR_POLECAT_CLEANUP reason_code=stale-pr-merged polecat=rig-
   exit 1
 fi
 
-# Case 3: restart replay with same stale polecat metadata => idempotent (no duplicate kill/logging).
+# Case 4: restart replay with same stale polecat metadata => idempotent (no duplicate kill/logging).
 mkdir -p "$worktree"
 cat > "$polecat_file" <<PSTATE
 RIG=rig-one
@@ -193,18 +209,18 @@ SESSION=sgt-rig-one-cat
 WORKTREE=$worktree
 STATUS=running
 PSTATE
-echo "1" > "$TMUX_ACTIVE_FILE"
+echo "0" > "$TMUX_ACTIVE_FILE"
 
-mapfile -t case3_lines < <(_mayor_reconcile_stale_polecats)
-if [[ "${#case3_lines[@]}" -ne 1 ]]; then
+mapfile -t case4_lines < <(_mayor_reconcile_stale_polecats)
+if [[ "${#case4_lines[@]}" -ne 1 ]]; then
   echo "expected replay pass to still converge stale polecat state" >&2
   exit 1
 fi
-if [[ "${case3_lines[0]}" != 'CLEANED|rig-one-cat|stale-pr-merged|cleanup-already-applied|117|88' ]]; then
+if [[ "${case4_lines[0]}" != 'CLEANED|rig-one-cat|stale-pr-merged|cleanup-already-applied|117|88' ]]; then
   echo "expected replay pass to report cleanup-already-applied fence state" >&2
   exit 1
 fi
-if [[ "$(cat "$KILL_COUNT_FILE")" -ne 1 ]]; then
+if [[ "$(cat "$KILL_COUNT_FILE")" -ne 0 ]]; then
   echo "expected restart replay to avoid duplicate stale-polecat session kills" >&2
   exit 1
 fi
@@ -218,6 +234,68 @@ if [[ "$(grep -c 'MAYOR_POLECAT_CLEANUP reason_code=stale-pr-merged polecat=rig-
 fi
 if [[ -f "$polecat_file" ]]; then
   echo "expected replay pass to leave no stale polecat state file" >&2
+  exit 1
+fi
+
+# Case 5: closed (unmerged) PR transition on dead session => stale cleanup.
+closed_polecat_file="$SGT_POLECATS/rig-one-cat-closed"
+closed_worktree="$SGT_ROOT/worktree/rig-one-cat-closed"
+mkdir -p "$closed_worktree"
+cat > "$closed_polecat_file" <<PSTATE
+RIG=rig-one
+REPO=https://github.com/acme/demo
+ISSUE=117
+BRANCH=sgt/rig-one-cat-closed
+SESSION=sgt-rig-one-cat-closed
+WORKTREE=$closed_worktree
+STATUS=running
+PSTATE
+GH_PR_STATE="CLOSED"
+GH_PR_NUMBER="91"
+mapfile -t case5_lines < <(_mayor_reconcile_stale_polecats)
+if [[ "${#case5_lines[@]}" -ne 1 ]]; then
+  echo "expected exactly one closed-transition stale-polecat cleanup action" >&2
+  exit 1
+fi
+if [[ "${case5_lines[0]}" != CLEANED\|rig-one-cat-closed\|stale-pr-closed\|* ]]; then
+  echo "unexpected closed cleanup payload: ${case5_lines[0]}" >&2
+  exit 1
+fi
+if [[ -f "$closed_polecat_file" ]]; then
+  echo "expected closed-transition stale polecat state file to be removed" >&2
+  exit 1
+fi
+if [[ -d "$closed_worktree" ]]; then
+  echo "expected closed-transition stale polecat worktree to be removed" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'MAYOR_POLECAT_CLEANUP reason_code=stale-pr-closed polecat=rig-one-cat-closed.*pr=#91' "$SGT_LOG" || true)" -ne 1 ]]; then
+  echo "expected one stale-pr-closed cleanup activity log entry with PR number" >&2
+  exit 1
+fi
+
+# Case 6: restart replay after CLOSED cleanup remains idempotent.
+mkdir -p "$closed_worktree"
+cat > "$closed_polecat_file" <<PSTATE
+RIG=rig-one
+REPO=https://github.com/acme/demo
+ISSUE=117
+BRANCH=sgt/rig-one-cat-closed
+SESSION=sgt-rig-one-cat-closed
+WORKTREE=$closed_worktree
+STATUS=running
+PSTATE
+mapfile -t case6_lines < <(_mayor_reconcile_stale_polecats)
+if [[ "${#case6_lines[@]}" -ne 1 ]]; then
+  echo "expected closed replay pass to converge stale polecat state" >&2
+  exit 1
+fi
+if [[ "${case6_lines[0]}" != 'CLEANED|rig-one-cat-closed|stale-pr-closed|cleanup-already-applied|117|91' ]]; then
+  echo "expected closed replay pass to report cleanup-already-applied fence state" >&2
+  exit 1
+fi
+if [[ -f "$closed_polecat_file" ]]; then
+  echo "expected closed replay pass to leave no stale polecat state file" >&2
   exit 1
 fi
 
