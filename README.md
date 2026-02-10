@@ -77,9 +77,11 @@ export SGT_MAYOR_DISPATCH_COOLDOWN=21600
 Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
 
 Mayor AI dispatches also include a stale-state revalidation immediately before issue creation:
-- The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo.
-- If either count is non-zero (or live state cannot be confirmed), dispatch is skipped.
+- The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo, and also live-counts active polecats on the target rig.
+- Mayor computes `parallel_in_flight=max(open_sgt_authorized_issues, active_polecats)` and enforces `SGT_MAYOR_DISPATCH_MAX_PARALLEL` (default `3`, set `0` to disable).
+- If live state cannot be confirmed, or the parallel budget is exhausted, dispatch is skipped.
 - A reasoned operator-visible line is emitted (`[mayor] dispatch skipped ...`) and a corresponding entry is appended to `~/.sgt/mayor-decisions.log`.
+- Budget skips also emit explicit structured telemetry (`MAYOR_DISPATCH_SKIP_BUDGET reason_code=parallel-budget-exhausted ...`) for runbook/debug filtering.
 
 Mayor cycle decisions also protect against stale snapshot text in generated `CLAUDE.md`:
 - Merge-queue count now performs a one-time live revalidation immediately before issue surfacing.

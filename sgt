@@ -134,6 +134,8 @@ log_event() {
 _MAYOR_DECISION_LOG_LAST_ERROR=""
 _MAYOR_DISPATCH_TRIGGER_KEY=""
 _MAYOR_DISPATCH_TRIGGER_FILE=""
+_MAYOR_PRE_DISPATCH_REASON_CODE=""
+_MAYOR_PRE_DISPATCH_REASON=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
@@ -786,6 +788,34 @@ _dispatch_cooldown_secs() {
   echo "$raw"
 }
 
+_mayor_dispatch_parallel_budget() {
+  local raw="${SGT_MAYOR_DISPATCH_MAX_PARALLEL:-3}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="3"
+  fi
+  echo "$raw"
+}
+
+_active_polecat_count() {
+  local rig="${1:-}"
+  local count=0
+  [[ -d "$SGT_POLECATS" ]] || {
+    echo "0"
+    return 0
+  }
+
+  local pf pname
+  for pf in "$SGT_POLECATS"/*; do
+    [[ -f "$pf" ]] || continue
+    pname="$(basename "$pf")"
+    if [[ -n "$rig" ]]; then
+      [[ "$pname" == "${rig}-"* ]] || continue
+    fi
+    count=$((count + 1))
+  done
+  echo "$count"
+}
+
 _deacon_heartbeat_stale_secs() {
   local raw="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}"
   if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
@@ -1335,14 +1365,18 @@ _mayor_review_watchdog_status_snapshot() {
 }
 
 _mayor_pre_dispatch_revalidate() {
-  local repo="${1:-}"
-  local owner_repo owner name snapshot open_prs open_authorized
+  local repo="${1:-}" rig="${2:-}"
+  local owner_repo owner name snapshot open_prs open_authorized open_polecats parallel_budget parallel_in_flight
+  _MAYOR_PRE_DISPATCH_REASON_CODE=""
+  _MAYOR_PRE_DISPATCH_REASON=""
   owner_repo="$(_repo_owner_repo "$repo")"
   owner="${owner_repo%%/*}"
   name="${owner_repo#*/}"
 
   if [[ -z "$owner" || -z "$name" || "$owner" == "$name" ]]; then
-    echo "revalidation failed: invalid repo '$repo'"
+    _MAYOR_PRE_DISPATCH_REASON_CODE="invalid-repo"
+    _MAYOR_PRE_DISPATCH_REASON="revalidation failed: invalid repo '$repo'"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
     return 1
   fi
 
@@ -1361,7 +1395,9 @@ _mayor_pre_dispatch_revalidate() {
   )
 
   if [[ -z "$snapshot" || "$snapshot" != *"|"* ]]; then
-    echo "revalidation failed: unable to query live state"
+    _MAYOR_PRE_DISPATCH_REASON_CODE="live-query-failed"
+    _MAYOR_PRE_DISPATCH_REASON="revalidation failed: unable to query live state"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
     return 1
   fi
 
@@ -1369,8 +1405,31 @@ _mayor_pre_dispatch_revalidate() {
   [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=-1
   [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=-1
 
-  if [[ "$open_prs" -ne 0 || "$open_authorized" -ne 0 ]]; then
-    echo "live state dirty: open_prs=$open_prs open_authorized_issues=$open_authorized"
+  if [[ "$open_prs" -lt 0 || "$open_authorized" -lt 0 ]]; then
+    _MAYOR_PRE_DISPATCH_REASON_CODE="invalid-live-counts"
+    _MAYOR_PRE_DISPATCH_REASON="revalidation failed: invalid live state counts open_prs=$open_prs open_authorized_issues=$open_authorized"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
+    return 1
+  fi
+
+  open_polecats="$(_active_polecat_count "$rig")"
+  [[ "$open_polecats" =~ ^[0-9]+$ ]] || open_polecats=-1
+  if [[ "$open_polecats" -lt 0 ]]; then
+    _MAYOR_PRE_DISPATCH_REASON_CODE="polecat-count-failed"
+    _MAYOR_PRE_DISPATCH_REASON="revalidation failed: unable to count active polecats for rig=${rig:-all}"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
+    return 1
+  fi
+
+  parallel_budget="$(_mayor_dispatch_parallel_budget)"
+  parallel_in_flight="$open_authorized"
+  if [[ "$open_polecats" -gt "$parallel_in_flight" ]]; then
+    parallel_in_flight="$open_polecats"
+  fi
+  if [[ "$parallel_budget" -gt 0 && "$parallel_in_flight" -ge "$parallel_budget" ]]; then
+    _MAYOR_PRE_DISPATCH_REASON_CODE="parallel-budget-exhausted"
+    _MAYOR_PRE_DISPATCH_REASON="parallel dispatch budget exhausted: open_prs=$open_prs open_authorized_issues=$open_authorized open_polecats=$open_polecats parallel_in_flight=$parallel_in_flight budget=$parallel_budget"
+    echo "$_MAYOR_PRE_DISPATCH_REASON"
     return 1
   fi
 
@@ -2478,16 +2537,27 @@ cmd_sling() {
   fi
 
   if [[ "${SGT_MAYOR_DISPATCH_REVALIDATE:-0}" == "1" ]]; then
-    local revalidation_reason
-    if ! revalidation_reason=$(_mayor_pre_dispatch_revalidate "$repo"); then
+    local revalidation_reason reason_code skip_context skip_header skip_event
+    if ! _mayor_pre_dispatch_revalidate "$repo" "$rig"; then
+      revalidation_reason="${_MAYOR_PRE_DISPATCH_REASON:-revalidation failed: unknown}"
+      reason_code="${_MAYOR_PRE_DISPATCH_REASON_CODE:-unknown}"
+      skip_context="dispatch-skip-stale"
+      skip_header="MAYOR DISPATCH SKIP (stale-state)"
+      skip_event="MAYOR_DISPATCH_SKIP_STALE"
+      if [[ "$reason_code" == "parallel-budget-exhausted" ]]; then
+        skip_context="dispatch-skip-budget"
+        skip_header="MAYOR DISPATCH SKIP (parallel-budget)"
+        skip_event="MAYOR_DISPATCH_SKIP_BUDGET"
+      fi
       echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
       local stale_entry=""
-      stale_entry+="MAYOR DISPATCH SKIP (stale-state)"$'\n'
+      stale_entry+="$skip_header"$'\n'
       stale_entry+="  rig=$rig"$'\n'
+      stale_entry+="  reason_code=$reason_code"$'\n'
       stale_entry+="  reason=$revalidation_reason"$'\n'
       stale_entry+="  task=\"$(_escape_quotes "$task")\""
-      _mayor_record_decision "$stale_entry" "dispatch-skip-stale" "$SGT_ROOT" || true
-      log_event "MAYOR_DISPATCH_SKIP_STALE rig=$rig reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
+      _mayor_record_decision "$stale_entry" "$skip_context" "$SGT_ROOT" || true
+      log_event "$skip_event reason_code=$reason_code rig=$rig reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
       return 0
     fi
   fi
@@ -6015,6 +6085,7 @@ Environment:
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
+  SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
