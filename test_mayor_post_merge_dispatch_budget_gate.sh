@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_mayor_stale_dispatch_race.sh — Regression checks for mayor stale-snapshot pre-dispatch revalidation.
+# test_mayor_post_merge_dispatch_budget_gate.sh — Regression checks for mayor proactive dispatch parallel-budget gate.
 
 set -euo pipefail
 
@@ -11,47 +11,33 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 HOME_DIR="$TMP_ROOT/home"
 MOCK_BIN="$TMP_ROOT/mockbin"
 MOCK_STATE="$TMP_ROOT/issues.json"
-MODE_FILE="$TMP_ROOT/mode"
 mkdir -p "$HOME_DIR/.local/bin" "$MOCK_BIN"
 cp "$SGT_SCRIPT" "$HOME_DIR/.local/bin/sgt"
 chmod +x "$HOME_DIR/.local/bin/sgt"
 printf '[]\n' > "$MOCK_STATE"
-printf 'clean_then_dirty\n' > "$MODE_FILE"
 
 cat > "$MOCK_BIN/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
 
 STATE_FILE="${SGT_MOCK_GH_STATE:?missing SGT_MOCK_GH_STATE}"
-MODE_FILE="${SGT_MOCK_MODE_FILE:?missing SGT_MOCK_MODE_FILE}"
 
 if [[ "${1:-}" == "label" && "${2:-}" == "create" ]]; then
   exit 0
 fi
 
 if [[ "${1:-}" == "api" && "${2:-}" == "graphql" ]]; then
-  mode="$(cat "$MODE_FILE")"
-  if [[ "$mode" == "dirty" ]]; then
-    echo "1|1"
-  else
-    echo "0|0"
-  fi
+  echo "0|0"
   exit 0
 fi
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "list" ]]; then
-  mode="$(cat "$MODE_FILE")"
-  if [[ "$mode" == "clean_then_dirty" ]]; then
-    printf 'dirty\n' > "$MODE_FILE"
-  fi
-
   python3 - "$STATE_FILE" <<'PY'
 import json
 import re
 import sys
 
-state_file = sys.argv[1]
-issues = json.load(open(state_file, "r", encoding="utf-8"))
+issues = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 
 def signature(title: str) -> str:
     out = title.lower()
@@ -203,7 +189,6 @@ ENV_PREFIX=(
   PATH="$MOCK_BIN:$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
   TERM="${TERM:-xterm}"
   SGT_MOCK_GH_STATE="$MOCK_STATE"
-  SGT_MOCK_MODE_FILE="$MODE_FILE"
   SGT_ROOT="$HOME_DIR/sgt"
   SGT_MAYOR_DISPATCH_COOLDOWN=3600
   SGT_MAYOR_DISPATCH_MAX_PARALLEL=1
@@ -215,15 +200,17 @@ sgt init >/dev/null
 mkdir -p "$SGT_ROOT/rigs/test"
 printf "https://github.com/acme/demo\n" > "$SGT_ROOT/.sgt/rigs/test"
 
-# Race case: duplicate-check snapshot is clean, revalidation snapshot flips dirty before dispatch.
-SGT_MAYOR_DISPATCH_REVALIDATE=1 sgt sling test "Stale snapshot regression task" --label high >/tmp/sgt-race-1.out
+# Race-safe budget gate: local active polecat appears before proactive dispatch.
+mkdir -p "$SGT_ROOT/.sgt/polecats"
+cat > "$SGT_ROOT/.sgt/polecats/test-existing" <<EOF
+RIG=test
+REPO=https://github.com/acme/demo
+EOF
 
-# Clean case: allow one dispatch.
-printf "clean\n" > "$SGT_MOCK_MODE_FILE"
-SGT_MAYOR_DISPATCH_REVALIDATE=1 sgt sling test "Stale snapshot regression task" --label high >/tmp/sgt-race-2.out
+SGT_MAYOR_DISPATCH_REVALIDATE=1 sgt sling test "Budget gate regression task" --label high >/tmp/sgt-budget-1.out
 
-# Duplicate check: should be suppressed (no second issue create).
-SGT_MAYOR_DISPATCH_REVALIDATE=1 sgt sling test "Stale snapshot regression task" --label high >/tmp/sgt-race-3.out
+rm -f "$SGT_ROOT/.sgt/polecats/test-existing"
+SGT_MAYOR_DISPATCH_REVALIDATE=1 sgt sling test "Budget gate regression task" --label high >/tmp/sgt-budget-2.out
 '
 
 python3 - "$MOCK_STATE" <<'PY'
@@ -232,17 +219,12 @@ import sys
 
 issues = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 if len(issues) != 1:
-    raise SystemExit(f"expected exactly one created issue after stale-skip + one clean dispatch + duplicate suppression, got {len(issues)}")
+    raise SystemExit(f"expected exactly one created issue after budget-skip then clean dispatch, got {len(issues)}")
 PY
 
 MAYOR_LOG="$HOME_DIR/sgt/.sgt/mayor-decisions.log"
 if [[ ! -f "$MAYOR_LOG" ]]; then
-  echo "expected mayor-decisions.log to be written for stale-state skip" >&2
-  exit 1
-fi
-
-if ! grep -Eq 'MAYOR DISPATCH SKIP \((stale-state|parallel-budget)\)' "$MAYOR_LOG"; then
-  echo "expected stale-state or budget skip entry in mayor decision log" >&2
+  echo "expected mayor-decisions.log to be written for budget skip" >&2
   exit 1
 fi
 
@@ -252,12 +234,17 @@ if ! grep -q 'MAYOR DISPATCH SKIP (parallel-budget)' "$MAYOR_LOG"; then
 fi
 
 if ! grep -q 'reason_code=parallel-budget-exhausted' "$MAYOR_LOG"; then
-  echo "expected explicit parallel-budget reason_code in mayor decision log" >&2
+  echo "expected reason_code=parallel-budget-exhausted in mayor decision log" >&2
   exit 1
 fi
 
-if ! grep -q 'parallel dispatch budget exhausted: open_prs=1 open_authorized_issues=1 open_polecats=0 parallel_in_flight=1 budget=1' "$MAYOR_LOG"; then
-  echo "expected reasoned parallel-budget details in mayor decision log" >&2
+if ! grep -q 'open_polecats=1' "$MAYOR_LOG"; then
+  echo "expected budget skip details to include open_polecats=1" >&2
+  exit 1
+fi
+
+if ! grep -q 'MAYOR_DISPATCH_SKIP_BUDGET reason_code=parallel-budget-exhausted' "$HOME_DIR/sgt/sgt.log"; then
+  echo "expected structured MAYOR_DISPATCH_SKIP_BUDGET event in activity log" >&2
   exit 1
 fi
 
