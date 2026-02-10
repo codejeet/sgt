@@ -6691,6 +6691,20 @@ cmd_mayor_merge() {
   return 0
 }
 
+cmd_mayor_help() {
+  cat <<EOF
+Usage: sgt mayor <command> [args]
+
+Commands:
+  start                   Start mayor (AI coordinator)
+  stop                    Stop mayor
+  notify "<message>"      Send mayor notification to configured channels
+  merge <pr#> --repo <repo> [--auto]
+                           Merge PR with post-action receipt verification
+  help, --help, -h        Show this help
+EOF
+}
+
 cmd_mayor_start() {
   ensure_init
 
@@ -7547,7 +7561,7 @@ Agent Commands:
   deacon start|stop             Control the health monitor
   witness start|stop <rig>      Control per-rig polecat monitor
   refinery start|stop <rig>     Control per-rig merge queue
-  mayor start|stop|notify|merge Control the AI coordinator
+  mayor [help|start|stop|notify|merge]  Control the AI coordinator
   wake-mayor [reason]           Wake the mayor on demand (event-driven)
   nudge <target> <message>      Send message to agent's tmux session
 
@@ -7710,11 +7724,12 @@ main() {
       local sub="${1:-}"
       shift 2>/dev/null || true
       case "$sub" in
+        ""|help|--help|-h) cmd_mayor_help ;;
         start)   cmd_mayor_start ;;
         stop)    cmd_mayor_stop ;;
         notify)  cmd_mayor_notify "$@" ;;
         merge)   cmd_mayor_merge "$@" ;;
-        *)       die "unknown mayor command: $sub (try: start, stop, notify, merge)" ;;
+        *)       die "unknown mayor command: $sub (try: help, start, stop, notify, merge)" ;;
       esac
       ;;
     wake-mayor) cmd_wake_mayor "$@" ;;
