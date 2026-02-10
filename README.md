@@ -93,6 +93,17 @@ Mayor cycle decisions also protect against stale snapshot text in generated `CLA
   - `[mayor] snapshot guard merge_queue_count snapshot=<n> live=<n> chosen=<n> source=<snapshot|live> status=<...>`
 - When a stale snapshot is detected, mayor records a `Snapshot Freshness` note in decision output instead of treating the stale snapshot value as an active issue.
 
+Mayor AI briefing generation also has a strict freshness gate:
+- Immediately before every AI decision cycle, mayor regenerates `~/.sgt/mayor-briefing.md` and stamps:
+  - `generated_at: <ISO-8601 timestamp>`
+  - `generated_at_epoch: <unix-seconds>`
+- Mayor validates briefing age against `SGT_MAYOR_BRIEFING_STALE_SECS` (default `5` seconds).
+- If the briefing is stale/invalid, mayor performs one immediate auto-refresh and re-check.
+- If freshness still fails after refresh, mayor aborts that AI cycle (`MAYOR_AI_CYCLE aborted reason=stale-briefing`) instead of sending stale context to the model.
+- Structured freshness telemetry is emitted on each path:
+  - `MAYOR_BRIEFING_GATE stale_detected=<true|false> path=<fresh|refreshed|aborted> status=<fresh|stale|invalid|missing> generated_at="..." age=<n>s threshold=<n>s refresh_attempted=<true|false> ...`
+  - `MAYOR_BRIEFING_GATE_STATUS path=<...> stale_detected=<...> status=<...> generated_at="..." age=<n>s threshold=<n>s` (just before AI invoke).
+
 Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
 - Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
