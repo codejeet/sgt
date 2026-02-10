@@ -80,7 +80,7 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
       ;;
     state,headRefOid)
       call_n="$(inc_file "$STATE_HEAD_CALLS_FILE")"
-      if [[ "$MODE" == "drift_retry" && "$call_n" -ge 2 ]]; then
+      if [[ "$MODE" == "drift_retry" && "$call_n" -ge 3 ]]; then
         echo "OPEN|live222"
       else
         echo "OPEN|live111"

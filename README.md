@@ -222,6 +222,7 @@ Runbook action mapping for watchdog escalations:
 
 Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.
 
+- After review approval, refinery captures the reviewed head SHA and immediately revalidates live head right before merge; if head drifted after review, merge is skipped.
 - Retries only trigger for transient classes: `timeout`, `network`, `http-5xx`, and `secondary-rate-limit`.
 - Before each retry, refinery re-checks live PR state (`OPEN`) and head SHA; if either drifts, retry is skipped and the queue item is kept with refreshed `HEAD_SHA`.
 - If merge fails specifically because branch policy requires auto-merge, refinery revalidates PR state/head and retries exactly once with `--auto`.
@@ -239,6 +240,7 @@ export SGT_REFINERY_MERGE_RETRY_JITTER_MS=400
 ```
 
 Observability:
+- `REFINERY_PREMERGE_SKIP pr=#... reason_code=<stale-reviewed-head|reviewed-head-capture-failed|premerge-revalidation-failed> ...`
 - `REFINERY_MERGE_RETRY pr=#... attempt=<n>/<max> class=<class> delay_s=<seconds>`
 - `REFINERY_MERGE_RETRY_SKIP pr=#... attempt=<n>/<max> reason="..."`
 - `REFINERY_MERGE_RETRY_AUTO repo=<owner/repo> pr=#... reason=branch-policy-requires-auto-merge outcome=<success|failed|skipped> ...`
