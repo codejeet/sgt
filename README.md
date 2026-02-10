@@ -178,6 +178,20 @@ Mayor dispatch-start verification fence (restart-safe):
 export SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS=120
 ```
 
+Mayor action-evidence receipt fence (dispatch/nuke/merge):
+- Mayor AI cycles set `SGT_MAYOR_ACTION_FENCE=1`, which enables mandatory post-action live verification receipts for side effects.
+- Receipts are written under `~/.sgt/mayor-action-receipts/` and include structured fields:
+  - `action`
+  - `target`
+  - `expected_state`
+  - `observed_state`
+  - `verified_at`
+- Receipt decisions append to `~/.sgt/mayor-decisions.log` as `MAYOR ACTION RECEIPT ...`.
+- A side effect is only declared success after immediate live recheck confirms expected state.
+- Mismatches are logged as non-success with explicit `reason=<...>` and `retry=<...>` hints (for example `retry-next-mayor-cycle`, `retry-nuke-manual`, `retry-merge-manual`).
+- Replayed action keys do not write conflicting success receipts; replay is logged as non-success/no-op (`reason=replayed-action-key-existing-success retry=no-op`).
+- Use `sgt mayor merge <pr#> --repo <repo>` for mayor merge actions (includes receipt fence and post-merge live verification).
+
 Troubleshooting duplicate merged-trigger dispatch skips:
 1. Confirm the durable trigger key exists (key should match `repo+PR+merged_head`):
 
@@ -224,6 +238,28 @@ grep 'MAYOR_DISPATCH_VERIFY_' ~/.sgt/sgt.log | tail -50
 ```bash
 grep 'MAYOR DISPATCH VERIFY' ~/.sgt/mayor-decisions.log | tail -50
 ```
+
+Troubleshooting mayor action receipts (dispatch/nuke/merge):
+1. Inspect the durable receipt files:
+
+```bash
+ls -1 ~/.sgt/mayor-action-receipts/
+tail -100 ~/.sgt/mayor-action-receipts/*.state
+```
+
+2. Correlate decision-log receipt outcomes:
+
+```bash
+grep 'MAYOR ACTION RECEIPT' ~/.sgt/mayor-decisions.log | tail -50
+```
+
+3. Correlate activity log telemetry:
+
+```bash
+grep 'MAYOR_ACTION_RECEIPT' ~/.sgt/sgt.log | tail -50
+```
+
+4. If replay no-op keeps appearing (`reason=replayed-action-key-existing-success`), confirm you are not replaying the same action key (`action_key=...`) and that a new merge/dispatch target really changed.
 
 Troubleshooting dispatch-cooldown suppressions (replayed merged wake events):
 1. Inspect structured cooldown suppression telemetry:

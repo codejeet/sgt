@@ -71,6 +71,9 @@ echo "=== mayor post-merge dispatch durable dedupe fence ==="
 echo "=== mayor dispatch-start verification fence ==="
 "$REPO_ROOT/test_mayor_dispatch_start_verification_fence.sh"
 
+echo "=== mayor action receipt fence (drift + replay) ==="
+"$REPO_ROOT/test_mayor_action_receipt_fence.sh"
+
 echo "=== mayor cycle lease lock recovery ==="
 "$REPO_ROOT/test_mayor_cycle_lock_lease.sh"
 
