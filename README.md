@@ -182,8 +182,19 @@ export SGT_AGENT_HEARTBEAT_STALE_SECS=180
 export SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS=900
 ```
 
-Runbook action mapping for stuck agents:
+Mayor also watches required CI checks on open PRs:
+- Required checks that remain `QUEUED` or `IN_PROGRESS` past the stale threshold are escalated with exact `stale_seconds` and `check_url`.
+- Escalations are deduped per `pr+check` within the dedupe window, and dedupe resets when that check recovers/completes for the PR.
+- Defaults are:
+
+```bash
+export SGT_MAYOR_CI_CHECK_STALE_SECS=900
+export SGT_MAYOR_CI_CHECK_DEDUPE_SECS=900
+```
+
+Runbook action mapping for watchdog escalations:
 - `notify`: witness/refinery heartbeat stale incidents (session still up, but loop appears stuck) escalate to Rigger with stale context.
+- `retry`: stale required CI checks on open PRs should trigger a check rerun/retry path before stronger remediation.
 - `nuke`: use `sgt nuke <polecat>` for stale individual polecat workers.
 
 ## Refinery merge retries
