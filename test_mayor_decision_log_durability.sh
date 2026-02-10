@@ -38,47 +38,58 @@ mkdir -p "$SGT_CONFIG"
 
 LOG_FILE="$SGT_CONFIG/mayor-decisions.log"
 
-# Concurrent append stress: each write is a 2-line payload and must remain intact.
-for i in $(seq 1 40); do
+# Concurrent append stress: each writer must produce exactly one intact 2-line block
+# with no torn/truncated entry lines.
+writer_count=120
+for i in $(seq 1 "$writer_count"); do
   (
-    entry="entry-$i"
-    entry+=$'\n'
-    entry+="  payload-$i"
+    digit=$((i % 10))
+    printf -v pad '%*s' 2048 ''
+    pad="${pad// /$digit}"
+    entry="entry-$i checksum=$((i * 17)) pad=$pad"
     _mayor_decision_log_append "$entry" "$SGT_ROOT"
   ) &
 done
 wait
 
-python3 - "$LOG_FILE" "$SGT_ROOT" <<'PY'
+python3 - "$LOG_FILE" "$SGT_ROOT" "$writer_count" <<'PY'
 import re
 import sys
 
-path, workspace = sys.argv[1:3]
+path, workspace, writer_count_raw = sys.argv[1:4]
+writer_count = int(writer_count_raw)
 lines = open(path, "r", encoding="utf-8").read().splitlines()
 
-if len(lines) != 120:
-    raise SystemExit(f"expected 120 lines (40 blocks x 3 lines), got {len(lines)}")
+expected_lines = writer_count * 2
+if len(lines) != expected_lines:
+    raise SystemExit(f"expected {expected_lines} lines ({writer_count} blocks x 2 lines), got {len(lines)}")
 
 header_re = re.compile(r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\] workspace=(.+)$")
+entry_re = re.compile(r"^entry-(\d+) checksum=(\d+) pad=([0-9]{2048})$")
 seen = set()
-for idx in range(0, len(lines), 3):
-    h, e, p = lines[idx:idx+3]
+for idx in range(0, len(lines), 2):
+    h, e = lines[idx:idx+2]
     m = header_re.match(h)
     if not m:
         raise SystemExit(f"invalid header format at line {idx+1}: {h!r}")
     if m.group(2) != workspace:
         raise SystemExit(f"unexpected workspace value at line {idx+1}: {m.group(2)!r}")
-    if not e.startswith("entry-"):
-        raise SystemExit(f"invalid entry line at line {idx+2}: {e!r}")
-    n = e.split("-", 1)[1]
-    expected_payload = f"  payload-{n}"
-    if p != expected_payload:
-        raise SystemExit(
-            f"interleaved/corrupt payload for entry-{n}: expected {expected_payload!r}, got {p!r}"
-        )
-    seen.add(int(n))
+    em = entry_re.match(e)
+    if not em:
+        raise SystemExit(f"invalid or truncated entry line at line {idx+2}: {e!r}")
+    n = int(em.group(1))
+    checksum = int(em.group(2))
+    pad = em.group(3)
+    if checksum != n * 17:
+        raise SystemExit(f"checksum mismatch for entry-{n}: expected {n * 17}, got {checksum}")
+    expected_digit = str(n % 10)
+    if pad != expected_digit * 2048:
+        raise SystemExit(f"interleaved/corrupt pad for entry-{n}")
+    if n in seen:
+        raise SystemExit(f"duplicate entry id detected: {n}")
+    seen.add(n)
 
-expected = set(range(1, 41))
+expected = set(range(1, writer_count + 1))
 if seen != expected:
     raise SystemExit(f"missing/duplicate entries: expected {len(expected)} unique ids, got {len(seen)}")
 PY
