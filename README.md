@@ -69,6 +69,22 @@ export SGT_MAYOR_DISPATCH_COOLDOWN=21600
 
 Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
 
+Deacon heartbeat staleness is configurable (used by boot guardrails, mayor guardrails, and `sgt status` health output):
+
+```bash
+export SGT_DEACON_HEARTBEAT_STALE_SECS=300
+```
+
+Mayor critical/high issue notifications are cooldown-gated to avoid repeated alert spam while incidents remain open:
+- At most one mayor critical/high notify is emitted per cooldown window.
+- Default cooldown: `1800` seconds (30 minutes), configurable with:
+
+```bash
+export SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=1800
+```
+
+Set `SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=0` to disable suppression.
+
 Mayor AI dispatches also include a stale-state revalidation immediately before issue creation:
 - The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo.
 - If either count is non-zero (or live state cannot be confirmed), dispatch is skipped.

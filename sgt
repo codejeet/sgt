@@ -18,6 +18,8 @@ SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
+SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
+SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-1800}" # 30 minutes
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
@@ -207,6 +209,75 @@ _dispatch_cooldown_secs() {
     raw="21600"
   fi
   echo "$raw"
+}
+
+_deacon_heartbeat_stale_secs() {
+  local raw="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="300"
+  fi
+  echo "$raw"
+}
+
+_deacon_heartbeat_timestamp() {
+  [[ -f "$SGT_DEACON_HEARTBEAT" ]] || return 1
+  python3 -c "import json; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp',''))" 2>/dev/null || return 1
+}
+
+_deacon_heartbeat_age_secs() {
+  [[ -f "$SGT_DEACON_HEARTBEAT" ]] || return 1
+  local now epoch
+  now=$(date +%s)
+  epoch=$(python3 -c "
+import json, datetime
+d = json.load(open('$SGT_DEACON_HEARTBEAT'))
+ts = d.get('timestamp', '')
+try:
+    dt = datetime.datetime.fromisoformat(ts)
+    print(int(dt.timestamp()))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+  [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
+  [[ "$epoch" -gt 0 ]] || return 1
+  local age=$((now - epoch))
+  [[ "$age" -lt 0 ]] && age=0
+  echo "$age"
+}
+
+_mayor_critical_alert_cooldown_secs() {
+  local raw="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-1800}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="1800"
+  fi
+  echo "$raw"
+}
+
+_mayor_notify_critical_guarded() {
+  local message="${1:-}"
+  [[ -n "$message" ]] || return 0
+
+  local cooldown now stamp_file last_epoch age
+  cooldown="$(_mayor_critical_alert_cooldown_secs)"
+  now=$(date +%s)
+  stamp_file="$SGT_CONFIG/mayor-critical-alert.last"
+
+  if [[ "$cooldown" -gt 0 && -f "$stamp_file" ]]; then
+    last_epoch=$(head -1 "$stamp_file" 2>/dev/null || echo "0")
+    [[ "$last_epoch" =~ ^[0-9]+$ ]] || last_epoch=0
+    if [[ "$last_epoch" -gt 0 ]]; then
+      age=$((now - last_epoch))
+      [[ "$age" -lt 0 ]] && age=0
+      if [[ "$age" -lt "$cooldown" ]]; then
+        log_event "MAYOR_CRITICAL_NOTIFY_SUPPRESS age=${age}s cooldown=${cooldown}s"
+        return 0
+      fi
+    fi
+  fi
+
+  _mayor_notify_rigger "$message"
+  printf '%s\n' "$now" > "$stamp_file"
+  log_event "MAYOR_CRITICAL_NOTIFY_SENT cooldown=${cooldown}s"
 }
 
 _mayor_pre_dispatch_revalidate() {
@@ -799,9 +870,20 @@ cmd_status() {
   tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_alive="on"
   printf "  %-16s %s\n" "deacon" "$(_status_badge "$deacon_alive")"
   if [[ -f "$SGT_DEACON_HEARTBEAT" ]]; then
-    local last_beat
-    last_beat=$(python3 -c "import json; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp','?'))" 2>/dev/null || echo "?")
-    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $last_beat" "$(_reset)"
+    local last_beat beat_age beat_stale_threshold beat_health
+    last_beat="$(_deacon_heartbeat_timestamp 2>/dev/null || true)"
+    beat_age="$(_deacon_heartbeat_age_secs 2>/dev/null || true)"
+    beat_stale_threshold="$(_deacon_heartbeat_stale_secs)"
+    if [[ "$beat_age" =~ ^[0-9]+$ ]]; then
+      if [[ "$beat_age" -gt "$beat_stale_threshold" ]]; then
+        beat_health="stale"
+      else
+        beat_health="healthy"
+      fi
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${last_beat:-?} (${beat_age}s ago, $beat_health; stale>${beat_stale_threshold}s)" "$(_reset)"
+    else
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${last_beat:-?} (age unknown)" "$(_reset)"
+    fi
   fi
 
   for rig_file in "$SGT_RIGS"/*; do
@@ -2104,29 +2186,24 @@ _boot_check() {
     return
   fi
 
-  local last_ts
-  last_ts=$(python3 -c "
-import json, sys, datetime
-d = json.load(open('$SGT_DEACON_HEARTBEAT'))
-ts = d.get('timestamp', '')
-try:
-    dt = datetime.datetime.fromisoformat(ts)
-    print(int(dt.timestamp()))
-except:
-    print(0)
-" 2>/dev/null || echo "0")
+  local stale_threshold age
+  stale_threshold="$(_deacon_heartbeat_stale_secs)"
+  age="$(_deacon_heartbeat_age_secs 2>/dev/null || true)"
+  if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+    echo "[boot] deacon heartbeat invalid — restarting"
+    log_event "BOOT_RESTART_DEACON reason=invalid_heartbeat"
+    tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+    cmd_deacon_start
+    return
+  fi
 
-  local now
-  now=$(date +%s)
-  local age=$((now - last_ts))
-
-  if [[ "$age" -gt 300 ]]; then
-    echo "[boot] deacon heartbeat stale (${age}s) — restarting"
-    log_event "BOOT_RESTART_DEACON reason=stale_heartbeat age=${age}s"
+  if [[ "$age" -gt "$stale_threshold" ]]; then
+    echo "[boot] deacon heartbeat stale (${age}s > ${stale_threshold}s) — restarting"
+    log_event "BOOT_RESTART_DEACON reason=stale_heartbeat age=${age}s threshold=${stale_threshold}s"
     tmux kill-session -t "sgt-deacon" 2>/dev/null || true
     cmd_deacon_start
   else
-    echo "[boot] deacon healthy (heartbeat ${age}s ago)"
+    echo "[boot] deacon healthy (heartbeat ${age}s ago; stale>${stale_threshold}s)"
   fi
 }
 
@@ -2413,6 +2490,8 @@ _mayor_loop() {
     local issues_found=""
     local actions_taken=""
     local notify_rigger=""
+    local critical_alert_count=0
+    local critical_alert_rigs=0
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
 
@@ -2440,6 +2519,24 @@ _mayor_loop() {
         actions_taken+="  - restarted $agent\n"
       fi
     done
+    if tmux has-session -t "sgt-deacon" 2>/dev/null; then
+      local heartbeat_age heartbeat_stale_threshold
+      heartbeat_stale_threshold="$(_deacon_heartbeat_stale_secs)"
+      heartbeat_age="$(_deacon_heartbeat_age_secs 2>/dev/null || true)"
+      if [[ ! "$heartbeat_age" =~ ^[0-9]+$ ]]; then
+        issues_found+="  - deacon heartbeat invalid or missing\n"
+        echo "[mayor] deacon heartbeat invalid — restarting deacon..."
+        tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+        sgt deacon start 2>/dev/null
+        actions_taken+="  - restarted deacon (invalid heartbeat)\n"
+      elif [[ "$heartbeat_age" -gt "$heartbeat_stale_threshold" ]]; then
+        issues_found+="  - deacon heartbeat stale (${heartbeat_age}s > ${heartbeat_stale_threshold}s)\n"
+        echo "[mayor] deacon heartbeat stale — restarting deacon..."
+        tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+        sgt deacon start 2>/dev/null
+        actions_taken+="  - restarted deacon (stale heartbeat ${heartbeat_age}s)\n"
+      fi
+    fi
 
     # Check witnesses and refineries
     for rig_file in "$SGT_RIGS"/*; do
@@ -2504,13 +2601,22 @@ _mayor_loop() {
         } | sort -u | head -5
       )
       if [[ -n "$critical_issues" ]]; then
+        local rig_critical_count=0
         issues_found+="  - critical/high issues on $rname:\n"
         while IFS= read -r line; do
           issues_found+="    - $line\n"
+          rig_critical_count=$((rig_critical_count + 1))
         done <<< "$critical_issues"
+        if [[ "$rig_critical_count" -gt 0 ]]; then
+          critical_alert_count=$((critical_alert_count + rig_critical_count))
+          critical_alert_rigs=$((critical_alert_rigs + 1))
+        fi
         needs_ai=true
       fi
     done
+    if [[ "$critical_alert_count" -gt 0 ]]; then
+      _mayor_notify_critical_guarded "critical/high issues open: count=${critical_alert_count} rigs=${critical_alert_rigs} (cooldown=$(_mayor_critical_alert_cooldown_secs)s)"
+    fi
 
     # === 5. Check for orphaned PRs (open PRs on sgt/* branches with no polecat) ===
     for rig_file in "$SGT_RIGS"/*; do
@@ -3575,6 +3681,8 @@ Environment:
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
+  SGT_DEACON_HEARTBEAT_STALE_SECS  Heartbeat stale threshold in seconds (default: 300)
+  SGT_MAYOR_CRITICAL_ALERT_COOLDOWN  Cooldown for mayor critical/high alerts (default: 1800, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
 
