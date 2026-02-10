@@ -59,6 +59,9 @@ if [[ "$dispatch_decisions" -ne 1 ]]; then
 fi
 BASH
 
+echo "=== mayor wake trigger ttl dedupe ==="
+"$REPO_ROOT/test_mayor_wake_dedupe_ttl.sh"
+
 echo "=== duplicate sling suppression during cooldown ==="
 "$REPO_ROOT/test_mayor_dispatch_idempotency.sh"
 

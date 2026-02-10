@@ -18,6 +18,7 @@ SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
+SGT_MAYOR_WAKE_DEDUPE_TTL="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}" # 15 seconds
 SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
 SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" # 1 hour
 SGT_MOLECULES="$SGT_ROOT/molecules"
@@ -188,6 +189,38 @@ _dedupe_wake_reasons() {
 _wake_requires_dispatch_decision() {
   local reason="${1:-}"
   [[ "$reason" == merged:* || "$reason" == dog-approved:* ]]
+}
+
+_mayor_wake_dedupe_ttl_secs() {
+  local raw="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="15"
+  fi
+  echo "$raw"
+}
+
+_wake_trigger_key() {
+  local reason="${1:-}"
+  if [[ -z "$reason" || "$reason" == "periodic" ]]; then
+    echo ""
+    return 0
+  fi
+  echo "${reason%%|*}"
+}
+
+_wake_trigger_should_suppress() {
+  local last_seen="${1:-}" now="${2:-}" ttl="${3:-}"
+  if [[ -z "$last_seen" || ! "$last_seen" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [[ ! "$now" =~ ^[0-9]+$ || ! "$ttl" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if [[ "$ttl" -eq 0 || "$now" -lt "$last_seen" ]]; then
+    return 1
+  fi
+  local age=$((now - last_seen))
+  [[ "$age" -lt "$ttl" ]]
 }
 
 _normalize_label() {
@@ -2573,6 +2606,9 @@ _mayor_wake_summary() {
 _mayor_loop() {
   set +e  # Mayor loop must never exit on errors
   log_event "MAYOR_START"
+  local wake_dedupe_ttl
+  wake_dedupe_ttl="$(_mayor_wake_dedupe_ttl_secs)"
+  local -A wake_seen_at=()
 
   # Set up FIFO for event-driven wake
   [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
@@ -2614,8 +2650,26 @@ _mayor_loop() {
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
 
     if [[ "$wake_reason" != "periodic" ]]; then
-      local event_reason wake_summary
+      local event_reason wake_summary event_key now_ts last_seen age skip_reason
       for event_reason in "${cycle_events[@]+"${cycle_events[@]}"}"; do
+        event_key="$(_wake_trigger_key "$event_reason")"
+        now_ts="$(date +%s)"
+        if [[ -n "$event_key" ]]; then
+          last_seen="${wake_seen_at[$event_key]:-}"
+        else
+          last_seen=""
+        fi
+        if [[ -n "$event_key" && "$wake_dedupe_ttl" -gt 0 ]] && _wake_trigger_should_suppress "$last_seen" "$now_ts" "$wake_dedupe_ttl"; then
+          age=$((now_ts - last_seen))
+          skip_reason="duplicate wake trigger suppressed (key=$event_key age=${age}s ttl=${wake_dedupe_ttl}s)"
+          echo "[mayor] wake skipped - $skip_reason"
+          _mayor_notify_rigger "mayor skip: $skip_reason"
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] MAYOR WAKE SKIP (duplicate-trigger) $skip_reason" >> "$SGT_CONFIG/mayor-decisions.log"
+          continue
+        fi
+        if [[ -n "$event_key" ]]; then
+          wake_seen_at["$event_key"]="$now_ts"
+        fi
         wake_summary=$(_mayor_wake_summary "$event_reason")
         if [[ -n "$wake_summary" ]]; then
           _mayor_notify_rigger "$wake_summary"
@@ -3814,6 +3868,7 @@ Environment:
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
+  SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
 
