@@ -68,6 +68,9 @@ echo "=== duplicate sling suppression during cooldown ==="
 echo "=== stale snapshot dispatch race guard ==="
 "$REPO_ROOT/test_mayor_stale_dispatch_race.sh"
 
+echo "=== mayor snapshot freshness guard ==="
+"$REPO_ROOT/test_mayor_snapshot_freshness_guard.sh"
+
 echo "=== mayor critical alert cooldown dedupe ==="
 "$REPO_ROOT/test_mayor_critical_alert_cooldown.sh"
 

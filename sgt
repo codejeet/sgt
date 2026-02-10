@@ -267,6 +267,58 @@ _wake_trigger_should_suppress() {
   [[ "$age" -lt "$ttl" ]]
 }
 
+_mayor_merge_queue_count() {
+  local mq_count=0
+  if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
+    local mqf
+    for mqf in "$SGT_CONFIG/merge-queue"/*; do
+      [[ -f "$mqf" ]] || continue
+      mq_count=$((mq_count + 1))
+    done
+  fi
+  echo "$mq_count"
+}
+
+_mayor_snapshot_resolve_counts() {
+  local snapshot_raw="${1:-}" live_raw="${2:-}"
+  local snapshot="$snapshot_raw" live="$live_raw"
+  local chosen source status
+
+  [[ "$snapshot" =~ ^[0-9]+$ ]] || snapshot=-1
+  [[ "$live" =~ ^[0-9]+$ ]] || live=-1
+
+  # Deterministic precedence:
+  # 1) If live is available and differs, live wins (stale snapshot).
+  # 2) If live is unavailable, snapshot is kept.
+  # 3) If both are available and equal, snapshot is accepted as in-sync.
+  if [[ "$live" -lt 0 ]]; then
+    chosen="$snapshot"
+    source="snapshot"
+    status="live-unavailable"
+  elif [[ "$snapshot" -lt 0 ]]; then
+    chosen="$live"
+    source="live"
+    status="snapshot-invalid"
+  elif [[ "$snapshot" -eq "$live" ]]; then
+    chosen="$snapshot"
+    source="snapshot"
+    status="in-sync"
+  else
+    chosen="$live"
+    source="live"
+    status="stale-snapshot"
+  fi
+
+  echo "${snapshot}|${live}|${chosen}|${source}|${status}"
+}
+
+_mayor_merge_queue_revalidate_once() {
+  local snapshot_count="${1:-}"
+  local live_count
+  live_count="$(_mayor_merge_queue_count)"
+  _mayor_snapshot_resolve_counts "$snapshot_count" "$live_count"
+}
+
 _normalize_label() {
   local label="${1:-}"
   label="$(_one_line "$label")"
@@ -2689,6 +2741,7 @@ _mayor_loop() {
     local issues_found=""
     local actions_taken=""
     local notify_rigger=""
+    local snapshot_freshness=""
 
     if [[ "$wake_reason" != "periodic" ]]; then
       local event_reason wake_summary event_key now_ts last_seen age skip_reason
@@ -2780,14 +2833,17 @@ _mayor_loop() {
     done
 
     # === 2. Check merge queue (refinery handles review + merge) ===
-    local mq_count=0
-    if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
-      for mqf in "$SGT_CONFIG/merge-queue"/*; do
-        [[ -f "$mqf" ]] || continue
-        mq_count=$((mq_count + 1))
-      done
+    local mq_snapshot_count mq_live_count mq_count mq_source mq_status mq_resolution mq_guard_line
+    mq_snapshot_count="$(_mayor_merge_queue_count)"
+    mq_resolution="$(_mayor_merge_queue_revalidate_once "$mq_snapshot_count")"
+    IFS='|' read -r mq_snapshot_count mq_live_count mq_count mq_source mq_status <<< "$mq_resolution"
+    mq_guard_line="merge_queue_count snapshot=$mq_snapshot_count live=$mq_live_count chosen=$mq_count source=$mq_source status=$mq_status"
+    echo "[mayor] snapshot guard $mq_guard_line"
+    log_event "MAYOR_SNAPSHOT_GUARD $mq_guard_line"
+    if [[ "$mq_status" == "stale-snapshot" ]]; then
+      snapshot_freshness+="  - stale snapshot: $mq_guard_line\n"
     fi
-    if [[ "$mq_count" -gt 0 ]]; then
+    if [[ "$mq_count" =~ ^[0-9]+$ && "$mq_count" -gt 0 ]]; then
       issues_found+="  - merge queue has $mq_count item(s)\n"
     fi
 
@@ -2926,6 +2982,9 @@ MQORPHAN
       if [[ -n "$actions_taken" ]]; then
         cycle_entry+="$(printf '  Actions:\n%b' "$actions_taken")"
       fi
+      if [[ -n "$snapshot_freshness" ]]; then
+        cycle_entry+="$(printf '  Snapshot Freshness:\n%b' "$snapshot_freshness")"
+      fi
       if _mayor_record_decision "$cycle_entry" "cycle-summary" "$SGT_ROOT"; then
         echo "[mayor] logged issues/actions"
       fi
@@ -2953,6 +3012,9 @@ $(echo -e "$issues_found")
 
 Recent actions already taken:
 $(echo -e "$actions_taken")
+
+Snapshot freshness notes:
+$(echo -e "${snapshot_freshness:-  - none}")
 
 ## System State
 $(cat "$briefing")

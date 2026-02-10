@@ -74,6 +74,16 @@ Mayor AI dispatches also include a stale-state revalidation immediately before i
 - If either count is non-zero (or live state cannot be confirmed), dispatch is skipped.
 - A reasoned operator-visible line is emitted (`[mayor] dispatch skipped ...`) and a corresponding entry is appended to `~/.sgt/mayor-decisions.log`.
 
+Mayor cycle decisions also protect against stale snapshot text in generated `CLAUDE.md`:
+- Merge-queue count now performs a one-time live revalidation immediately before issue surfacing.
+- Deterministic precedence rules:
+  - if live count is available and differs from snapshot, `live` wins (`status=stale-snapshot`);
+  - if live is unavailable, snapshot is kept (`status=live-unavailable`);
+  - if both match, snapshot is accepted (`status=in-sync`).
+- Mayor emits an explicit status line with both values and chosen source:
+  - `[mayor] snapshot guard merge_queue_count snapshot=<n> live=<n> chosen=<n> source=<snapshot|live> status=<...>`
+- When a stale snapshot is detected, mayor records a `Snapshot Freshness` note in decision output instead of treating the stale snapshot value as an active issue.
+
 Mayor decision logging is durable:
 - Decision entries are appended atomically under a file lock.
 - Each entry is prefixed with a UTC ISO-8601 timestamp and `workspace=<path>`.
