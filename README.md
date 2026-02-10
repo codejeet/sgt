@@ -79,6 +79,26 @@ Mayor wake processing is also cycle-idempotent:
 - Replayed identical `merged:*` wake events in that cycle produce only one AI dispatch decision.
 - Non-periodic wake summaries are emitted once per coalesced event in order.
 
+Mayor and boot both guard against stale deacon heartbeats:
+- Default stale threshold is `300` seconds (`5` minutes), configurable with:
+
+```bash
+export SGT_DEACON_HEARTBEAT_STALE_SECS=300
+```
+
+- Mayor also checks this heartbeat age and proactively restarts deacon when the heartbeat is missing/invalid/stale.
+- `sgt status` now shows deacon heartbeat age + health (`healthy|stale|unknown`) and the active stale threshold.
+
+Critical/high issue alerts from Mayor are deduped with a cooldown:
+- Mayor sends at most one identical critical/high OpenClaw alert per rig within the cooldown window.
+- Default alert cooldown is `3600` seconds (`1` hour), configurable with:
+
+```bash
+export SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=3600
+```
+
+Set `SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=0` to disable alert dedupe.
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.

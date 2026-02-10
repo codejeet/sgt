@@ -18,9 +18,12 @@ SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
+SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
+SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" # 1 hour
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
+SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
@@ -207,6 +210,149 @@ _dispatch_cooldown_secs() {
     raw="21600"
   fi
   echo "$raw"
+}
+
+_deacon_heartbeat_stale_secs() {
+  local raw="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="300"
+  fi
+  echo "$raw"
+}
+
+_critical_alert_cooldown_secs() {
+  local raw="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="3600"
+  fi
+  echo "$raw"
+}
+
+_deacon_heartbeat_snapshot() {
+  if [[ ! -f "$SGT_DEACON_HEARTBEAT" ]]; then
+    echo "-1||missing"
+    return 0
+  fi
+
+  python3 - "$SGT_DEACON_HEARTBEAT" <<'PY' 2>/dev/null || echo "-1||invalid"
+import datetime
+import json
+import time
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    print("-1||invalid")
+    raise SystemExit(0)
+
+raw_ts = str(data.get("timestamp", "")).strip()
+if not raw_ts:
+    print("-1||invalid")
+    raise SystemExit(0)
+
+try:
+    dt = datetime.datetime.fromisoformat(raw_ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    ts_epoch = int(dt.timestamp())
+except Exception:
+    print(f"-1|{raw_ts}|invalid")
+    raise SystemExit(0)
+
+age = int(time.time()) - ts_epoch
+if age < 0:
+    age = 0
+print(f"{age}|{raw_ts}|ok")
+PY
+}
+
+_deacon_heartbeat_health() {
+  local age="${1:-}" stale_secs="${2:-300}"
+  [[ "$age" =~ ^-?[0-9]+$ ]] || {
+    echo "unknown"
+    return 0
+  }
+  if [[ "$age" -lt 0 ]]; then
+    echo "unknown"
+  elif [[ "$age" -gt "$stale_secs" ]]; then
+    echo "stale"
+  else
+    echo "healthy"
+  fi
+}
+
+_mayor_critical_alert_signature() {
+  local rig="${1:-}" repo="${2:-}" issues="${3:-}"
+  local payload sig=""
+  payload="$rig|$repo|$issues"
+  if command -v sha1sum &>/dev/null; then
+    sig="$(printf '%s' "$payload" | sha1sum 2>/dev/null | awk '{print $1}')"
+  fi
+  if [[ -z "$sig" ]]; then
+    sig="$(_symptom_signature "$payload")"
+  fi
+  echo "$sig"
+}
+
+_mayor_should_notify_critical_alert() {
+  local rig="${1:-}" repo="${2:-}" issues="${3:-}"
+  [[ -n "$rig" && -n "$repo" && -n "$issues" ]] || return 1
+
+  local cooldown_secs
+  cooldown_secs="$(_critical_alert_cooldown_secs)"
+  if [[ "$cooldown_secs" -eq 0 ]]; then
+    return 0
+  fi
+
+  local now signature
+  now=$(date +%s)
+  signature="$(_mayor_critical_alert_signature "$rig" "$repo" "$issues")"
+  [[ -n "$signature" ]] || return 0
+
+  local prev_signature="" prev_epoch=""
+  if [[ -f "$SGT_MAYOR_CRITICAL_ALERT_STATE" ]]; then
+    local prev_line
+    prev_line=$(awk -F'|' -v key="$rig" '$1==key {print; exit}' "$SGT_MAYOR_CRITICAL_ALERT_STATE" 2>/dev/null || true)
+    if [[ -n "$prev_line" ]]; then
+      IFS='|' read -r _ prev_signature prev_epoch <<< "$prev_line"
+    fi
+  fi
+
+  if [[ "$prev_signature" == "$signature" && "$prev_epoch" =~ ^[0-9]+$ ]]; then
+    local age=$((now - prev_epoch))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -lt "$cooldown_secs" ]]; then
+      return 1
+    fi
+  fi
+
+  local state_tmp
+  state_tmp="$(mktemp)"
+  if [[ -f "$SGT_MAYOR_CRITICAL_ALERT_STATE" ]]; then
+    awk -F'|' -v key="$rig" '$1!=key {print $0}' "$SGT_MAYOR_CRITICAL_ALERT_STATE" > "$state_tmp" 2>/dev/null || true
+  fi
+  printf '%s|%s|%s\n' "$rig" "$signature" "$now" >> "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_CRITICAL_ALERT_STATE"
+  return 0
+}
+
+_mayor_critical_alert_message() {
+  local rig="${1:-}" repo="${2:-}" issues="${3:-}"
+  local first count
+  first="$(printf '%s\n' "$issues" | sed '/^[[:space:]]*$/d' | head -1)"
+  count="$(printf '%s\n' "$issues" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=1
+
+  local more=""
+  if [[ "$count" -gt 1 ]]; then
+    more=" (+$((count - 1)) more)"
+  fi
+  echo "critical/high issues on $rig repo=$repo: ${first:-unknown}${more}"
 }
 
 _mayor_pre_dispatch_revalidate() {
@@ -813,11 +959,21 @@ cmd_status() {
 
   local deacon_alive="off"
   tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_alive="on"
-  printf "  %-16s %s\n" "deacon" "$(_status_badge "$deacon_alive")"
-  if [[ -f "$SGT_DEACON_HEARTBEAT" ]]; then
-    local last_beat
-    last_beat=$(python3 -c "import json; d=json.load(open('$SGT_DEACON_HEARTBEAT')); print(d.get('timestamp','?'))" 2>/dev/null || echo "?")
-    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $last_beat" "$(_reset)"
+  local hb_age hb_ts hb_state hb_stale_secs hb_health deacon_badge
+  hb_stale_secs="$(_deacon_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state <<< "$(_deacon_heartbeat_snapshot)"
+  hb_health="$(_deacon_heartbeat_health "$hb_age" "$hb_stale_secs")"
+  deacon_badge="$deacon_alive"
+  if [[ "$deacon_alive" == "on" && "$hb_health" != "healthy" ]]; then
+    deacon_badge="degraded"
+  fi
+  printf "  %-16s %s\n" "deacon" "$(_status_badge "$deacon_badge")"
+  if [[ "$hb_state" == "ok" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $hb_ts (${hb_age}s ago, ${hb_health}, stale>${hb_stale_secs}s)" "$(_reset)"
+  elif [[ "$hb_state" == "missing" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: missing (health unknown, stale>${hb_stale_secs}s)" "$(_reset)"
+  else
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${hb_ts:-invalid} (health unknown, stale>${hb_stale_secs}s)" "$(_reset)"
   fi
 
   for rig_file in "$SGT_RIGS"/*; do
@@ -2132,6 +2288,9 @@ cmd_deacon_stop() {
 # Runs once and exits — called by the Daemon every tick.
 
 _boot_check() {
+  local stale_threshold
+  stale_threshold="$(_deacon_heartbeat_stale_secs)"
+
   if ! tmux has-session -t "sgt-deacon" 2>/dev/null; then
     echo "[boot] deacon session missing — restarting"
     log_event "BOOT_RESTART_DEACON reason=session_missing"
@@ -2139,7 +2298,10 @@ _boot_check() {
     return
   fi
 
-  if [[ ! -f "$SGT_DEACON_HEARTBEAT" ]]; then
+  local hb_age hb_ts hb_state
+  IFS='|' read -r hb_age hb_ts hb_state <<< "$(_deacon_heartbeat_snapshot)"
+
+  if [[ "$hb_state" == "missing" ]]; then
     echo "[boot] no deacon heartbeat file — restarting"
     log_event "BOOT_RESTART_DEACON reason=no_heartbeat"
     tmux kill-session -t "sgt-deacon" 2>/dev/null || true
@@ -2147,29 +2309,21 @@ _boot_check() {
     return
   fi
 
-  local last_ts
-  last_ts=$(python3 -c "
-import json, sys, datetime
-d = json.load(open('$SGT_DEACON_HEARTBEAT'))
-ts = d.get('timestamp', '')
-try:
-    dt = datetime.datetime.fromisoformat(ts)
-    print(int(dt.timestamp()))
-except:
-    print(0)
-" 2>/dev/null || echo "0")
+  if [[ "$hb_state" != "ok" || ! "$hb_age" =~ ^[0-9]+$ ]]; then
+    echo "[boot] invalid deacon heartbeat data — restarting"
+    log_event "BOOT_RESTART_DEACON reason=invalid_heartbeat timestamp=$(_escape_quotes "$hb_ts")"
+    tmux kill-session -t "sgt-deacon" 2>/dev/null || true
+    cmd_deacon_start
+    return
+  fi
 
-  local now
-  now=$(date +%s)
-  local age=$((now - last_ts))
-
-  if [[ "$age" -gt 300 ]]; then
-    echo "[boot] deacon heartbeat stale (${age}s) — restarting"
-    log_event "BOOT_RESTART_DEACON reason=stale_heartbeat age=${age}s"
+  if [[ "$hb_age" -gt "$stale_threshold" ]]; then
+    echo "[boot] deacon heartbeat stale (${hb_age}s > ${stale_threshold}s) — restarting"
+    log_event "BOOT_RESTART_DEACON reason=stale_heartbeat age=${hb_age}s threshold=${stale_threshold}s"
     tmux kill-session -t "sgt-deacon" 2>/dev/null || true
     cmd_deacon_start
   else
-    echo "[boot] deacon healthy (heartbeat ${age}s ago)"
+    echo "[boot] deacon healthy (heartbeat ${hb_age}s ago, threshold ${stale_threshold}s)"
   fi
 }
 
@@ -2475,14 +2629,43 @@ _mayor_loop() {
     fi
 
     # === 1. Check agent health ===
+    local deacon_restarted="false"
     for agent in daemon deacon; do
       if ! tmux has-session -t "sgt-$agent" 2>/dev/null; then
         issues_found+="  - $agent is DOWN\n"
         echo "[mayor] restarting $agent..."
         sgt "$agent" start 2>/dev/null
         actions_taken+="  - restarted $agent\n"
+        if [[ "$agent" == "deacon" ]]; then
+          deacon_restarted="true"
+        fi
       fi
     done
+
+    if [[ "$deacon_restarted" != "true" ]]; then
+      local hb_age hb_ts hb_state hb_stale_secs
+      hb_stale_secs="$(_deacon_heartbeat_stale_secs)"
+      IFS='|' read -r hb_age hb_ts hb_state <<< "$(_deacon_heartbeat_snapshot)"
+      if [[ "$hb_state" == "missing" ]]; then
+        issues_found+="  - deacon heartbeat missing\n"
+        echo "[mayor] deacon heartbeat missing — restarting deacon..."
+        sgt deacon stop 2>/dev/null || true
+        sgt deacon start 2>/dev/null
+        actions_taken+="  - restarted deacon (missing heartbeat)\n"
+      elif [[ "$hb_state" != "ok" || ! "$hb_age" =~ ^[0-9]+$ ]]; then
+        issues_found+="  - deacon heartbeat invalid\n"
+        echo "[mayor] deacon heartbeat invalid — restarting deacon..."
+        sgt deacon stop 2>/dev/null || true
+        sgt deacon start 2>/dev/null
+        actions_taken+="  - restarted deacon (invalid heartbeat)\n"
+      elif [[ "$hb_age" -gt "$hb_stale_secs" ]]; then
+        issues_found+="  - deacon heartbeat stale (${hb_age}s > ${hb_stale_secs}s)\n"
+        echo "[mayor] deacon heartbeat stale (${hb_age}s > ${hb_stale_secs}s) — restarting deacon..."
+        sgt deacon stop 2>/dev/null || true
+        sgt deacon start 2>/dev/null
+        actions_taken+="  - restarted deacon (stale heartbeat ${hb_age}s)\n"
+      fi
+    fi
 
     # Check witnesses and refineries
     for rig_file in "$SGT_RIGS"/*; do
@@ -2541,9 +2724,9 @@ _mayor_loop() {
       critical_issues=$(
         {
           gh issue list --repo "$repo" --state open --label "sgt-authorized,critical" \
-            --json number,title --jq '.[].title' 2>/dev/null
+            --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null
           gh issue list --repo "$repo" --state open --label "sgt-authorized,high" \
-            --json number,title --jq '.[].title' 2>/dev/null
+            --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null
         } | sort -u | head -5
       )
       if [[ -n "$critical_issues" ]]; then
@@ -2551,6 +2734,16 @@ _mayor_loop() {
         while IFS= read -r line; do
           issues_found+="    - $line\n"
         done <<< "$critical_issues"
+        if _mayor_should_notify_critical_alert "$rname" "$repo" "$critical_issues"; then
+          local critical_alert
+          critical_alert="$(_mayor_critical_alert_message "$rname" "$repo" "$critical_issues")"
+          _mayor_notify_rigger "$critical_alert"
+        else
+          local critical_cooldown
+          critical_cooldown="$(_critical_alert_cooldown_secs)"
+          echo "[mayor] critical alert suppressed by cooldown (${critical_cooldown}s) for $rname"
+          log_event "MAYOR_CRITICAL_NOTIFY_SUPPRESS rig=$rname cooldown=${critical_cooldown}s"
+        fi
         needs_ai=true
       fi
     done
