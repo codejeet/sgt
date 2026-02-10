@@ -192,6 +192,21 @@ Mayor action-evidence receipt fence (dispatch/nuke/merge):
 - Replayed action keys do not write conflicting success receipts; replay is logged as non-success/no-op (`reason=replayed-action-key-existing-success retry=no-op`).
 - Use `sgt mayor merge <pr#> --repo <repo>` for mayor merge actions (includes receipt fence and post-merge live verification).
 
+Mayor notify delivery receipt + retry fence (`sgt mayor notify` / `_mayor_notify_rigger`):
+- Mayor notify writes durable attempt state under `~/.sgt/mayor-notify-attempts/`, keyed by `channel+target+message_key`.
+- Every notify attempt is live-verified against transport/ack result and writes a structured receipt under `~/.sgt/mayor-notify-receipts/` with:
+  - `channel`
+  - `target`
+  - `message_key`
+  - `attempt`
+  - `verified_at`
+  - `outcome`
+- Transient transport failures (`timeout/network/http-5xx/secondary-rate-limit`) and missing/stale ack outcomes trigger at most one idempotent retry.
+- Non-retriable transport failures are retry-fenced immediately; replay of the same `message_key` does not re-send and emits explicit dedupe skip telemetry.
+- Receipt outcomes and escalation/skip reasons are recorded in both:
+  - decision log: `MAYOR NOTIFY RECEIPT ...`, `MAYOR NOTIFY ESCALATE ...`, `MAYOR NOTIFY SKIP ...`
+  - activity log: `MAYOR_NOTIFY_RECEIPT ...`, `MAYOR_NOTIFY_ESCALATE ...`, `MAYOR_NOTIFY_ESCALATE_SUPPRESS ...`
+
 Troubleshooting duplicate merged-trigger dispatch skips:
 1. Confirm the durable trigger key exists (key should match `repo+PR+merged_head`):
 
@@ -260,6 +275,34 @@ grep 'MAYOR_ACTION_RECEIPT' ~/.sgt/sgt.log | tail -50
 ```
 
 4. If replay no-op keeps appearing (`reason=replayed-action-key-existing-success`), confirm you are not replaying the same action key (`action_key=...`) and that a new merge/dispatch target really changed.
+
+Troubleshooting mayor notify receipts (`sgt mayor notify`):
+1. Inspect notify attempt state + receipt artifacts:
+
+```bash
+ls -1 ~/.sgt/mayor-notify-attempts/
+ls -1 ~/.sgt/mayor-notify-receipts/
+tail -100 ~/.sgt/mayor-notify-attempts/*.state
+tail -100 ~/.sgt/mayor-notify-receipts/*.state
+```
+
+2. Correlate decision-log outcomes and explicit skip/escalate reasons:
+
+```bash
+grep 'MAYOR NOTIFY ' ~/.sgt/mayor-decisions.log | tail -80
+```
+
+3. Correlate operator-visible telemetry in activity log:
+
+```bash
+grep 'MAYOR_NOTIFY_' ~/.sgt/sgt.log | tail -80
+```
+
+4. Expected event patterns:
+- `MAYOR_NOTIFY_RECEIPT ... outcome=delivered` indicates ack-verified success.
+- `MAYOR_NOTIFY_RECEIPT ... outcome=transport-failure|missing-ack|stale-ack` indicates a failed attempt.
+- `MAYOR_NOTIFY_ESCALATE reason=notify-...` indicates terminal failure requiring operator attention.
+- `MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped` indicates replay was safely fenced and no duplicate notification was sent.
 
 Troubleshooting dispatch-cooldown suppressions (replayed merged wake events):
 1. Inspect structured cooldown suppression telemetry:
