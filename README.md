@@ -18,6 +18,13 @@ The repo includes a minimal Web UI for realtime monitoring and dispatch:
 Gas Town got bloated/fragile over time: “beads” were easy to break, and persistence/state became brittle.
 SGT replaces that with a simpler mental model: GitHub Issues/PRs + tmux + `gh`.
 
+## `sgt sweep` exit codes
+
+`sgt sweep` now has deterministic exit semantics:
+
+- Exit `0`: successful run, including when nothing needs cleanup, benign closed-stream conditions, or empty sweep actions.
+- Exit non-zero: real failures only (for example, invalid polecat state files or unrecoverable cleanup errors), with actionable stderr text that includes the polecat name and recommended recovery (`sgt nuke <polecat>`).
+
 ## Repo Plans (SGT_PLAN.json) — deterministic parallel + sequential
 
 SGT supports **repo-local work plans** so the system can keep itself fed without relying on LLM planning.
