@@ -202,13 +202,26 @@ if payload and not payload.endswith(b"\n"):
 fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX)
-    offset = 0
-    while offset < len(payload):
-        wrote = os.write(fd, payload[offset:])
-        if wrote <= 0:
-            raise RuntimeError("short write")
-        offset += wrote
-    os.fsync(fd)
+    start = os.lseek(fd, 0, os.SEEK_END)
+    try:
+        offset = 0
+        while offset < len(payload):
+            wrote = os.write(fd, payload[offset:])
+            if wrote <= 0:
+                raise RuntimeError("short write")
+            offset += wrote
+        os.fsync(fd)
+    except Exception as err:
+        # Keep entries all-or-nothing: never leave torn/truncated append payloads.
+        rollback_err = None
+        try:
+            os.ftruncate(fd, start)
+            os.fsync(fd)
+        except Exception as rollback_exc:
+            rollback_err = rollback_exc
+        if rollback_err is not None:
+            raise RuntimeError(f"{err}; rollback failed: {rollback_err}") from err
+        raise
 finally:
     os.close(fd)
 PY

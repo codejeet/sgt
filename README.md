@@ -96,10 +96,11 @@ Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
 
 Mayor decision logging is durable:
-- Decision entries are appended atomically under a file lock.
+- Decision entries are appended under an exclusive file lock.
+- Each append captures the pre-write file offset and rolls back (`ftruncate`) on write/fsync failure, so concurrent cycles do not leave interleaved or truncated decision lines.
 - Each append is explicitly flushed with `fsync` before returning.
 - Each entry is prefixed with a UTC ISO-8601 timestamp and `workspace=<path>`.
-- If a decision-log write fails, mayor continues the cycle, emits structured `MAYOR_DECISION_LOG_WRITE_FAILED ... notify=<sent|suppressed|unavailable>` metadata to `~/.sgt/sgt.log`, and surfaces a warning in `sgt status`.
+- If a decision-log write fails, mayor continues the cycle, emits a console warning (`[mayor] warning: MAYOR_DECISION_LOG_WRITE_FAILED ...`), writes structured `MAYOR_DECISION_LOG_WRITE_FAILED ... notify=<sent|suppressed|unavailable>` metadata to `~/.sgt/sgt.log`, and surfaces `decision-log warning: ...` in `sgt status`.
 - Mayor also sends at most one decision-log failure notification per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`, default `600` seconds; set `0` to disable suppression).
 
 Mayor wake processing is also cycle-idempotent:
