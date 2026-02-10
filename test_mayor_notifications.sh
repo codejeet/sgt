@@ -72,7 +72,7 @@ check "wake summary includes direct issue URL" 'issue_url=\$\{issue_url:-unknown
 
 echo ""
 echo "--- Notify on non-periodic wake ---"
-check "mayor derives wake summary" 'wake_summary=\$\(_mayor_wake_summary "\$wake_reason"\)'
+check "mayor derives wake summary per coalesced event" 'wake_summary=\$\(_mayor_wake_summary "\$event_reason"\)'
 check "mayor checks non-periodic wake" 'wake_reason" != "periodic"'
 check "mayor notifies rigger with wake summary" '_mayor_notify_rigger "\$wake_summary"'
 

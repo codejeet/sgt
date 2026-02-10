@@ -69,6 +69,11 @@ export SGT_MAYOR_DISPATCH_COOLDOWN=21600
 
 Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
 
+Mayor wake processing is also cycle-idempotent:
+- Within a single mayor loop cycle, repeated identical wake events are coalesced.
+- Replayed identical `merged:*` wake events in that cycle produce only one AI dispatch decision.
+- Non-periodic wake summaries are emitted once per coalesced event in order.
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.

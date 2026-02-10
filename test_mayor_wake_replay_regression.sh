@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# test_mayor_wake_replay_regression.sh - Regression checks for mayor wake replay and duplicate suppression.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+SGT_SCRIPT="$REPO_ROOT/sgt"
+
+extract_fn() {
+  local name="$1"
+  awk -v n="$name" '
+    $0 ~ "^" n "\\(\\) \\{" {in_fn=1}
+    in_fn {print}
+    in_fn && $0 == "}" {exit}
+  ' "$SGT_SCRIPT"
+}
+
+echo "=== mayor merged wake replay coalescing ==="
+bash -s "$SGT_SCRIPT" <<'BASH'
+set -euo pipefail
+SGT_SCRIPT="$1"
+
+extract_fn() {
+  local name="$1"
+  awk -v n="$name" '
+    $0 ~ "^" n "\\(\\) \\{" {in_fn=1}
+    in_fn {print}
+    in_fn && $0 == "}" {exit}
+  ' "$SGT_SCRIPT"
+}
+
+eval "$(extract_fn _dedupe_wake_reasons)"
+eval "$(extract_fn _wake_requires_dispatch_decision)"
+
+merged='merged:pr#77:#40:rig-a|repo=org/repo|title=Fix flaky CI|pr_url=https://github.com/org/repo/pull/77|issue_url=https://github.com/org/repo/issues/40'
+orphan='orphan-pr:#22:rig-a'
+
+mapfile -t deduped < <(_dedupe_wake_reasons "$merged" "$merged" "$orphan" "$merged")
+if [[ "${#deduped[@]}" -ne 2 ]]; then
+  echo "expected 2 coalesced events, got ${#deduped[@]}" >&2
+  exit 1
+fi
+
+if [[ "${deduped[0]}" != "$merged" || "${deduped[1]}" != "$orphan" ]]; then
+  echo "unexpected coalesced ordering/content" >&2
+  exit 1
+fi
+
+dispatch_decisions=0
+for reason in "${deduped[@]}"; do
+  if _wake_requires_dispatch_decision "$reason"; then
+    dispatch_decisions=$((dispatch_decisions + 1))
+  fi
+done
+
+if [[ "$dispatch_decisions" -ne 1 ]]; then
+  echo "expected exactly one dispatch decision for replayed merged wake events, got $dispatch_decisions" >&2
+  exit 1
+fi
+BASH
+
+echo "=== duplicate sling suppression during cooldown ==="
+"$REPO_ROOT/test_mayor_dispatch_idempotency.sh"
+
+echo "ALL TESTS PASSED"
