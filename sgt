@@ -27,6 +27,7 @@ SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
+SGT_MAYOR_AI_CYCLE_STATE="$SGT_CONFIG/mayor-ai-cycle.state"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
@@ -35,6 +36,7 @@ SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE="$SGT_CONFIG/mayor-agent-heartbeat-watc
 SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}" # 15 minutes
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
+SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
@@ -6399,6 +6401,86 @@ _mayor_prepare_briefing_for_cycle() {
   echo "${briefing}|${status}|${generated_at:-unknown}|${age:-1}|${stale_secs}|${stale_detected}|${path}"
 }
 
+_mayor_ai_cycle_timeout_secs() {
+  local raw="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -eq 0 ]]; then
+    raw=300
+  fi
+  echo "$raw"
+}
+
+_mayor_ai_cycle_state_write() {
+  local status="${1:-running}"
+  local started_at="${2:-unknown}"
+  local timeout_secs="${3:-$(_mayor_ai_cycle_timeout_secs)}"
+  local backend="${4:-unknown}"
+  local workspace="${5:-unknown}"
+  local state_file="${SGT_MAYOR_AI_CYCLE_STATE:-$SGT_CONFIG/mayor-ai-cycle.state}"
+  local state_tmp="${state_file}.tmp.$$"
+
+  cat > "$state_tmp" <<EOF
+status=$status
+pid=$$
+startedAt=$started_at
+timeoutSecs=$timeout_secs
+backend=$backend
+workspace=$workspace
+EOF
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_ai_cycle_state_clear() {
+  local state_file="${SGT_MAYOR_AI_CYCLE_STATE:-$SGT_CONFIG/mayor-ai-cycle.state}"
+  rm -f "$state_file"
+}
+
+_mayor_run_ai_decision_cycle() {
+  local backend="$1"
+  local mayor_workspace="$2"
+  local dispatch_snapshot_file="$3"
+  local ai_dispatch_trigger_key="${4:-}"
+  local ai_dispatch_trigger_reason="${5:-}"
+  local timeout_secs started_at started_epoch finished_epoch duration rc
+  local reason_code recovery_hint
+
+  timeout_secs="$(_mayor_ai_cycle_timeout_secs)"
+  started_at="$(date -Iseconds)"
+  started_epoch="$(date +%s)"
+  recovery_hint="inspect AI backend health, then run: sgt wake-mayor \"manual-retry\""
+
+  _mayor_ai_cycle_state_write "running" "$started_at" "$timeout_secs" "$backend" "$mayor_workspace" || true
+  log_event "MAYOR_AI_CYCLE_START timeout=${timeout_secs}s backend=$backend workspace=\"$(_escape_quotes "$mayor_workspace")\" trigger_key=\"$(_escape_quotes "${ai_dispatch_trigger_key:-none}")\" trigger_reason=\"$(_escape_quotes "${ai_dispatch_trigger_reason:-none}")\""
+
+  timeout "$timeout_secs" bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_ACTION_FENCE=1 SGT_MAYOR_DISPATCH_SNAPSHOT_FILE='$dispatch_snapshot_file' SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" \
+    </dev/null 2>&1 | tail -5
+  rc=$?
+
+  finished_epoch="$(date +%s)"
+  duration=$((finished_epoch - started_epoch))
+  if (( duration < 0 )); then
+    duration=0
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    _mayor_ai_cycle_state_clear || true
+    log_event "MAYOR_AI_CYCLE completed duration=${duration}s timeout=${timeout_secs}s"
+    echo "[mayor] AI decision cycle complete"
+    return 0
+  fi
+
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    reason_code="decision-timebox-exceeded"
+  else
+    reason_code="decision-run-error"
+  fi
+  _mayor_record_decision "MAYOR AI CYCLE FAIL_CLOSED reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s duration=${duration}s recovery_hint=\"$(_escape_quotes "$recovery_hint")\"" "ai-cycle-fail-closed" "$SGT_ROOT" || true
+  log_event "MAYOR_AI_CYCLE_FAIL_CLOSED reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s duration=${duration}s recovery_hint=\"$(_escape_quotes "$recovery_hint")\" action=release-lock-and-reset-cycle-state"
+  _mayor_ai_cycle_state_clear || true
+  _mayor_lock_release "$$" || true
+  echo "[mayor] AI cycle failed closed (reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s) — $recovery_hint"
+  return 1
+}
+
 _mayor_wake_summary() {
   local reason="$1"
   local summary=""
@@ -6470,7 +6552,7 @@ _mayor_loop() {
   fi
   echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason})"
   log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason}"
-  trap '_mayor_lock_release "$$"' EXIT INT TERM
+  trap '_mayor_ai_cycle_state_clear; _mayor_lock_release "$$"' EXIT INT TERM
 
   local wake_dedupe_ttl
   wake_dedupe_ttl="$(_mayor_wake_dedupe_ttl_secs)"
@@ -6974,13 +7056,9 @@ MAYORMD
 
       local backend="$(_ai_backend_default)"
 
-      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_ACTION_FENCE=1 SGT_MAYOR_DISPATCH_SNAPSHOT_FILE='$dispatch_snapshot_file' SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
-        </dev/null 2>&1 | tail -5; then
-        log_event "MAYOR_AI_CYCLE completed"
-        echo "[mayor] AI decision cycle complete"
-      else
-        echo "[mayor] AI cycle timed out — will retry next loop"
-        log_event "MAYOR_AI_CYCLE timeout"
+      if ! _mayor_run_ai_decision_cycle "$backend" "$mayor_workspace" "$dispatch_snapshot_file" "$ai_dispatch_trigger_key" "$ai_dispatch_trigger_reason"; then
+        log_event "MAYOR_CYCLE completed (trigger: $wake_reason status=ai-fail-closed)"
+        continue
       fi
     fi
 
@@ -7999,6 +8077,7 @@ Environment:
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
+  SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS  Timebox mayor AI decision runs in seconds (default: 300, set >0)
   SGT_MAYOR_ACTION_FENCE       Enable mayor post-action receipt verification fence for dispatch/nuke/merge (default: 0)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)

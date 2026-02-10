@@ -89,6 +89,9 @@ echo "=== mayor snapshot freshness guard ==="
 echo "=== mayor briefing freshness gate ==="
 "$REPO_ROOT/test_mayor_briefing_freshness_gate.sh"
 
+echo "=== mayor AI-cycle timeout recovery ==="
+"$REPO_ROOT/test_mayor_ai_cycle_timeout_recovery.sh"
+
 echo "=== mayor orphan stale snapshot guard ==="
 "$REPO_ROOT/test_mayor_orphan_stale_snapshot_guard.sh"
 
