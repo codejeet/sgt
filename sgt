@@ -209,13 +209,29 @@ _mayor_decision_log_failure_state_clear() {
   rm -f "$SGT_MAYOR_DECISION_LOG_ALERT_STATE"
 }
 
+_rfc3339_utc_now() {
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+  if [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    echo "$ts"
+    return 0
+  fi
+  echo "1970-01-01T00:00:00Z"
+  return 1
+}
+
 _mayor_decision_log_append() {
   local entry="${1:-}"
   local workspace="${2:-$SGT_ROOT}"
+  local context="${3:-cycle}"
   local log_file="$SGT_CONFIG/mayor-decisions.log"
   local py_bin payload py_out
-  local ts
-  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  local ts sanitized_entry placeholder_replacement placeholder_count ts_fallback
+  ts="$(_rfc3339_utc_now)"
+  ts_fallback=0
+  if [[ $? -ne 0 ]]; then
+    ts_fallback=1
+  fi
   _MAYOR_DECISION_LOG_LAST_ERROR=""
 
   if ! mkdir -p "$SGT_CONFIG" 2>/dev/null; then
@@ -229,7 +245,24 @@ _mayor_decision_log_append() {
     return 1
   fi
 
-  payload="$(printf '[%s] workspace=%s\n%s\n' "$ts" "$workspace" "$entry")"
+  sanitized_entry="$entry"
+  placeholder_count=0
+  placeholder_replacement="[$ts]"
+  if [[ "$ts_fallback" -eq 1 ]]; then
+    placeholder_replacement="[timestamp-error]"
+  fi
+  while [[ "$sanitized_entry" == *"[]"* ]]; do
+    sanitized_entry="${sanitized_entry/"[]"/"$placeholder_replacement"}"
+    placeholder_count=$((placeholder_count + 1))
+  done
+  if [[ "$placeholder_count" -gt 0 ]]; then
+    log_event "MAYOR_DECISION_LOG_TIMESTAMP_SANITIZED context=$context workspace=\"$(_escape_quotes "$workspace")\" placeholders=$placeholder_count replacement=\"$(_escape_quotes "$placeholder_replacement")\""
+  fi
+  if [[ "$ts_fallback" -eq 1 ]]; then
+    log_event "MAYOR_DECISION_LOG_TIMESTAMP_FALLBACK context=$context workspace=\"$(_escape_quotes "$workspace")\" timestamp=$ts"
+  fi
+
+  payload="$(printf '[%s] workspace=%s\n%s\n' "$ts" "$workspace" "$sanitized_entry")"
   if ! py_out="$(
     SGT_MAYOR_DECISION_LOG_APPEND_PAYLOAD="$payload" \
       "$py_bin" - "$log_file" 2>&1 <<'PY'
@@ -278,7 +311,7 @@ _mayor_record_decision() {
   local entry="${1:-}"
   local context="${2:-cycle}"
   local workspace="${3:-$SGT_ROOT}"
-  if _mayor_decision_log_append "$entry" "$workspace"; then
+  if _mayor_decision_log_append "$entry" "$workspace" "$context"; then
     _mayor_decision_log_failure_state_clear
     return 0
   fi

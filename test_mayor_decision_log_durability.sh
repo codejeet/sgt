@@ -26,6 +26,7 @@ eval "$(extract_fn _decision_log_alert_cooldown_secs)"
 eval "$(extract_fn _mayor_decision_log_failure_state_read)"
 eval "$(extract_fn _mayor_decision_log_failure_state_write)"
 eval "$(extract_fn _mayor_decision_log_failure_state_clear)"
+eval "$(extract_fn _rfc3339_utc_now)"
 eval "$(extract_fn _mayor_decision_log_append)"
 eval "$(extract_fn _mayor_record_decision)"
 
@@ -93,6 +94,34 @@ expected = set(range(1, writer_count + 1))
 if seen != expected:
     raise SystemExit(f"missing/duplicate entries: expected {len(expected)} unique ids, got {len(seen)}")
 PY
+
+# Placeholder sanitization: unresolved [] placeholders should never persist.
+before_lines="$(wc -l < "$LOG_FILE" | tr -d ' ')"
+_mayor_decision_log_append "timestamp-placeholder [] payload []" "$SGT_ROOT" "timestamp-sanitize-test"
+after_lines="$(wc -l < "$LOG_FILE" | tr -d ' ')"
+if [[ "$after_lines" != "$((before_lines + 2))" ]]; then
+  echo "expected placeholder append to add exactly two lines" >&2
+  exit 1
+fi
+
+sanitized_header="$(sed -n "$((before_lines + 1))p" "$LOG_FILE")"
+sanitized_entry="$(sed -n "$((before_lines + 2))p" "$LOG_FILE")"
+if [[ ! "$sanitized_header" =~ ^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\]\ workspace= ]]; then
+  echo "expected sanitized append header to remain RFC3339 UTC" >&2
+  exit 1
+fi
+if [[ "$sanitized_entry" == *"[]"* ]]; then
+  echo "expected unresolved [] placeholders to be removed from decision entry" >&2
+  exit 1
+fi
+if [[ "$sanitized_entry" != *"["*Z"]"* ]]; then
+  echo "expected placeholders to be replaced with concrete timestamp markers" >&2
+  exit 1
+fi
+if ! grep -q 'MAYOR_DECISION_LOG_TIMESTAMP_SANITIZED context=timestamp-sanitize-test' "$SGT_LOG"; then
+  echo "expected timestamp sanitization context event in SGT log" >&2
+  exit 1
+fi
 
 # Failure path: simulate append+fsync write error (read-only log file), ensure
 # explicit warning event is emitted, notify is cooldown deduped, and failure
