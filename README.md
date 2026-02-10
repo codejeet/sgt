@@ -128,6 +128,27 @@ export SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=3600
 
 Set `SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=0` to disable alert dedupe.
 
+## Refinery merge retries
+
+Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.
+
+- Retries only trigger for transient classes: `timeout`, `network`, `http-5xx`, and `secondary-rate-limit`.
+- Before each retry, refinery re-checks live PR state (`OPEN`) and head SHA; if either drifts, retry is skipped and the queue item is kept with refreshed `HEAD_SHA`.
+- Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
+
+Configure retry behavior with:
+
+```bash
+export SGT_REFINERY_MERGE_MAX_ATTEMPTS=3
+export SGT_REFINERY_MERGE_RETRY_BASE_MS=1000
+export SGT_REFINERY_MERGE_RETRY_JITTER_MS=400
+```
+
+Observability:
+- `REFINERY_MERGE_RETRY pr=#... attempt=<n>/<max> class=<class> delay_s=<seconds>`
+- `REFINERY_MERGE_RETRY_SKIP pr=#... attempt=<n>/<max> reason="..."`
+- `REFINERY_MERGE_FAILED pr=#... attempt=<n>/<max> class=<class> transient=<true|false> error="..."`
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.

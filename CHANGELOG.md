@@ -11,3 +11,5 @@
 - Mayor decision-log appends now use a lock + `fsync` durability path and route wake-dedupe skip logging through the same hardened append helper.
 - Decision-log write failures are now non-fatal in mayor cycles, emit structured warning metadata, surface in `sgt status`, and notify Rigger at most once per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`).
 - Added/expanded regression coverage for concurrent mayor decision-log appends plus simulated write-error warning/notify cooldown behavior in `test_mayor_decision_log_durability.sh`.
+- Refinery merge processing now retries transient `gh pr merge` failures with bounded attempts + jitter (`SGT_REFINERY_MERGE_MAX_ATTEMPTS`, `SGT_REFINERY_MERGE_RETRY_BASE_MS`, `SGT_REFINERY_MERGE_RETRY_JITTER_MS`), revalidates PR open/head state before each retry, and emits structured final-failure notify metadata including attempts/error class.
+- Added refinery merge resilience regression coverage for transient-then-success and retry-time head-drift skip paths in `test_refinery_merge_retry_resilience.sh`.
