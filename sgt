@@ -129,6 +129,9 @@ log_event() {
 _MAYOR_DECISION_LOG_LAST_ERROR=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
+_MERGE_QUEUE_PR_KEY=""
+_MERGE_QUEUE_PR_KEY_FILE=""
+_MERGE_QUEUE_DUPLICATE_QUEUE_FILE=""
 
 _decision_log_alert_cooldown_secs() {
   local raw="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}"
@@ -766,6 +769,128 @@ _merge_queue_set_head_sha() {
   else
     printf 'HEAD_SHA=%s\n' "$head_sha" >> "$queue_file"
   fi
+}
+
+_merge_queue_repo_pr_key() {
+  local repo="${1:-}" pr="${2:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  echo "${owner_repo}|pr=${pr}"
+}
+
+_merge_queue_repo_pr_key_id() {
+  local key="${1:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$key" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$key" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$key" | tr -c '[:alnum:]_.-' '_'
+  fi
+}
+
+_merge_queue_find_file_by_repo_pr() {
+  local repo="${1:-}" pr="${2:-}"
+  local owner_repo merge_dir mqf existing_pr existing_repo existing_owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  merge_dir="$SGT_CONFIG/merge-queue"
+  [[ -d "$merge_dir" ]] || return 1
+  for mqf in "$merge_dir"/*; do
+    [[ -f "$mqf" ]] || continue
+    existing_pr=$(grep -E '^PR=' "$mqf" 2>/dev/null | head -1 | cut -d= -f2-)
+    [[ "$existing_pr" == "$pr" ]] || continue
+    existing_repo=$(grep -E '^REPO=' "$mqf" 2>/dev/null | head -1 | cut -d= -f2-)
+    existing_owner_repo="$(_repo_owner_repo "$existing_repo")"
+    [[ -n "$existing_owner_repo" ]] || existing_owner_repo="$existing_repo"
+    if [[ "$existing_owner_repo" == "$owner_repo" ]]; then
+      echo "$mqf"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_merge_queue_claim_repo_pr() {
+  local repo="${1:-}" pr="${2:-}" queue_file="${3:-}" queue_name="${4:-}"
+  local key key_id key_dir key_file existing_queue
+  _MERGE_QUEUE_PR_KEY=""
+  _MERGE_QUEUE_PR_KEY_FILE=""
+  _MERGE_QUEUE_DUPLICATE_QUEUE_FILE=""
+  [[ -n "$repo" && -n "$pr" && -n "$queue_file" ]] || return 1
+
+  key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  key_id="$(_merge_queue_repo_pr_key_id "$key")"
+  key_dir="$SGT_CONFIG/merge-queue-keys"
+  key_file="$key_dir/$key_id"
+  mkdir -p "$key_dir" || return 1
+  _MERGE_QUEUE_PR_KEY="$key"
+  _MERGE_QUEUE_PR_KEY_FILE="$key_file"
+
+  existing_queue="$(_merge_queue_find_file_by_repo_pr "$repo" "$pr" 2>/dev/null || true)"
+  if [[ -n "$existing_queue" && -f "$existing_queue" ]]; then
+    _MERGE_QUEUE_DUPLICATE_QUEUE_FILE="$existing_queue"
+    if [[ ! -f "$key_file" ]]; then
+      if ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+        cat > "$key_file" <<EOF
+KEY=$key
+REPO=$repo
+PR=$pr
+QUEUE=${queue_name:-unknown}
+QUEUE_FILE=$existing_queue
+CLAIMED_AT=$(date -Iseconds)
+EOF
+      fi
+    fi
+    return 1
+  fi
+
+  if ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+    cat > "$key_file" <<EOF
+KEY=$key
+REPO=$repo
+PR=$pr
+QUEUE=${queue_name:-unknown}
+QUEUE_FILE=$queue_file
+CLAIMED_AT=$(date -Iseconds)
+EOF
+    return 0
+  fi
+
+  if [[ -f "$key_file" ]]; then
+    existing_queue=$(grep -E '^QUEUE_FILE=' "$key_file" 2>/dev/null | head -1 | cut -d= -f2-)
+    _MERGE_QUEUE_DUPLICATE_QUEUE_FILE="$existing_queue"
+    if [[ -z "$existing_queue" || ! -f "$existing_queue" ]]; then
+      rm -f "$key_file" 2>/dev/null || true
+      if ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+        cat > "$key_file" <<EOF
+KEY=$key
+REPO=$repo
+PR=$pr
+QUEUE=${queue_name:-unknown}
+QUEUE_FILE=$queue_file
+CLAIMED_AT=$(date -Iseconds)
+EOF
+        return 0
+      fi
+      existing_queue=$(grep -E '^QUEUE_FILE=' "$key_file" 2>/dev/null | head -1 | cut -d= -f2-)
+      _MERGE_QUEUE_DUPLICATE_QUEUE_FILE="$existing_queue"
+    fi
+  fi
+
+  return 1
+}
+
+_merge_queue_release_repo_pr() {
+  local repo="${1:-}" pr="${2:-}"
+  local key key_id key_dir key_file
+  [[ -n "$repo" && -n "$pr" ]] || return 0
+  key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  key_id="$(_merge_queue_repo_pr_key_id "$key")"
+  key_dir="$SGT_CONFIG/merge-queue-keys"
+  key_file="$key_dir/$key_id"
+  rm -f "$key_file" 2>/dev/null || true
 }
 
 _refinery_merge_attempt_key() {
@@ -2057,7 +2182,9 @@ _witness_loop() {
           mkdir -p "$SGT_CONFIG/merge-queue"
           local pr_head_sha
           pr_head_sha="$(_pr_head_sha "$p_repo" "$pr_number")"
-          cat > "$SGT_CONFIG/merge-queue/$pname" <<MQSTATE
+          local mqf="$SGT_CONFIG/merge-queue/$pname"
+          if _merge_queue_claim_repo_pr "$p_repo" "$pr_number" "$mqf" "$pname"; then
+            cat > "$mqf" <<MQSTATE
 POLECAT=$pname
 RIG=$rig
 REPO=$p_repo
@@ -2071,7 +2198,14 @@ TYPE=polecat
 QUEUED=$(date -Iseconds)
 MQSTATE
 
-          _wake_refinery "$rig" "pr-ready:$pname:#$pr_number"
+            _wake_refinery "$rig" "pr-ready:$pname:#$pr_number"
+          else
+            local duplicate_key duplicate_existing
+            duplicate_key="${_MERGE_QUEUE_PR_KEY:-unknown}"
+            duplicate_existing="$(basename "${_MERGE_QUEUE_DUPLICATE_QUEUE_FILE:-unknown}")"
+            echo "[witness/$rig] PR #$pr_number already queued — skipping duplicate alias $pname (existing=$duplicate_existing key=$duplicate_key)"
+            log_event "MERGE_QUEUE_DUPLICATE_SKIP actor=witness rig=$rig pr=#$pr_number reason_code=duplicate-queue-pr-key key=\"$(_escape_quotes "$duplicate_key")\" queue=$pname existing_queue=$duplicate_existing"
+          fi
 
           # Clean up polecat worktree + state
           if [[ -d "$p_worktree" ]]; then
@@ -2182,7 +2316,9 @@ MQSTATE
           mkdir -p "$SGT_CONFIG/merge-queue"
           local orphan_head_sha
           orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
-          cat > "$SGT_CONFIG/merge-queue/$orphan_pname" <<MQSTATE
+          local orphan_mqf="$SGT_CONFIG/merge-queue/$orphan_pname"
+          if _merge_queue_claim_repo_pr "$repo" "$pr_num" "$orphan_mqf" "$orphan_pname"; then
+            cat > "$orphan_mqf" <<MQSTATE
 POLECAT=$orphan_pname
 RIG=$rig
 REPO=$repo
@@ -2195,7 +2331,14 @@ TYPE=polecat
 QUEUED=$(date -Iseconds)
 MQSTATE
 
-          _wake_refinery "$rig" "orphan-pr:$orphan_pname:#$pr_num"
+            _wake_refinery "$rig" "orphan-pr:$orphan_pname:#$pr_num"
+          else
+            local duplicate_key duplicate_existing
+            duplicate_key="${_MERGE_QUEUE_PR_KEY:-unknown}"
+            duplicate_existing="$(basename "${_MERGE_QUEUE_DUPLICATE_QUEUE_FILE:-unknown}")"
+            echo "[witness/$rig] orphaned PR #$pr_num already queued — skipping duplicate alias $orphan_pname (existing=$duplicate_existing key=$duplicate_key)"
+            log_event "MERGE_QUEUE_DUPLICATE_SKIP actor=witness-orphan rig=$rig pr=#$pr_num reason_code=duplicate-queue-pr-key key=\"$(_escape_quotes "$duplicate_key")\" queue=$orphan_pname existing_queue=$duplicate_existing"
+          fi
         fi
       done <<< "$orphan_prs"
     fi
@@ -2564,12 +2707,14 @@ _refinery_loop() {
         if ! _has_sgt_authorized "$mq_repo" "$mq_issue"; then
           echo "[refinery/$rig] PR #$mq_pr linked issue #$mq_issue lacks sgt-authorized — skipping"
           log_event "REFINERY_SKIP_UNAUTHORIZED pr=#$mq_pr issue=#$mq_issue"
+          _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
           rm -f "$f"
           continue
         fi
       else
         echo "[refinery/$rig] PR #$mq_pr has no linked issue — skipping (unauthorized)"
         log_event "REFINERY_SKIP_NO_ISSUE pr=#$mq_pr"
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
         continue
       fi
@@ -2581,6 +2726,7 @@ _refinery_loop() {
       if [[ "$pr_state" == "MERGED" ]]; then
         echo "[refinery/$rig] PR #$mq_pr already merged — cleaning up"
         git -C "$(rig_path "$rig")" push origin --delete "$mq_branch" 2>/dev/null || true
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
         log_event "REFINERY_ALREADY_MERGED pr=#$mq_pr"
         continue
@@ -2588,6 +2734,7 @@ _refinery_loop() {
 
       if [[ "$pr_state" == "CLOSED" ]]; then
         echo "[refinery/$rig] PR #$mq_pr was closed — removing from queue"
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
         log_event "REFINERY_CLOSED pr=#$mq_pr"
         continue
@@ -2621,6 +2768,7 @@ _refinery_loop() {
         duplicate_reason="duplicate merge-attempt key (repo+pr+head) already processed"
         echo "[refinery/$rig] PR #$mq_pr duplicate merge skipped — reason_code=$duplicate_reason_code reason=\"$duplicate_reason\" key=$duplicate_key"
         log_event "REFINERY_DUPLICATE_SKIP pr=#$mq_pr issue=#$mq_issue reason_code=$duplicate_reason_code reason=\"$(_escape_quotes "$duplicate_reason")\" key=\"$(_escape_quotes "$duplicate_key")\" queue=$mqname"
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
         continue
       fi
@@ -2635,6 +2783,7 @@ _refinery_loop() {
         gh pr comment "$mq_pr" --repo "$mq_repo" \
           --body "[sgt-refinery] Merge conflict detected. Closing and re-dispatching." 2>/dev/null || true
         gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
         # Re-sling
         if [[ "$mq_issue" != "0" && -n "$mq_issue" ]]; then
@@ -2711,6 +2860,7 @@ _refinery_loop() {
           log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
           _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
           _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url"
+          _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
           rm -f "$f"
         else
           echo "[refinery/$rig] merge failed: $merge_result"
@@ -2723,6 +2873,7 @@ _refinery_loop() {
         # REJECTED — close PR, re-dispatch with feedback
         echo "[refinery/$rig] PR #$mq_pr rejected — dispatching rework"
         gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
+        _merge_queue_release_repo_pr "$mq_repo" "$mq_pr"
         rm -f "$f"
 
         if [[ "$mq_issue" != "0" && -n "$mq_issue" ]]; then
@@ -3558,7 +3709,7 @@ _mayor_loop() {
             mergeable=$(gh pr view "$pr_num" --repo "$repo" --json mergeable --jq '.mergeable' 2>/dev/null)
             if [[ "$mergeable" == "MERGEABLE" ]]; then
               local mqf="$SGT_CONFIG/merge-queue/${rname}-pr${pr_num}"
-              if [[ ! -f "$mqf" ]]; then
+              if _merge_queue_claim_repo_pr "$repo" "$pr_num" "$mqf" "${rname}-pr${pr_num}"; then
                 mkdir -p "$SGT_CONFIG/merge-queue"
                 local orphan_head_sha
                 orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
@@ -3575,6 +3726,12 @@ QUEUED=$(date -Iseconds)
 MQORPHAN
                 actions_taken+="  - queued orphaned PR #$pr_num ($rname) for refinery\n"
                 _wake_refinery "$rname" "orphan-pr:#$pr_num"
+              else
+                local duplicate_key duplicate_existing
+                duplicate_key="${_MERGE_QUEUE_PR_KEY:-unknown}"
+                duplicate_existing="$(basename "${_MERGE_QUEUE_DUPLICATE_QUEUE_FILE:-unknown}")"
+                echo "[mayor] orphaned PR #$pr_num already queued — skipping duplicate alias ${rname}-pr${pr_num} (existing=$duplicate_existing key=$duplicate_key)"
+                log_event "MERGE_QUEUE_DUPLICATE_SKIP actor=mayor rig=$rname pr=#$pr_num reason_code=duplicate-queue-pr-key key=\"$(_escape_quotes "$duplicate_key")\" queue=${rname}-pr${pr_num} existing_queue=$duplicate_existing"
               fi
             fi
           fi

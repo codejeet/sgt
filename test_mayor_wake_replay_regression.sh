@@ -80,6 +80,9 @@ echo "=== mayor critical alert cooldown dedupe ==="
 echo "=== mayor decision log durability ==="
 "$REPO_ROOT/test_mayor_decision_log_durability.sh"
 
+echo "=== mayor merge-queue alias dedupe ==="
+"$REPO_ROOT/test_mayor_merge_queue_alias_dedupe.sh"
+
 echo "=== refinery stale queue item guard ==="
 "$REPO_ROOT/test_refinery_stale_queue_item.sh"
 

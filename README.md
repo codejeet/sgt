@@ -149,6 +149,12 @@ export SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=3600
 
 Set `SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=0` to disable alert dedupe.
 
+Mayor/witness merge-queue enqueue is also repo+PR idempotent:
+- Queue admission is fenced by a durable `repo+PR` key under `~/.sgt/merge-queue-keys/`.
+- A single PR cannot be queued under multiple aliases (for example `sgt-691e731c` and `sgt-pr84`).
+- Duplicate alias enqueue attempts are skipped and emitted as structured activity logs:
+  `MERGE_QUEUE_DUPLICATE_SKIP actor=<mayor|witness|witness-orphan> rig=<rig> pr=#<n> reason_code=duplicate-queue-pr-key key="owner/repo|pr=<n>" queue=<alias> existing_queue=<alias>`
+
 ## Refinery merge retries
 
 Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.
