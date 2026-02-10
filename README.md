@@ -500,6 +500,12 @@ Rig naming conventions for query/revalidation paths:
 - If queue/polecat metadata contains an unknown rig, missing repo, invalid repo format, or repo that does not match the rig mapping, SGT now hard-fails that query path instead of treating it as an empty result.
 - Resolver failures emit explicit telemetry: `RIG_REPO_RESOLVE_ERROR ... reason_code=<unknown-rig|missing-repo|invalid-repo|repo-mismatch|...>`.
 
+## Troubleshooting
+
+- Symptom: `sgt status` crashes in CI, cron, or other non-interactive shells with an unbound variable / terminal-width probe error.
+- Current behavior: terminal width detection is best-effort and non-fatal. If `COLUMNS` is unset/invalid or `TERM` is unset (so `tput cols` fails), SGT falls back to a safe width (`80`, with a minimum guarded render width of `40`) and `sgt status` continues.
+- Verify this path with `./test_status_non_tty_term_cols_guard.sh`, which covers non-tty runs with `TERM` unset and malformed/missing `COLUMNS`.
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.

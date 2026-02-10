@@ -112,6 +112,7 @@ _section() {
   local title="$1"
   local cols fill
   cols=$(_term_cols)
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
   # "╭─ " + title + " " + fill + "╮"
   fill=$(( cols - ${#title} - 6 ))
   (( fill < 0 )) && fill=0
