@@ -209,6 +209,49 @@ _dispatch_cooldown_secs() {
   echo "$raw"
 }
 
+_mayor_pre_dispatch_revalidate() {
+  local repo="${1:-}"
+  local owner_repo owner name snapshot open_prs open_authorized
+  owner_repo="$(_repo_owner_repo "$repo")"
+  owner="${owner_repo%%/*}"
+  name="${owner_repo#*/}"
+
+  if [[ -z "$owner" || -z "$name" || "$owner" == "$name" ]]; then
+    echo "revalidation failed: invalid repo '$repo'"
+    return 1
+  fi
+
+  snapshot=$(
+    gh api graphql \
+      -f query='query($owner:String!, $name:String!) {
+        repository(owner:$owner, name:$name) {
+          openPullRequests: pullRequests(states: OPEN) { totalCount }
+          openAuthorizedIssues: issues(states: OPEN, labels: ["sgt-authorized"]) { totalCount }
+        }
+      }' \
+      -F owner="$owner" \
+      -F name="$name" \
+      --jq '.data.repository | "\(.openPullRequests.totalCount)|\(.openAuthorizedIssues.totalCount)"' \
+      2>/dev/null || true
+  )
+
+  if [[ -z "$snapshot" || "$snapshot" != *"|"* ]]; then
+    echo "revalidation failed: unable to query live state"
+    return 1
+  fi
+
+  IFS='|' read -r open_prs open_authorized <<< "$snapshot"
+  [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=-1
+  [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=-1
+
+  if [[ "$open_prs" -ne 0 || "$open_authorized" -ne 0 ]]; then
+    echo "live state dirty: open_prs=$open_prs open_authorized_issues=$open_authorized"
+    return 1
+  fi
+
+  return 0
+}
+
 _find_recent_duplicate_issue() {
   local repo="${1:-}" title="${2:-}" cooldown_secs="${3:-0}"
   shift 3 || true
@@ -631,6 +674,22 @@ cmd_sling() {
       warn "suppressing duplicate dispatch: #$dup_number ($dup_state, ${dup_age}s ago) matches symptom signature"
       log_event "SLING_SUPPRESS_DUPLICATE rig=$rig match=#$dup_number cooldown=${dispatch_cooldown}s title=\"$(_escape_quotes "$task")\""
       info "duplicate issue within cooldown: $dup_url"
+      return 0
+    fi
+  fi
+
+  if [[ "${SGT_MAYOR_DISPATCH_REVALIDATE:-0}" == "1" ]]; then
+    local revalidation_reason ts
+    if ! revalidation_reason=$(_mayor_pre_dispatch_revalidate "$repo"); then
+      ts="$(date '+%Y-%m-%d %H:%M:%S')"
+      echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
+      {
+        echo "[$ts] MAYOR DISPATCH SKIP (stale-state)"
+        echo "  rig=$rig"
+        echo "  reason=$revalidation_reason"
+        echo "  task=\"$(_escape_quotes "$task")\""
+      } >> "$SGT_CONFIG/mayor-decisions.log"
+      log_event "MAYOR_DISPATCH_SKIP_STALE rig=$rig reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
       return 0
     fi
   fi
@@ -2576,7 +2635,7 @@ MAYORMD
 
       local backend="$(_ai_backend_default)"
 
-      if timeout 300 bash -c "_ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
+      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
