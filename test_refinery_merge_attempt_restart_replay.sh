@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_refinery_pr_ready_dedupe.sh — Regression check for duplicate PR-ready queue replay dedupe.
+# test_refinery_merge_attempt_restart_replay.sh - Regression check for durable merge-attempt dedupe across refinery restart replay.
 
 set -euo pipefail
 
@@ -56,7 +56,7 @@ if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then
   done
   case "$json_fields" in
     labels) echo "sgt-authorized" ;;
-    title) echo "Replay dedupe issue" ;;
+    title) echo "Restart replay issue" ;;
     body) echo "Issue body" ;;
     *) echo "" ;;
   esac
@@ -85,7 +85,7 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
   done
 
   case "$json_fields" in
-    title) echo "Replay dedupe PR" ;;
+    title) echo "Restart replay PR" ;;
     state) echo "OPEN" ;;
     mergeable) echo "MERGEABLE" ;;
     state,headRefOid) echo "OPEN|abc123" ;;
@@ -106,8 +106,8 @@ fi
 
 if [[ "${1:-}" == "pr" && "${2:-}" == "merge" ]]; then
   inc_file "$MERGE_CALLS_FILE" >/dev/null
-  echo "merged"
-  exit 0
+  echo "HTTP 500 Internal Server Error: upstream failed" >&2
+  exit 1
 fi
 
 if [[ "${1:-}" == "pr" && "${2:-}" == "comment" ]]; then
@@ -129,6 +129,7 @@ env -i \
   TERM="${TERM:-xterm}" \
   SGT_ROOT="$HOME_DIR/sgt" \
   SGT_MOCK_MERGE_CALLS="$MERGE_CALLS" \
+  SGT_REFINERY_MERGE_MAX_ATTEMPTS=1 \
   bash --noprofile --norc -c '
 set -euo pipefail
 
@@ -136,8 +137,8 @@ sgt init >/dev/null
 mkdir -p "$SGT_ROOT/rigs/test"
 printf "https://github.com/acme/demo\n" > "$SGT_ROOT/.sgt/rigs/test"
 
-cat > "$SGT_ROOT/.sgt/merge-queue/test-pr123-a" <<MQ
-POLECAT=test-pr123-a
+cat > "$SGT_ROOT/.sgt/merge-queue/test-pr123" <<MQ
+POLECAT=test-pr123
 RIG=test
 REPO=https://github.com/acme/demo
 BRANCH=sgt/test-pr123
@@ -149,22 +150,8 @@ TYPE=polecat
 QUEUED=$(date -Iseconds)
 MQ
 
-cat > "$SGT_ROOT/.sgt/merge-queue/test-pr123-b" <<MQ
-POLECAT=test-pr123-b
-RIG=test
-REPO=https://github.com/acme/demo
-BRANCH=sgt/test-pr123-replay
-ISSUE=77
-PR=123
-HEAD_SHA=abc123
-AUTO_MERGE=true
-TYPE=polecat
-QUEUED=$(date -Iseconds)
-MQ
-
-timeout 6 sgt _refinery test > "$SGT_ROOT/refinery.out" 2>&1 &
+timeout 6 sgt _refinery test > "$SGT_ROOT/refinery-pass1.out" 2>&1 &
 pid=$!
-
 for _ in $(seq 1 120); do
   fifo="$SGT_ROOT/.sgt/refinery-test.fifo"
   if [[ -p "$fifo" ]]; then
@@ -173,29 +160,50 @@ for _ in $(seq 1 120); do
   fi
   sleep 0.05
 done
+wait "$pid" || true
 
+timeout 6 sgt _refinery test > "$SGT_ROOT/refinery-pass2.out" 2>&1 &
+pid=$!
+for _ in $(seq 1 120); do
+  fifo="$SGT_ROOT/.sgt/refinery-test.fifo"
+  if [[ -p "$fifo" ]]; then
+    printf "test-wake\n" > "$fifo"
+    break
+  fi
+  sleep 0.05
+done
 wait "$pid" || true
 '
 
 if [[ "$(cat "$MERGE_CALLS")" != "1" ]]; then
-  echo "expected exactly one merge attempt for duplicate PR-ready replay" >&2
+  echo "expected exactly one merge attempt across restart replay" >&2
   exit 1
 fi
 
-OUT_FILE="$HOME_DIR/sgt/refinery.out"
-if ! grep -q 'duplicate merge skipped — reason_code=duplicate-merge-attempt-key' "$OUT_FILE"; then
-  echo "expected structured duplicate skip status line in refinery output" >&2
+OUT_FIRST="$HOME_DIR/sgt/refinery-pass1.out"
+if ! grep -q 'merge failed:' "$OUT_FIRST"; then
+  echo "expected first refinery pass to record merge failure" >&2
+  exit 1
+fi
+
+OUT_SECOND="$HOME_DIR/sgt/refinery-pass2.out"
+if ! grep -q 'duplicate merge skipped — reason_code=duplicate-merge-attempt-key' "$OUT_SECOND"; then
+  echo "expected restart replay to skip duplicate merge attempt with structured reason" >&2
   exit 1
 fi
 
 LOG_FILE="$HOME_DIR/sgt/sgt.log"
+if ! grep -q 'REFINERY_MERGE_FAILED pr=#123 attempt=1/1' "$LOG_FILE"; then
+  echo "expected structured merge failure event in log" >&2
+  exit 1
+fi
 if ! grep -q 'REFINERY_DUPLICATE_SKIP pr=#123 issue=#77 reason_code=duplicate-merge-attempt-key' "$LOG_FILE"; then
-  echo "expected structured duplicate skip log event" >&2
+  echo "expected structured duplicate replay skip event in log" >&2
   exit 1
 fi
 
 if [[ -n "$(ls -A "$HOME_DIR/sgt/.sgt/merge-queue" 2>/dev/null || true)" ]]; then
-  echo "expected duplicate queue replay entries to be fully drained" >&2
+  echo "expected replayed queue entry to be drained after duplicate skip" >&2
   exit 1
 fi
 

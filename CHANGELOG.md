@@ -16,6 +16,9 @@
 - Refinery merge attempts now claim an idempotency key (`repo+PR+head SHA`) so duplicate PR-ready queue replays for the same head are explicitly skipped before merge/conflict/reject side effects run.
 - Duplicate replay skips now emit explicit status output (`duplicate event ignored`) and structured activity log events (`REFINERY_DUPLICATE_SKIP ... key="owner/repo|pr=<n>|head=<sha>"`).
 - Added regression coverage for duplicate PR-ready queue replay dedupe in `test_refinery_pr_ready_dedupe.sh` (also wired into `test_mayor_wake_replay_regression.sh`).
+- Hardened refinery merge idempotency fence: merge-attempt key claims are now atomic and duplicate skips include a structured `reason_code=duplicate-merge-attempt-key`.
+- Merge-attempt keys are now durable once merge is attempted, preventing duplicate merge actions for the same `repo+PR+head SHA` across retries, cycles, and refinery restarts.
+- Added restart replay regression coverage in `test_refinery_merge_attempt_restart_replay.sh` and wired it into `test_mayor_wake_replay_regression.sh`.
 - Witness/refinery stale-close hard-stop: re-sling now enforces a final dispatch-instant gate that aborts spawn when the linked issue is not `OPEN` or when the source PR is not `OPEN`/`MERGEABLE`.
 - Re-sling stale/final-gate skip logging now records structured forensic fields including `source_event_key` and `skip_reason` (`RESLING_SKIP_STALE`, `RESLING_SKIP_FINAL_GATE`).
 - Expanded stale replay regression coverage in `test_refinery_stale_post_merge_redispatch.sh` to reproduce a late `CLOSED`/`MERGED` event replay where stale pre-check passes but dispatch-instant gate blocks spawn.
