@@ -118,6 +118,8 @@ _notify_openclaw() {
   local channel="" to="" reply_to=""
   local notify_out=""
 
+  # Keep `2>/dev/null` before `<<'PY'` inside $(...) to avoid bash's
+  # "unterminated here-document" parser warning from the legacy ordering.
   if command -v python3 &>/dev/null; then
     notify_out="$(
       python3 - "$SGT_NOTIFY" 2>/dev/null <<'PY'
