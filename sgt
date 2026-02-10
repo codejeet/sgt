@@ -1082,6 +1082,16 @@ _refinery_merge_error_is_transient() {
   esac
 }
 
+_refinery_merge_error_requires_auto_retry_reason() {
+  local raw="${1:-}" lc
+  lc="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lc" =~ requires?[[:space:]-]*auto[[:space:]-]*merge|auto[[:space:]-]*merge[[:space:]]+is[[:space:]]+required|must[[:space:]]+use[[:space:]-]*auto[[:space:]-]*merge|branch[[:space:]]+policy[^[:cntrl:]]*auto[[:space:]-]*merge|enable[[:space:]]+pull[[:space:]]+request[[:space:]-]*auto[[:space:]-]*merge|enablepullrequestautomerge ]]; then
+    echo "branch-policy-requires-auto-merge"
+    return 0
+  fi
+  return 1
+}
+
 _refinery_revalidate_pr_open_head() {
   local repo="${1:-}" pr="${2:-}" expected_head_sha="${3:-}" queue_file="${4:-}"
   local live_snapshot live_state live_head_sha
@@ -2861,6 +2871,7 @@ _refinery_loop() {
         # APPROVED — merge (bounded retry for transient errors).
         local merge_attempt max_attempts merge_result merge_error_class merge_success=false
         local merge_error_transient=false merge_skip_reason="" merge_expected_head_sha
+        local merge_auto_retry_attempted=false merge_auto_retry_reason=""
         max_attempts="$(_refinery_merge_retry_max_attempts)"
         merge_expected_head_sha="$live_head_sha"
         merge_attempt=1
@@ -2871,6 +2882,35 @@ _refinery_loop() {
             merge_success=true
             break
           fi
+
+          if [[ "$merge_auto_retry_attempted" != "true" ]] && merge_auto_retry_reason="$(_refinery_merge_error_requires_auto_retry_reason "$merge_result")"; then
+            local auto_retry_live_head
+            merge_auto_retry_attempted=true
+            if ! auto_retry_live_head=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$merge_expected_head_sha" "$f"); then
+              merge_skip_reason="$auto_retry_live_head"
+              echo "[refinery/$rig] PR #$mq_pr auto-merge retry skipped — $merge_skip_reason"
+              log_event "REFINERY_MERGE_RETRY_AUTO repo=$mq_owner_repo pr=#$mq_pr reason=$merge_auto_retry_reason outcome=skipped final_reason=\"$(_escape_quotes "$merge_skip_reason")\""
+              break
+            fi
+            merge_expected_head_sha="$auto_retry_live_head"
+
+            echo "[refinery/$rig] PR #$mq_pr merge failed due to branch policy requiring auto-merge — retrying once with --auto"
+            if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch --auto 2>&1); then
+              merge_success=true
+              log_event "REFINERY_MERGE_RETRY_AUTO repo=$mq_owner_repo pr=#$mq_pr reason=$merge_auto_retry_reason outcome=success"
+              break
+            fi
+
+            merge_error_class="$(_refinery_merge_error_class "$merge_result")"
+            if _refinery_merge_error_is_transient "$merge_error_class"; then
+              merge_error_transient=true
+            else
+              merge_error_transient=false
+            fi
+            log_event "REFINERY_MERGE_RETRY_AUTO repo=$mq_owner_repo pr=#$mq_pr reason=$merge_auto_retry_reason outcome=failed final_class=$merge_error_class final_error=\"$(_escape_quotes "$merge_result")\""
+            break
+          fi
+
           merge_error_class="$(_refinery_merge_error_class "$merge_result")"
           if _refinery_merge_error_is_transient "$merge_error_class"; then
             merge_error_transient=true
