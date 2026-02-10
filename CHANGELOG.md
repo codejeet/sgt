@@ -11,6 +11,8 @@
 - Mayor decision-log appends now use a lock + `fsync` durability path and route wake-dedupe skip logging through the same hardened append helper.
 - Decision-log write failures are now non-fatal in mayor cycles, emit structured warning metadata, surface in `sgt status`, and notify Rigger at most once per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`).
 - Added/expanded regression coverage for concurrent mayor decision-log appends plus simulated write-error warning/notify cooldown behavior in `test_mayor_decision_log_durability.sh`.
+- Mayor now runs a stalled refinery review watchdog: PR queue items stuck in `REVIEW_UNCLEAR` past `SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS` trigger one escalated notify per PR review-state transition, with age surfaced in `sgt status`.
+- Added regression coverage for watchdog threshold boundary and transition dedupe in `test_mayor_review_watchdog.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Refinery merge processing now retries transient `gh pr merge` failures with bounded attempts + jitter (`SGT_REFINERY_MERGE_MAX_ATTEMPTS`, `SGT_REFINERY_MERGE_RETRY_BASE_MS`, `SGT_REFINERY_MERGE_RETRY_JITTER_MS`), revalidates PR open/head state before each retry, and emits structured final-failure notify metadata including attempts/error class.
 - Added refinery merge resilience regression coverage for transient-then-success and retry-time head-drift skip paths in `test_refinery_merge_retry_resilience.sh`.
 - Refinery merge attempts now claim an idempotency key (`repo+PR+head SHA`) so duplicate PR-ready queue replays for the same head are explicitly skipped before merge/conflict/reject side effects run.

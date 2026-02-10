@@ -77,6 +77,9 @@ echo "=== mayor snapshot freshness guard ==="
 echo "=== mayor critical alert cooldown dedupe ==="
 "$REPO_ROOT/test_mayor_critical_alert_cooldown.sh"
 
+echo "=== mayor stalled refinery REVIEW_UNCLEAR watchdog ==="
+"$REPO_ROOT/test_mayor_review_watchdog.sh"
+
 echo "=== mayor decision log durability ==="
 "$REPO_ROOT/test_mayor_decision_log_durability.sh"
 

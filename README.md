@@ -149,6 +149,16 @@ export SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=3600
 
 Set `SGT_MAYOR_CRITICAL_ALERT_COOLDOWN=0` to disable alert dedupe.
 
+Mayor also watches refinery queue items that are stuck in `REVIEW_UNCLEAR`:
+- Queue items that remain in `REVIEW_UNCLEAR` for at least the stale threshold are escalated once per PR review-state transition.
+- Escalations include stale age and direct PR/issue URLs.
+- `sgt status` surfaces watchdog health with stale age (`oldest=<n>s`) and active threshold.
+- Default stale threshold is `900` seconds (`15` minutes), configurable with:
+
+```bash
+export SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS=900
+```
+
 ## Refinery merge retries
 
 Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.
@@ -197,7 +207,7 @@ Witness/refinery re-dispatches also apply live stale-event guards immediately be
 
 ## OpenClaw notifications
 
-SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued); periodic all-clear checks stay quiet.
+SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued), and escalated watchdog alerts for stalled `REVIEW_UNCLEAR` refinery items; periodic all-clear checks stay quiet.
 
 1. Create a notification config at `$SGT_ROOT/.sgt/notify.json` (default `~/sgt/.sgt/notify.json`).
 2. Set routing options: `channel` (default `last`), optional `to`, optional `reply_to` (or `reply-to`).
