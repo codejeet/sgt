@@ -25,6 +25,8 @@
 - Hardened refinery merge idempotency fence: merge-attempt key claims are now atomic and duplicate skips include a structured `reason_code=duplicate-merge-attempt-key`.
 - Merge-attempt keys are now durable once merge is attempted, preventing duplicate merge actions for the same `repo+PR+head SHA` across retries, cycles, and refinery restarts.
 - Added restart replay regression coverage in `test_refinery_merge_attempt_restart_replay.sh` and wired it into `test_mayor_wake_replay_regression.sh`.
+- Refinery merge hardening now captures reviewed head SHA, then performs an immediate pre-merge stale-head revalidation; when head changed after review, merge aborts with explicit operator output and structured `REFINERY_PREMERGE_SKIP ... reason_code=stale-reviewed-head` telemetry.
+- Expanded `test_refinery_stale_queue_item.sh` to cover both stale-head race (skip) and normal flow (merge) with reviewed-head guard call sequencing.
 - Witness/refinery stale-close hard-stop: re-sling now enforces a final dispatch-instant gate that aborts spawn when the linked issue is not `OPEN` or when the source PR is not `OPEN`/`MERGEABLE`.
 - Re-sling stale/final-gate skip logging now records structured forensic fields including `source_event_key` and `skip_reason` (`RESLING_SKIP_STALE`, `RESLING_SKIP_FINAL_GATE`).
 - Expanded stale replay regression coverage in `test_refinery_stale_post_merge_redispatch.sh` to reproduce a late `CLOSED`/`MERGED` event replay where stale pre-check passes but dispatch-instant gate blocks spawn.

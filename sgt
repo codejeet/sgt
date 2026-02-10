@@ -1339,6 +1339,7 @@ TYPE=polecat
 REVIEW_STATE=REVIEW_PENDING
 REVIEW_UPDATED_AT=$(date +%s)
 REVIEW_UNCLEAR_SINCE=
+REVIEWED_HEAD_SHA=
 QUEUED=$(date -Iseconds)
 MQSTATE
   return 0
@@ -1483,6 +1484,33 @@ _refinery_revalidate_pr_open_head() {
       _merge_queue_set_head_sha "$queue_file" "$live_head_sha" || true
     fi
     echo "head sha drifted expected=${expected_head_sha:-unknown} live=${live_head_sha:-unknown}"
+    return 1
+  fi
+  echo "$live_head_sha"
+}
+
+_refinery_premerge_revalidate_reviewed_head() {
+  local repo="${1:-}" pr="${2:-}" reviewed_head_sha="${3:-}" queue_file="${4:-}"
+  local live_snapshot live_state live_head_sha
+  live_snapshot=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
+  if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
+    echo "unable to query live PR state"
+    return 1
+  fi
+  IFS='|' read -r live_state live_head_sha <<< "$live_snapshot"
+  if [[ "$live_state" != "OPEN" ]]; then
+    echo "pr state drifted to ${live_state:-unknown}"
+    return 1
+  fi
+  if [[ -z "$reviewed_head_sha" ]]; then
+    echo "missing reviewed head sha"
+    return 1
+  fi
+  if [[ "$live_head_sha" != "$reviewed_head_sha" ]]; then
+    if [[ -n "$queue_file" ]]; then
+      _merge_queue_set_head_sha "$queue_file" "$live_head_sha" || true
+    fi
+    echo "stale-reviewed-head reviewed=${reviewed_head_sha:-unknown} live=${live_head_sha:-unknown}"
     return 1
   fi
   echo "$live_head_sha"
@@ -3113,8 +3141,8 @@ _refinery_loop() {
       mqname="$(basename "$f")"
 
       local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
-      local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE)=' "$f")"
+      local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since="" mq_reviewed_head_sha=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEWED_HEAD_SHA)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -3127,6 +3155,7 @@ _refinery_loop() {
       mq_review_state="${REVIEW_STATE:-REVIEW_PENDING}"
       mq_review_updated_at="${REVIEW_UPDATED_AT:-}"
       mq_review_unclear_since="${REVIEW_UNCLEAR_SINCE:-}"
+      mq_reviewed_head_sha="${REVIEWED_HEAD_SHA:-}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
@@ -3235,14 +3264,34 @@ _refinery_loop() {
       set -e
       if [[ "$review_rc" -eq 0 ]]; then
         _merge_queue_mark_review_state "$f" "REVIEW_APPROVED" || true
-        # Revalidate immediately before merge to prevent stale queue merges.
-        local live_head_sha premerge_reason=""
-        if ! live_head_sha=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$mq_head_sha" "$f"); then
-          premerge_reason="$live_head_sha"
+        # Capture reviewed head SHA, then revalidate immediately before merge against that reviewed SHA.
+        local reviewed_head_sha reviewed_head_reason="" premerge_live_head premerge_reason=""
+        if ! reviewed_head_sha=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "" "$f"); then
+          reviewed_head_reason="$reviewed_head_sha"
+        fi
+        if [[ -n "$reviewed_head_reason" ]]; then
+          echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation failed — skipping ($reviewed_head_reason)"
+          log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason_code=reviewed-head-capture-failed reason=\"$(_escape_quotes "$reviewed_head_reason")\""
+          _refinery_merge_attempt_release "$claimed_attempt_file"
+          continue
+        fi
+        mq_reviewed_head_sha="$reviewed_head_sha"
+        _merge_queue_set_field "$f" "REVIEWED_HEAD_SHA" "$mq_reviewed_head_sha" || true
+
+        if ! premerge_live_head=$(_refinery_premerge_revalidate_reviewed_head "$mq_repo" "$mq_pr" "$mq_reviewed_head_sha" "$f"); then
+          premerge_reason="$premerge_live_head"
         fi
         if [[ -n "$premerge_reason" ]]; then
-          echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation drift — skipping ($premerge_reason)"
-          log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason=\"$(_escape_quotes "$premerge_reason")\""
+          if [[ "$premerge_reason" =~ ^stale-reviewed-head[[:space:]]+reviewed=([^[:space:]]+)[[:space:]]+live=([^[:space:]]+) ]]; then
+            local reviewed_from_reason live_from_reason
+            reviewed_from_reason="${BASH_REMATCH[1]}"
+            live_from_reason="${BASH_REMATCH[2]}"
+            echo "[refinery/$rig] PR #$mq_pr pre-merge stale-head guard — skipping (reviewed=$reviewed_from_reason live=$live_from_reason)"
+            log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason_code=stale-reviewed-head reviewed_head=$reviewed_from_reason live_head=$live_from_reason reason=\"$(_escape_quotes "$premerge_reason")\""
+          else
+            echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation failed — skipping ($premerge_reason)"
+            log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason_code=premerge-revalidation-failed reason=\"$(_escape_quotes "$premerge_reason")\""
+          fi
           _refinery_merge_attempt_release "$claimed_attempt_file"
           continue
         fi
@@ -3252,7 +3301,7 @@ _refinery_loop() {
         local merge_error_transient=false merge_skip_reason="" merge_expected_head_sha
         local merge_auto_retry_attempted=false merge_auto_retry_reason=""
         max_attempts="$(_refinery_merge_retry_max_attempts)"
-        merge_expected_head_sha="$live_head_sha"
+        merge_expected_head_sha="$premerge_live_head"
         merge_attempt=1
         merge_error_class="non-transient"
         echo "[refinery/$rig] merging PR #$mq_pr (max attempts=$max_attempts)..."
