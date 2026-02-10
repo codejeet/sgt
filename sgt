@@ -25,6 +25,8 @@ SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
+SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
+SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
@@ -115,30 +117,88 @@ log_event() {
 
 _MAYOR_DECISION_LOG_LAST_ERROR=""
 
+_decision_log_alert_cooldown_secs() {
+  local raw="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="600"
+  fi
+  echo "$raw"
+}
+
+_mayor_decision_log_failure_state_read() {
+  local ts="" context="" workspace="" error=""
+  if [[ -f "$SGT_MAYOR_DECISION_LOG_ALERT_STATE" ]]; then
+    IFS='|' read -r ts context workspace error < "$SGT_MAYOR_DECISION_LOG_ALERT_STATE" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  echo "${ts}|${context}|${workspace}|${error}"
+}
+
+_mayor_decision_log_failure_state_write() {
+  local ts="${1:-}" context="${2:-}" workspace="${3:-}" error="${4:-}"
+  local state_tmp="${SGT_MAYOR_DECISION_LOG_ALERT_STATE}.tmp.$$"
+  printf '%s|%s|%s|%s\n' \
+    "$ts" \
+    "$(_escape_wake_value "$context")" \
+    "$(_escape_wake_value "$workspace")" \
+    "$(_escape_wake_value "$error")" > "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_DECISION_LOG_ALERT_STATE"
+}
+
+_mayor_decision_log_failure_state_clear() {
+  rm -f "$SGT_MAYOR_DECISION_LOG_ALERT_STATE"
+}
+
 _mayor_decision_log_append() {
   local entry="${1:-}"
   local workspace="${2:-$SGT_ROOT}"
   local log_file="$SGT_CONFIG/mayor-decisions.log"
+  local py_bin payload py_out
   local ts
   ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _MAYOR_DECISION_LOG_LAST_ERROR=""
-
-  if ! command -v flock >/dev/null 2>&1; then
-    _MAYOR_DECISION_LOG_LAST_ERROR="flock command not found"
-    return 1
-  fi
 
   if ! mkdir -p "$SGT_CONFIG" 2>/dev/null; then
     _MAYOR_DECISION_LOG_LAST_ERROR="failed to create $SGT_CONFIG"
     return 1
   fi
 
-  if ! {
-    flock -x 9 &&
-    printf '[%s] workspace=%s\n' "$ts" "$workspace" >&9 &&
-    printf '%s\n' "$entry" >&9
-  } 9>>"$log_file" 2>/dev/null; then
-    _MAYOR_DECISION_LOG_LAST_ERROR="failed to append $log_file"
+  py_bin="$(command -v python3 || command -v python || true)"
+  if [[ -z "$py_bin" ]]; then
+    _MAYOR_DECISION_LOG_LAST_ERROR="python command not found"
+    return 1
+  fi
+
+  payload="$(printf '[%s] workspace=%s\n%s\n' "$ts" "$workspace" "$entry")"
+  if ! py_out="$(
+    SGT_MAYOR_DECISION_LOG_APPEND_PAYLOAD="$payload" \
+      "$py_bin" - "$log_file" 2>&1 <<'PY'
+import fcntl
+import os
+import sys
+
+path = sys.argv[1]
+payload = os.environ.get("SGT_MAYOR_DECISION_LOG_APPEND_PAYLOAD", "").encode("utf-8")
+if payload and not payload.endswith(b"\n"):
+    payload += b"\n"
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    offset = 0
+    while offset < len(payload):
+        wrote = os.write(fd, payload[offset:])
+        if wrote <= 0:
+            raise RuntimeError("short write")
+        offset += wrote
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  )"; then
+    py_out="$(_one_line "${py_out:-append failed}")"
+    _MAYOR_DECISION_LOG_LAST_ERROR="failed to append+fsync $log_file ($py_out)"
     return 1
   fi
 }
@@ -148,12 +208,36 @@ _mayor_record_decision() {
   local context="${2:-cycle}"
   local workspace="${3:-$SGT_ROOT}"
   if _mayor_decision_log_append "$entry" "$workspace"; then
+    _mayor_decision_log_failure_state_clear
     return 0
   fi
-  local err
+  local err now cooldown prev_ts prev_context prev_workspace prev_error age notify_status warn_line
   err="$(_escape_quotes "${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}")"
-  echo "[mayor] decision log write failed ($context): ${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}"
-  log_event "MAYOR_DECISION_LOG_WRITE_FAILED context=$context workspace=\"$(_escape_quotes "$workspace")\" error=\"$err\""
+  now="$(date +%s)"
+  cooldown="$(_decision_log_alert_cooldown_secs)"
+  IFS='|' read -r prev_ts prev_context prev_workspace prev_error <<< "$(_mayor_decision_log_failure_state_read)"
+  age=0
+  if [[ "$prev_ts" =~ ^[0-9]+$ ]]; then
+    age=$((now - prev_ts))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+  fi
+  _mayor_decision_log_failure_state_write "$now" "$context" "$workspace" "${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}"
+
+  if [[ ! "$prev_ts" =~ ^[0-9]+$ || "$cooldown" -eq 0 || "$age" -ge "$cooldown" ]]; then
+    if _mayor_notify_rigger "mayor warning: decision-log write failed context=$context error=${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}"; then
+      notify_status="sent"
+    else
+      notify_status="unavailable"
+    fi
+  else
+    notify_status="suppressed"
+  fi
+
+  warn_line="MAYOR_DECISION_LOG_WRITE_FAILED context=$context workspace=\"$(_escape_quotes "$workspace")\" error=\"$err\" notify=$notify_status cooldown=${cooldown}s"
+  echo "[mayor] warning: $warn_line"
+  log_event "$warn_line"
   return 1
 }
 
@@ -1118,6 +1202,15 @@ cmd_status() {
   local mayor_alive="off"
   tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
   printf "  %-16s %s\n" "mayor" "$(_status_badge "$mayor_alive")"
+  local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
+  IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
+  if [[ "$log_fail_ts" =~ ^[0-9]+$ ]]; then
+    log_fail_age=$(( $(date +%s) - log_fail_ts ))
+    if [[ "$log_fail_age" -lt 0 ]]; then
+      log_fail_age=0
+    fi
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "decision-log warning: ${log_fail_age}s ago context=$log_fail_context error=$log_fail_error" "$(_reset)"
+  fi
 
   _section "Dogs"
   local dog_count=0
@@ -2758,7 +2851,7 @@ _mayor_loop() {
           skip_reason="duplicate wake trigger suppressed (key=$event_key age=${age}s ttl=${wake_dedupe_ttl}s)"
           echo "[mayor] wake skipped - $skip_reason"
           _mayor_notify_rigger "mayor skip: $skip_reason"
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] MAYOR WAKE SKIP (duplicate-trigger) $skip_reason" >> "$SGT_CONFIG/mayor-decisions.log"
+          _mayor_record_decision "MAYOR WAKE SKIP (duplicate-trigger) $skip_reason" "wake-dedupe-skip" "$SGT_ROOT" || true
           continue
         fi
         if [[ -n "$event_key" ]]; then
@@ -3057,7 +3150,9 @@ _mayor_notify_rigger() {
     _notify_openclaw "[SGT Mayor] $message"
     echo "[mayor] notified Rigger: $message"
     log_event "MAYOR_NOTIFY_RIGGER $message"
+    return 0
   fi
+  return 1
 }
 
 # Public command: sgt mayor notify "<message>" — lets AI mayor report to Rigger
@@ -3977,6 +4072,7 @@ Environment:
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
+  SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
 

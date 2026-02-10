@@ -86,8 +86,10 @@ Mayor cycle decisions also protect against stale snapshot text in generated `CLA
 
 Mayor decision logging is durable:
 - Decision entries are appended atomically under a file lock.
+- Each append is explicitly flushed with `fsync` before returning.
 - Each entry is prefixed with a UTC ISO-8601 timestamp and `workspace=<path>`.
-- If a decision-log write fails, mayor continues the cycle and emits `MAYOR_DECISION_LOG_WRITE_FAILED` to `~/.sgt/sgt.log`.
+- If a decision-log write fails, mayor continues the cycle, emits structured `MAYOR_DECISION_LOG_WRITE_FAILED ... notify=<sent|suppressed|unavailable>` metadata to `~/.sgt/sgt.log`, and surfaces a warning in `sgt status`.
+- Mayor also sends at most one decision-log failure notification per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`, default `600` seconds; set `0` to disable suppression).
 
 Mayor wake processing is also cycle-idempotent:
 - Within a single mayor loop cycle, repeated identical wake events are coalesced.

@@ -8,3 +8,6 @@
 - Mayor merge-queue snapshot freshness guard now performs one live revalidation pass before surfacing active issues in mayor `CLAUDE.md`; when stale and live diverge, live state deterministically wins and stale snapshot details are recorded in decision output.
 - Mayor now emits explicit snapshot guard status lines containing `snapshot`, `live`, `chosen`, `source`, and `status` values for merge-queue decisions.
 - Added regression coverage for stale-vs-live precedence in both directions (`stale=1/live=0`, `stale=0/live=1`) in `test_mayor_snapshot_freshness_guard.sh`.
+- Mayor decision-log appends now use a lock + `fsync` durability path and route wake-dedupe skip logging through the same hardened append helper.
+- Decision-log write failures are now non-fatal in mayor cycles, emit structured warning metadata, surface in `sgt status`, and notify Rigger at most once per cooldown window (`SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN`).
+- Added/expanded regression coverage for concurrent mayor decision-log appends plus simulated write-error warning/notify cooldown behavior in `test_mayor_decision_log_durability.sh`.
