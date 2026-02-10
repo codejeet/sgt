@@ -62,6 +62,9 @@ BASH
 echo "=== mayor wake trigger ttl dedupe ==="
 "$REPO_ROOT/test_mayor_wake_dedupe_ttl.sh"
 
+echo "=== mayor cycle lease lock recovery ==="
+"$REPO_ROOT/test_mayor_cycle_lock_lease.sh"
+
 echo "=== duplicate sling suppression during cooldown ==="
 "$REPO_ROOT/test_mayor_dispatch_idempotency.sh"
 
