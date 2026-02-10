@@ -34,5 +34,9 @@
 - Witness/refinery stale-close hard-stop: re-sling now enforces a final dispatch-instant gate that aborts spawn when the linked issue is not `OPEN` or when the source PR is not `OPEN`/`MERGEABLE`.
 - Re-sling stale/final-gate skip logging now records structured forensic fields including `source_event_key` and `skip_reason` (`RESLING_SKIP_STALE`, `RESLING_SKIP_FINAL_GATE`).
 - Expanded stale replay regression coverage in `test_refinery_stale_post_merge_redispatch.sh` to reproduce a late `CLOSED`/`MERGED` event replay where stale pre-check passes but dispatch-instant gate blocks spawn.
+- Refinery conflict path now persists durable per-issue evidence (`~/.sgt/refinery-conflicts/*.state`) with original PR/head/attempt/timestamp context (`ORIGIN_PR`, `ORIGIN_HEAD_SHA`, `ORIGIN_ATTEMPT_KEY`, `ORIGIN_TS`) before conflict close/re-sling side effects.
+- Added a per-issue active re-sling claim fence (`~/.sgt/resling-issue-claims/`) so concurrent conflict handlers dedupe to one active re-sling action and emit structured telemetry (`REFINERY_CONFLICT_RESLING_DEDUPE`).
+- Refinery restart replay now resumes pending conflict evidence from disk and marks successful replay dispatches (`REFINERY_CONFLICT_RESLING_RESUMED`) without spawning duplicate polecats.
+- Added regression coverage for concurrent conflict dedupe plus restart replay resume in `test_refinery_conflict_resling_guardrail.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - `sgt status` now guards terminal-width initialization for non-TTY/narrow environments, avoids nounset crashes in PR-title truncation, and always exits `0` after rendering.
 - Added regression coverage for status rendering with unset/narrow `COLUMNS` in `test_status_non_tty_term_cols_guard.sh`.

@@ -113,4 +113,7 @@ echo "=== refinery restart replay merge-attempt dedupe ==="
 echo "=== refinery replay missing-review-evidence fence ==="
 "$REPO_ROOT/test_refinery_missing_review_evidence_replay.sh"
 
+echo "=== refinery conflict resling guardrail ==="
+"$REPO_ROOT/test_refinery_conflict_resling_guardrail.sh"
+
 echo "ALL TESTS PASSED"
