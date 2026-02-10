@@ -224,10 +224,13 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 
 - Retries only trigger for transient classes: `timeout`, `network`, `http-5xx`, and `secondary-rate-limit`.
 - Before each retry, refinery re-checks live PR state (`OPEN`) and head SHA; if either drifts, retry is skipped and the queue item is kept with refreshed `HEAD_SHA`.
+- When a PR becomes review-ready (`REVIEW_APPROVED`), refinery now persists durable review evidence directly in the merge candidate record: `REVIEWED_HEAD_SHA` and `REVIEWED_AT`.
+- Before any merge attempt, refinery requires `REVIEWED_HEAD_SHA`; if missing, merge is blocked and the queue item is reset to `REVIEW_PENDING` for fresh review/revalidation.
 - If merge fails specifically because branch policy requires auto-merge, refinery revalidates PR state/head and retries exactly once with `--auto`.
 - Refinery also enforces a durable per-attempt idempotency key of `repo+PR+head SHA`, persisted under `~/.sgt/refinery-merge-attempts/`.
 - Once a merge action has been attempted for that key, the fence is kept across retries, future refinery cycles, and process restarts.
 - Duplicate PR-ready queue replays for the same key are skipped before any additional merge action runs.
+- Restart/replay safety fence: replayed candidates that claim `REVIEW_APPROVED` but lack `REVIEWED_HEAD_SHA` are explicitly blocked from merge and sent through a fresh validation cycle.
 - Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
 
 Configure retry behavior with:
@@ -243,11 +246,16 @@ Observability:
 - `REFINERY_MERGE_RETRY_SKIP pr=#... attempt=<n>/<max> reason="..."`
 - `REFINERY_MERGE_RETRY_AUTO repo=<owner/repo> pr=#... reason=branch-policy-requires-auto-merge outcome=<success|failed|skipped> ...`
 - `REFINERY_MERGE_FAILED pr=#... attempt=<n>/<max> class=<class> transient=<true|false> error="..."`
+- `REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA pr=#... issue=#... queue=<queue> review_state=<state> reason="missing reviewed_head_sha in merge candidate record"`
 - `REFINERY_DUPLICATE_SKIP pr=#... issue=#... reason_code=duplicate-merge-attempt-key reason="duplicate merge-attempt key (repo+pr+head) already processed" key="owner/repo|pr=<n>|head=<sha>"`
 
 When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`
 - a structured activity log event: `REFINERY_DUPLICATE_SKIP ...`
+
+When merge is blocked due to missing review evidence, refinery emits both:
+- an operator-visible status line: `merge blocked — missing review evidence (reviewed_head_sha)`
+- a structured activity log event: `REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA ...`
 
 Merge-queue enqueueing is also idempotent at `repo+PR` granularity (witness + mayor orphan dispatch paths):
 - Queue items are keyed by `owner/repo|pr=<n>`, so the same PR cannot be queued under multiple aliases.

@@ -1247,6 +1247,19 @@ _merge_queue_set_head_sha() {
   _merge_queue_set_field "$queue_file" "HEAD_SHA" "$head_sha"
 }
 
+_merge_queue_set_review_evidence() {
+  local queue_file="${1:-}" reviewed_head_sha="${2:-}" reviewed_at="${3:-}"
+  [[ -n "$queue_file" && -f "$queue_file" ]] || return 1
+  if [[ -n "$reviewed_head_sha" && ! "$reviewed_at" =~ ^[0-9]+$ ]]; then
+    reviewed_at="$(date +%s)"
+  fi
+  if [[ -z "$reviewed_head_sha" ]]; then
+    reviewed_at=""
+  fi
+  _merge_queue_set_field "$queue_file" "REVIEWED_HEAD_SHA" "$reviewed_head_sha" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEWED_AT" "$reviewed_at" || return 1
+}
+
 _merge_queue_mark_review_state() {
   local queue_file="${1:-}" review_state="${2:-}"
   [[ -n "$queue_file" && -f "$queue_file" && -n "$review_state" ]] || return 1
@@ -1262,6 +1275,9 @@ _merge_queue_mark_review_state() {
   _merge_queue_set_field "$queue_file" "REVIEW_STATE" "$review_state" || return 1
   _merge_queue_set_field "$queue_file" "REVIEW_UPDATED_AT" "$now" || return 1
   _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_SINCE" "$review_unclear_since" || return 1
+  if [[ "$review_state" != "REVIEW_APPROVED" ]]; then
+    _merge_queue_set_review_evidence "$queue_file" "" "" || return 1
+  fi
 }
 
 _merge_queue_repo_pr_key() {
@@ -1339,6 +1355,8 @@ TYPE=polecat
 REVIEW_STATE=REVIEW_PENDING
 REVIEW_UPDATED_AT=$(date +%s)
 REVIEW_UNCLEAR_SINCE=
+REVIEWED_HEAD_SHA=
+REVIEWED_AT=
 QUEUED=$(date -Iseconds)
 MQSTATE
   return 0
@@ -3113,8 +3131,8 @@ _refinery_loop() {
       mqname="$(basename "$f")"
 
       local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
-      local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE)=' "$f")"
+      local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since="" mq_reviewed_head_sha="" mq_reviewed_at=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -3127,6 +3145,8 @@ _refinery_loop() {
       mq_review_state="${REVIEW_STATE:-REVIEW_PENDING}"
       mq_review_updated_at="${REVIEW_UPDATED_AT:-}"
       mq_review_unclear_since="${REVIEW_UNCLEAR_SINCE:-}"
+      mq_reviewed_head_sha="${REVIEWED_HEAD_SHA:-}"
+      mq_reviewed_at="${REVIEWED_AT:-}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
@@ -3191,6 +3211,13 @@ _refinery_loop() {
         fi
       fi
 
+      if [[ "$mq_review_state" == "REVIEW_APPROVED" && -z "$mq_reviewed_head_sha" ]]; then
+        echo "[refinery/$rig] PR #$mq_pr merge blocked — missing review evidence (reviewed_head_sha)"
+        log_event "REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA pr=#$mq_pr issue=#$mq_issue queue=$mqname review_state=$mq_review_state reason=\"missing reviewed_head_sha in merge candidate record\""
+        _merge_queue_mark_review_state "$f" "REVIEW_PENDING" || true
+        continue
+      fi
+
       local claimed_attempt_file=""
       if ! _refinery_merge_attempt_claim "$mq_repo" "$mq_pr" "$mq_head_sha" "$mqname"; then
         local duplicate_key duplicate_reason duplicate_reason_code
@@ -3243,6 +3270,15 @@ _refinery_loop() {
         if [[ -n "$premerge_reason" ]]; then
           echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation drift — skipping ($premerge_reason)"
           log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason=\"$(_escape_quotes "$premerge_reason")\""
+          _refinery_merge_attempt_release "$claimed_attempt_file"
+          continue
+        fi
+        _merge_queue_set_review_evidence "$f" "$live_head_sha" || true
+        mq_reviewed_head_sha="$live_head_sha"
+        if [[ -z "$mq_reviewed_head_sha" ]]; then
+          echo "[refinery/$rig] PR #$mq_pr merge blocked — missing review evidence (reviewed_head_sha)"
+          log_event "REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA pr=#$mq_pr issue=#$mq_issue queue=$mqname review_state=REVIEW_APPROVED reason=\"missing reviewed_head_sha in merge candidate record\""
+          _merge_queue_mark_review_state "$f" "REVIEW_PENDING" || true
           _refinery_merge_attempt_release "$claimed_attempt_file"
           continue
         fi
