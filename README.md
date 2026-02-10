@@ -58,6 +58,17 @@ sgt wake-mayor "plan-update:scrapegoat"
 For rigs with `SGT_PLAN.json`, Mayor also watches the latest **master** GitHub Actions run.
 If it goes red, Mayor auto-dispatches a **CI-fix** issue (once per failing SHA) so the system repairs itself instead of stalling.
 
+Mayor dispatches are idempotent within a cooldown window:
+- Before creating a new issue, `sgt sling` checks recent open/closed issues for the same symptom signature (normalized title) and required labels.
+- If a match is found within cooldown, dispatch is suppressed to avoid duplicate redispatch loops while a fix is pending or just merged.
+- Default cooldown: `21600` seconds (6 hours), configurable with:
+
+```bash
+export SGT_MAYOR_DISPATCH_COOLDOWN=21600
+```
+
+Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.
