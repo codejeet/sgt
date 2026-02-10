@@ -77,9 +77,15 @@ export SGT_MAYOR_DISPATCH_COOLDOWN=21600
 Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
 
 Mayor AI dispatches also include a stale-state revalidation immediately before issue creation:
-- The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo, and also live-counts active polecats on the target rig.
+- The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo, live-counts active polecats on the target rig, and tracks per-rig merge-queue item counts.
+- Mayor writes a per-rig dispatch snapshot from briefing time and compares it against live state right before dispatch.
+- Explicit mismatch categories are emitted when briefing/live diverge:
+  - `pr-state` (open PR count drift; e.g. stale merged PR),
+  - `polecat-liveness` (briefing listed active polecat but it was cleaned),
+  - `queue-contents` (authorized issue count or merge-queue count drift).
 - Mayor computes `parallel_in_flight=max(open_sgt_authorized_issues, active_polecats)` and enforces `SGT_MAYOR_DISPATCH_MAX_PARALLEL` (default `3`, set `0` to disable).
-- If live state cannot be confirmed, or the parallel budget is exhausted, dispatch is skipped.
+- If live state cannot be confirmed, the briefing/live consistency check mismatches, or the parallel budget is exhausted, dispatch is skipped as a no-op.
+- Consistency mismatches emit `MAYOR_DISPATCH_SKIP_CONSISTENCY ... retry=next-mayor-cycle` telemetry and include both `snapshot_summary` and `live_summary` in `~/.sgt/mayor-decisions.log`.
 - A reasoned operator-visible line is emitted (`[mayor] dispatch skipped ...`) and a corresponding entry is appended to `~/.sgt/mayor-decisions.log`.
 - Budget skips also emit explicit structured telemetry (`MAYOR_DISPATCH_SKIP_BUDGET reason_code=parallel-budget-exhausted ...`) for runbook/debug filtering.
 
@@ -225,6 +231,25 @@ grep 'MAYOR WAKE SKIP reason=dispatch_cooldown' ~/.sgt/mayor-decisions.log | tai
 - `trigger_key` identifies the deduped wake trigger.
 - `ttl_remaining` shows remaining cooldown window.
 - `prior_decision_ts` shows the previous accepted decision timestamp used for cooldown math.
+
+Troubleshooting briefing/live consistency mismatch suppressions:
+1. Inspect structured mismatch telemetry and reason code:
+
+```bash
+grep 'MAYOR_DISPATCH_SKIP_CONSISTENCY' ~/.sgt/sgt.log | tail -20
+```
+
+2. Confirm decision-log entry includes mismatch categories and both state summaries:
+
+```bash
+grep 'MAYOR DISPATCH SKIP (consistency-mismatch)' ~/.sgt/mayor-decisions.log | tail -20
+```
+
+3. Correlate mismatch details:
+- `mismatch_categories` shows which class diverged (`pr-state`, `polecat-liveness`, `queue-contents`).
+- `snapshot_summary` is the briefing-time state.
+- `live_summary` is the pre-dispatch revalidation state.
+- `retry=next-mayor-cycle` indicates mayor intentionally did no-op and will retry after the next revalidation pass.
 
 Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
 - Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.
