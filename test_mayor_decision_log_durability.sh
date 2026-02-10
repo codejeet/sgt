@@ -22,14 +22,22 @@ eval "$(extract_fn _one_line)"
 eval "$(extract_fn _escape_quotes)"
 eval "$(extract_fn log_event)"
 eval "$(extract_fn _mayor_decision_log_append)"
+eval "$(extract_fn _mayor_decision_log_warn_cooldown_secs)"
 eval "$(extract_fn _mayor_record_decision)"
 
 export SGT_ROOT="$TMP_ROOT/workspace"
 export SGT_CONFIG="$SGT_ROOT/.sgt"
 export SGT_LOG="$SGT_CONFIG/sgt.log"
+export SGT_MAYOR_DECISION_LOG_WARN_STATE="$SGT_CONFIG/mayor-decision-log-warn.state"
+export SGT_MAYOR_DECISION_LOG_WARN_COOLDOWN=60
 mkdir -p "$SGT_CONFIG"
 
 LOG_FILE="$SGT_CONFIG/mayor-decisions.log"
+NOTIFY_LOG="$TMP_ROOT/notify.log"
+
+_mayor_notify_rigger() {
+  printf '%s\n' "$1" >> "$NOTIFY_LOG"
+}
 
 # Concurrent append stress: each write is a 2-line payload and must remain intact.
 for i in $(seq 1 40); do
@@ -76,25 +84,32 @@ if seen != expected:
     raise SystemExit(f"missing/duplicate entries: expected {len(expected)} unique ids, got {len(seen)}")
 PY
 
-# Failure path: force flock failure and ensure explicit error event is emitted.
-MOCK_BIN="$TMP_ROOT/mockbin"
-mkdir -p "$MOCK_BIN"
-cat > "$MOCK_BIN/flock" <<'MOCKFLOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-exit 1
-MOCKFLOCK
-chmod +x "$MOCK_BIN/flock"
+# Failure path: simulate append error by removing file write permissions.
+chmod a-w "$LOG_FILE"
 
-PATH="$MOCK_BIN:$PATH"
-hash -r
-if _mayor_record_decision "forced failure" "durability-test" "$SGT_ROOT"; then
-  echo "expected _mayor_record_decision to fail when flock fails" >&2
+if ! _mayor_record_decision "forced failure 1" "durability-test" "$SGT_ROOT"; then
+  echo "expected _mayor_record_decision to remain non-fatal on write failure" >&2
   exit 1
 fi
 
-if ! grep -q 'MAYOR_DECISION_LOG_WRITE_FAILED context=durability-test' "$SGT_LOG"; then
-  echo "expected explicit MAYOR_DECISION_LOG_WRITE_FAILED event in log" >&2
+if ! _mayor_record_decision "forced failure 2" "durability-test" "$SGT_ROOT"; then
+  echo "expected repeated _mayor_record_decision failure path to remain non-fatal" >&2
+  exit 1
+fi
+
+if ! grep -q 'MAYOR_DECISION_LOG_WARN context=durability-test' "$SGT_LOG"; then
+  echo "expected explicit MAYOR_DECISION_LOG_WARN event in log" >&2
+  exit 1
+fi
+
+if ! grep -q 'MAYOR_DECISION_LOG_WARN_NOTIFY_SUPPRESS context=durability-test cooldown=60s' "$SGT_LOG"; then
+  echo "expected cooldown suppression event for repeated decision-log warning" >&2
+  exit 1
+fi
+
+notify_count=$(wc -l < "$NOTIFY_LOG" | tr -d ' ')
+if [[ "$notify_count" -ne 1 ]]; then
+  echo "expected one rigger notification under cooldown, got $notify_count" >&2
   exit 1
 fi
 

@@ -76,8 +76,13 @@ Mayor AI dispatches also include a stale-state revalidation immediately before i
 
 Mayor decision logging is durable:
 - Decision entries are appended atomically under a file lock.
+- Each append is flushed with `fsync` before unlock to reduce crash-loss windows.
 - Each entry is prefixed with a UTC ISO-8601 timestamp and `workspace=<path>`.
-- If a decision-log write fails, mayor continues the cycle and emits `MAYOR_DECISION_LOG_WRITE_FAILED` to `~/.sgt/sgt.log`.
+- If a decision-log write fails, mayor continues the cycle, emits a structured warning event (`MAYOR_DECISION_LOG_WARN`) to `~/.sgt/sgt.log`, updates warning state for `sgt status`, and sends a Rigger notify at most once per cooldown window.
+
+```bash
+export SGT_MAYOR_DECISION_LOG_WARN_COOLDOWN=900
+```
 
 Mayor wake processing is also cycle-idempotent:
 - Within a single mayor loop cycle, repeated identical wake events are coalesced.

@@ -21,10 +21,12 @@ SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
 SGT_MAYOR_WAKE_DEDUPE_TTL="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}" # 15 seconds
 SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
 SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" # 1 hour
+SGT_MAYOR_DECISION_LOG_WARN_COOLDOWN="${SGT_MAYOR_DECISION_LOG_WARN_COOLDOWN:-900}" # 15 minutes
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
+SGT_MAYOR_DECISION_LOG_WARN_STATE="$SGT_CONFIG/mayor-decision-log-warn.state"
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
@@ -123,8 +125,8 @@ _mayor_decision_log_append() {
   ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _MAYOR_DECISION_LOG_LAST_ERROR=""
 
-  if ! command -v flock >/dev/null 2>&1; then
-    _MAYOR_DECISION_LOG_LAST_ERROR="flock command not found"
+  if ! command -v python3 >/dev/null 2>&1; then
+    _MAYOR_DECISION_LOG_LAST_ERROR="python3 command not found"
     return 1
   fi
 
@@ -133,28 +135,112 @@ _mayor_decision_log_append() {
     return 1
   fi
 
-  if ! {
-    flock -x 9 &&
-    printf '[%s] workspace=%s\n' "$ts" "$workspace" >&9 &&
-    printf '%s\n' "$entry" >&9
-  } 9>>"$log_file" 2>/dev/null; then
-    _MAYOR_DECISION_LOG_LAST_ERROR="failed to append $log_file"
+  local payload
+  payload="$(printf '[%s] workspace=%s\n%s\n' "$ts" "$workspace" "$entry")"
+  payload+=$'\n'
+  local py_err
+  if ! py_err="$(
+    python3 - "$log_file" "$payload" 2>&1 <<'PY'
+import os
+import sys
+import fcntl
+
+path = sys.argv[1]
+payload = sys.argv[2].encode("utf-8")
+
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        written = 0
+        while written < len(payload):
+            n = os.write(fd, payload[written:])
+            if n <= 0:
+                raise OSError("write returned no bytes")
+            written += n
+        os.fsync(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        os.close(fd)
+except Exception as exc:
+    print(str(exc))
+    raise SystemExit(1)
+PY
+  )"; then
+    py_err="$(_one_line "$py_err")"
+    _MAYOR_DECISION_LOG_LAST_ERROR="failed to append $log_file (${py_err:-write/lock/fsync error})"
     return 1
   fi
+}
+
+_mayor_decision_log_warn_cooldown_secs() {
+  local raw="${SGT_MAYOR_DECISION_LOG_WARN_COOLDOWN:-900}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="900"
+  fi
+  echo "$raw"
 }
 
 _mayor_record_decision() {
   local entry="${1:-}"
   local context="${2:-cycle}"
   local workspace="${3:-$SGT_ROOT}"
+  local warn_state="${SGT_MAYOR_DECISION_LOG_WARN_STATE:-$SGT_CONFIG/mayor-decision-log-warn.state}"
   if _mayor_decision_log_append "$entry" "$workspace"; then
     return 0
   fi
-  local err
-  err="$(_escape_quotes "${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}")"
-  echo "[mayor] decision log write failed ($context): ${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}"
-  log_event "MAYOR_DECISION_LOG_WRITE_FAILED context=$context workspace=\"$(_escape_quotes "$workspace")\" error=\"$err\""
-  return 1
+  local err_raw err_log now cooldown last_notified age should_notify notify_msg
+  err_raw="$(_one_line "${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}")"
+  err_log="$(_escape_quotes "$err_raw")"
+  now="$(date +%s)"
+  cooldown="$(_mayor_decision_log_warn_cooldown_secs)"
+  last_notified="0"
+  should_notify=1
+
+  if [[ -f "$warn_state" ]]; then
+    local last_line
+    last_line="$(head -n 1 "$warn_state" 2>/dev/null || true)"
+    if [[ -n "$last_line" ]]; then
+      IFS='|' read -r last_notified _ _ <<< "$last_line"
+    fi
+  fi
+
+  if [[ "$cooldown" -gt 0 && "$last_notified" =~ ^[0-9]+$ ]]; then
+    age=$((now - last_notified))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -lt "$cooldown" ]]; then
+      should_notify=0
+    fi
+  fi
+
+  echo "[mayor][warn] code=decision_log_write_failed context=$context workspace=$workspace error=${err_raw}"
+  log_event "MAYOR_DECISION_LOG_WARN context=$context workspace=\"$(_escape_quotes "$workspace")\" error=\"$err_log\" notify=$should_notify cooldown=${cooldown}s"
+
+  if [[ "$should_notify" -eq 1 ]]; then
+    notify_msg="mayor warning: decision-log write failed (context=$context error=$(_one_line "$err_raw"))"
+    _mayor_notify_rigger "$notify_msg"
+  else
+    log_event "MAYOR_DECISION_LOG_WARN_NOTIFY_SUPPRESS context=$context cooldown=${cooldown}s"
+  fi
+
+  if ! mkdir -p "$(dirname "$warn_state")" 2>/dev/null; then
+    log_event "MAYOR_DECISION_LOG_WARN_STATE_WRITE_FAILED path=\"$(_escape_quotes "$warn_state")\""
+    return 0
+  fi
+
+  local state_tmp
+  state_tmp="$(mktemp)"
+  printf '%s|%s|%s\n' \
+    "$now" \
+    "$(_one_line "$context" | tr '|' '/')" \
+    "$(_one_line "$err_raw" | tr '|' '/')" > "$state_tmp"
+  mv "$state_tmp" "$warn_state"
+  return 0
 }
 
 _repo_owner_repo() {
@@ -303,6 +389,33 @@ _critical_alert_cooldown_secs() {
     raw="3600"
   fi
   echo "$raw"
+}
+
+_mayor_decision_log_warn_snapshot() {
+  local warn_state="${SGT_MAYOR_DECISION_LOG_WARN_STATE:-$SGT_CONFIG/mayor-decision-log-warn.state}"
+  if [[ ! -f "$warn_state" ]]; then
+    echo "none|||"
+    return 0
+  fi
+
+  local line epoch context err
+  line="$(head -n 1 "$warn_state" 2>/dev/null || true)"
+  if [[ -z "$line" ]]; then
+    echo "none|||"
+    return 0
+  fi
+  IFS='|' read -r epoch context err <<< "$line"
+  if [[ ! "$epoch" =~ ^[0-9]+$ ]]; then
+    echo "invalid|||"
+    return 0
+  fi
+  local now age
+  now="$(date +%s)"
+  age=$((now - epoch))
+  if [[ "$age" -lt 0 ]]; then
+    age=0
+  fi
+  echo "warn|$age|$context|$err"
 }
 
 _deacon_heartbeat_snapshot() {
@@ -1066,6 +1179,13 @@ cmd_status() {
   local mayor_alive="off"
   tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
   printf "  %-16s %s\n" "mayor" "$(_status_badge "$mayor_alive")"
+  local mayor_warn_state mayor_warn_age mayor_warn_context mayor_warn_err
+  IFS='|' read -r mayor_warn_state mayor_warn_age mayor_warn_context mayor_warn_err <<< "$(_mayor_decision_log_warn_snapshot)"
+  if [[ "$mayor_warn_state" == "warn" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "decision-log warning ${mayor_warn_age}s ago (context=${mayor_warn_context:-unknown})" "$(_reset)"
+  elif [[ "$mayor_warn_state" == "invalid" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "decision-log warning state invalid" "$(_reset)"
+  fi
 
   _section "Dogs"
   local dog_count=0
