@@ -28,6 +28,7 @@ SGT_ESCALATION="$SGT_CONFIG/escalation.json"
 SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
 SGT_MAYOR_AI_CYCLE_STATE="$SGT_CONFIG/mayor-ai-cycle.state"
+SGT_MAYOR_AI_OBSERVABILITY_STATE="$SGT_CONFIG/mayor-ai-observability.state"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
@@ -6409,6 +6410,125 @@ _mayor_ai_cycle_timeout_secs() {
   echo "$raw"
 }
 
+_mayor_ai_cycle_reason_code_for_exit() {
+  local rc="${1:-1}"
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    echo "decision-timebox-exceeded"
+  else
+    echo "decision-run-error"
+  fi
+}
+
+_mayor_ai_cycle_observability_state_read() {
+  local state_file="${SGT_MAYOR_AI_OBSERVABILITY_STATE:-$SGT_CONFIG/mayor-ai-observability.state}"
+  local total_invocations="" total_success="" total_fail="" total_timeout="" total_error=""
+  local consecutive_timeout="" consecutive_error="" consecutive_fail="" last_reason_code="" last_outcome=""
+  if [[ -f "$state_file" ]]; then
+    total_invocations="$(awk -F= '$1=="totalInvocations"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    total_success="$(awk -F= '$1=="totalSuccess"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    total_fail="$(awk -F= '$1=="totalFail"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    total_timeout="$(awk -F= '$1=="totalTimeout"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    total_error="$(awk -F= '$1=="totalError"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    consecutive_timeout="$(awk -F= '$1=="consecutiveTimeout"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    consecutive_error="$(awk -F= '$1=="consecutiveError"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    consecutive_fail="$(awk -F= '$1=="consecutiveFail"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    last_reason_code="$(awk -F= '$1=="lastReasonCode"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+    last_outcome="$(awk -F= '$1=="lastOutcome"{print $2; exit}' "$state_file" 2>/dev/null || true)"
+  fi
+  [[ "$total_invocations" =~ ^[0-9]+$ ]] || total_invocations=0
+  [[ "$total_success" =~ ^[0-9]+$ ]] || total_success=0
+  [[ "$total_fail" =~ ^[0-9]+$ ]] || total_fail=0
+  [[ "$total_timeout" =~ ^[0-9]+$ ]] || total_timeout=0
+  [[ "$total_error" =~ ^[0-9]+$ ]] || total_error=0
+  [[ "$consecutive_timeout" =~ ^[0-9]+$ ]] || consecutive_timeout=0
+  [[ "$consecutive_error" =~ ^[0-9]+$ ]] || consecutive_error=0
+  [[ "$consecutive_fail" =~ ^[0-9]+$ ]] || consecutive_fail=0
+  [[ -n "$last_reason_code" ]] || last_reason_code="none"
+  [[ -n "$last_outcome" ]] || last_outcome="none"
+
+  echo "${total_invocations}|${total_success}|${total_fail}|${total_timeout}|${total_error}|${consecutive_timeout}|${consecutive_error}|${consecutive_fail}|${last_reason_code}|${last_outcome}"
+}
+
+_mayor_ai_cycle_observability_state_write() {
+  local total_invocations="${1:-0}" total_success="${2:-0}" total_fail="${3:-0}" total_timeout="${4:-0}" total_error="${5:-0}"
+  local consecutive_timeout="${6:-0}" consecutive_error="${7:-0}" consecutive_fail="${8:-0}" last_reason_code="${9:-none}" last_outcome="${10:-none}"
+  local state_file="${SGT_MAYOR_AI_OBSERVABILITY_STATE:-$SGT_CONFIG/mayor-ai-observability.state}"
+  local state_tmp="${state_file}.tmp.$$"
+
+  cat > "$state_tmp" <<EOF
+totalInvocations=$total_invocations
+totalSuccess=$total_success
+totalFail=$total_fail
+totalTimeout=$total_timeout
+totalError=$total_error
+consecutiveTimeout=$consecutive_timeout
+consecutiveError=$consecutive_error
+consecutiveFail=$consecutive_fail
+lastReasonCode=$last_reason_code
+lastOutcome=$last_outcome
+EOF
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_ai_cycle_observability_record() {
+  local outcome="${1:-error}" reason_code="${2:-none}"
+  local total_invocations total_success total_fail total_timeout total_error
+  local consecutive_timeout consecutive_error consecutive_fail last_reason_code last_outcome
+  IFS='|' read -r total_invocations total_success total_fail total_timeout total_error consecutive_timeout consecutive_error consecutive_fail last_reason_code last_outcome <<< "$(_mayor_ai_cycle_observability_state_read)"
+
+  total_invocations=$((total_invocations + 1))
+  if [[ "$outcome" == "success" ]]; then
+    total_success=$((total_success + 1))
+    consecutive_timeout=0
+    consecutive_error=0
+    consecutive_fail=0
+    reason_code="none"
+  else
+    total_fail=$((total_fail + 1))
+    consecutive_fail=$((consecutive_fail + 1))
+    case "$reason_code" in
+      decision-timebox-exceeded)
+        total_timeout=$((total_timeout + 1))
+        consecutive_timeout=$((consecutive_timeout + 1))
+        consecutive_error=0
+        ;;
+      decision-run-error)
+        total_error=$((total_error + 1))
+        consecutive_error=$((consecutive_error + 1))
+        consecutive_timeout=0
+        ;;
+      *)
+        consecutive_timeout=0
+        consecutive_error=0
+        ;;
+    esac
+  fi
+
+  _mayor_ai_cycle_observability_state_write \
+    "$total_invocations" \
+    "$total_success" \
+    "$total_fail" \
+    "$total_timeout" \
+    "$total_error" \
+    "$consecutive_timeout" \
+    "$consecutive_error" \
+    "$consecutive_fail" \
+    "$reason_code" \
+    "$outcome" || true
+
+  printf 'outcome=%s reason_code=%s totals{i=%s,ok=%s,fail=%s,timeout=%s,error=%s} streak{fail=%s,timeout=%s,error=%s}' \
+    "$outcome" \
+    "$reason_code" \
+    "$total_invocations" \
+    "$total_success" \
+    "$total_fail" \
+    "$total_timeout" \
+    "$total_error" \
+    "$consecutive_fail" \
+    "$consecutive_timeout" \
+    "$consecutive_error"
+}
+
 _mayor_ai_cycle_state_write() {
   local status="${1:-running}"
   local started_at="${2:-unknown}"
@@ -6442,6 +6562,7 @@ _mayor_run_ai_decision_cycle() {
   local ai_dispatch_trigger_reason="${5:-}"
   local timeout_secs started_at started_epoch finished_epoch duration rc
   local reason_code recovery_hint
+  local digest_line
 
   timeout_secs="$(_mayor_ai_cycle_timeout_secs)"
   started_at="$(date -Iseconds)"
@@ -6462,19 +6583,21 @@ _mayor_run_ai_decision_cycle() {
   fi
 
   if [[ "$rc" -eq 0 ]]; then
+    digest_line="$(_mayor_ai_cycle_observability_record "success" "none")"
     _mayor_ai_cycle_state_clear || true
     log_event "MAYOR_AI_CYCLE completed duration=${duration}s timeout=${timeout_secs}s"
+    log_event "MAYOR_AI_CYCLE_DIGEST $digest_line"
+    _mayor_record_decision "MAYOR AI CYCLE DIGEST $digest_line" "ai-cycle-digest" "$SGT_ROOT" || true
     echo "[mayor] AI decision cycle complete"
     return 0
   fi
 
-  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
-    reason_code="decision-timebox-exceeded"
-  else
-    reason_code="decision-run-error"
-  fi
+  reason_code="$(_mayor_ai_cycle_reason_code_for_exit "$rc")"
+  digest_line="$(_mayor_ai_cycle_observability_record "fail" "$reason_code")"
   _mayor_record_decision "MAYOR AI CYCLE FAIL_CLOSED reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s duration=${duration}s recovery_hint=\"$(_escape_quotes "$recovery_hint")\"" "ai-cycle-fail-closed" "$SGT_ROOT" || true
+  _mayor_record_decision "MAYOR AI CYCLE DIGEST $digest_line" "ai-cycle-digest" "$SGT_ROOT" || true
   log_event "MAYOR_AI_CYCLE_FAIL_CLOSED reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s duration=${duration}s recovery_hint=\"$(_escape_quotes "$recovery_hint")\" action=release-lock-and-reset-cycle-state"
+  log_event "MAYOR_AI_CYCLE_DIGEST $digest_line"
   _mayor_ai_cycle_state_clear || true
   _mayor_lock_release "$$" || true
   echo "[mayor] AI cycle failed closed (reason_code=$reason_code exit_code=$rc timeout=${timeout_secs}s) — $recovery_hint"
