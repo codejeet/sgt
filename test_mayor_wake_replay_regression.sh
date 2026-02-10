@@ -65,4 +65,7 @@ echo "=== duplicate sling suppression during cooldown ==="
 echo "=== stale snapshot dispatch race guard ==="
 "$REPO_ROOT/test_mayor_stale_dispatch_race.sh"
 
+echo "=== refinery stale queue item guard ==="
+"$REPO_ROOT/test_refinery_stale_queue_item.sh"
+
 echo "ALL TESTS PASSED"

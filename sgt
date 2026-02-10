@@ -252,6 +252,22 @@ _mayor_pre_dispatch_revalidate() {
   return 0
 }
 
+_pr_head_sha() {
+  local repo="${1:-}" pr="${2:-}"
+  [[ -n "$repo" && -n "$pr" ]] || return 1
+  gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid // ""' 2>/dev/null || true
+}
+
+_merge_queue_set_head_sha() {
+  local queue_file="${1:-}" head_sha="${2:-}"
+  [[ -n "$queue_file" && -f "$queue_file" ]] || return 1
+  if grep -q '^HEAD_SHA=' "$queue_file"; then
+    sed -i -E "s/^HEAD_SHA=.*/HEAD_SHA=${head_sha}/" "$queue_file"
+  else
+    printf 'HEAD_SHA=%s\n' "$head_sha" >> "$queue_file"
+  fi
+}
+
 _find_recent_duplicate_issue() {
   local repo="${1:-}" title="${2:-}" cooldown_secs="${3:-0}"
   shift 3 || true
@@ -1239,6 +1255,8 @@ _witness_loop() {
           log_event "WITNESS_PR_READY $pname pr=#$pr_number"
 
           mkdir -p "$SGT_CONFIG/merge-queue"
+          local pr_head_sha
+          pr_head_sha="$(_pr_head_sha "$p_repo" "$pr_number")"
           cat > "$SGT_CONFIG/merge-queue/$pname" <<MQSTATE
 POLECAT=$pname
 RIG=$rig
@@ -1246,6 +1264,7 @@ REPO=$p_repo
 BRANCH=$p_branch
 ISSUE=$p_issue
 PR=$pr_number
+HEAD_SHA=$pr_head_sha
 AUTO_MERGE=$p_auto_merge
 BACKEND=${BACKEND:-$(_ai_backend_default)}
 TYPE=polecat
@@ -1361,6 +1380,8 @@ MQSTATE
           log_event "WITNESS_ORPHAN_PR pr=#$pr_num branch=$pr_branch"
 
           mkdir -p "$SGT_CONFIG/merge-queue"
+          local orphan_head_sha
+          orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
           cat > "$SGT_CONFIG/merge-queue/$orphan_pname" <<MQSTATE
 POLECAT=$orphan_pname
 RIG=$rig
@@ -1368,6 +1389,7 @@ REPO=$repo
 BRANCH=$pr_branch
 ISSUE=${orphan_issue:-0}
 PR=$pr_num
+HEAD_SHA=$orphan_head_sha
 AUTO_MERGE=true
 TYPE=polecat
 QUEUED=$(date -Iseconds)
@@ -1695,8 +1717,8 @@ _refinery_loop() {
       local mqname
       mqname="$(basename "$f")"
 
-      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND)=' "$f")"
+      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -1705,6 +1727,7 @@ _refinery_loop() {
       mq_auto_merge="${AUTO_MERGE:-false}"
       mq_type="${TYPE:-polecat}"
       mq_backend="${BACKEND:-$(_ai_backend_default)}"
+      mq_head_sha="${HEAD_SHA:-}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
@@ -1787,6 +1810,26 @@ _refinery_loop() {
       # === AI REVIEW ===
       REFINERY_REJECT_REASON=""
       if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig" "$mq_backend"; then
+        # Revalidate immediately before merge to prevent stale queue merges.
+        local live_snapshot live_state live_head_sha premerge_reason=""
+        live_snapshot=$(gh pr view "$mq_pr" --repo "$mq_repo" --json state,headRefOid --jq '.state + "|" + (.headRefOid // "")' 2>/dev/null || true)
+        if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
+          premerge_reason="unable to query live PR state"
+        else
+          IFS='|' read -r live_state live_head_sha <<< "$live_snapshot"
+          if [[ "$live_state" != "OPEN" ]]; then
+            premerge_reason="pr state drifted to ${live_state:-unknown}"
+          elif [[ -n "$mq_head_sha" && "$live_head_sha" != "$mq_head_sha" ]]; then
+            premerge_reason="head sha drifted queued=${mq_head_sha:-unknown} live=${live_head_sha:-unknown}"
+            _merge_queue_set_head_sha "$f" "$live_head_sha" || true
+          fi
+        fi
+        if [[ -n "$premerge_reason" ]]; then
+          echo "[refinery/$rig] PR #$mq_pr pre-merge revalidation drift — skipping ($premerge_reason)"
+          log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason=\"$(_escape_quotes "$premerge_reason")\""
+          continue
+        fi
+
         # APPROVED — merge
         echo "[refinery/$rig] merging PR #$mq_pr..."
         local merge_result
@@ -2557,12 +2600,15 @@ _mayor_loop() {
               local mqf="$SGT_CONFIG/merge-queue/${rname}-pr${pr_num}"
               if [[ ! -f "$mqf" ]]; then
                 mkdir -p "$SGT_CONFIG/merge-queue"
+                local orphan_head_sha
+                orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
                 cat > "$mqf" <<MQORPHAN
 RIG=$rname
 REPO=$repo
 PR=$pr_num
 BRANCH=$pr_branch
 ISSUE=${linked_issue}
+HEAD_SHA=$orphan_head_sha
 TYPE=polecat
 AUTO_MERGE=true
 QUEUED=$(date -Iseconds)
