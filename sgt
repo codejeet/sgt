@@ -108,6 +108,67 @@ log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
 }
 
+_repo_owner_repo() {
+  local repo="${1:-}"
+  repo="${repo#https://github.com/}"
+  repo="${repo#http://github.com/}"
+  echo "$repo"
+}
+
+_repo_pr_url() {
+  local repo="${1:-}" pr="${2:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  if [[ -z "$owner_repo" || -z "$pr" ]]; then
+    echo ""
+    return 0
+  fi
+  echo "https://github.com/$owner_repo/pull/$pr"
+}
+
+_repo_issue_url() {
+  local repo="${1:-}" issue="${2:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  if [[ -z "$owner_repo" || -z "$issue" || "$issue" == "0" ]]; then
+    echo ""
+    return 0
+  fi
+  echo "https://github.com/$owner_repo/issues/$issue"
+}
+
+_one_line() {
+  local value="${1:-}"
+  printf '%s' "$value" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+_escape_quotes() {
+  local value
+  value="$(_one_line "$1")"
+  value="${value//\"/\\\"}"
+  echo "$value"
+}
+
+_escape_wake_value() {
+  local value
+  value="$(_one_line "$1")"
+  value="${value//|//}"
+  echo "$value"
+}
+
+_wake_field() {
+  local reason="${1:-}" key="${2:-}"
+  local part
+  IFS='|' read -r -a parts <<< "$reason"
+  for part in "${parts[@]}"; do
+    if [[ "$part" == "$key="* ]]; then
+      echo "${part#${key}=}"
+      return 0
+    fi
+  done
+  echo ""
+}
+
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
 _notify_openclaw() {
   local message="${1:-}"
@@ -1238,6 +1299,10 @@ cmd_witness_stop() {
 # AI review: check PR diff against issue spec
 _refinery_review_pr() {
   local repo="$1" pr="$2" issue="$3" rig="$4" backend="$5"
+  local owner_repo pr_url issue_url
+  owner_repo="$(_repo_owner_repo "$repo")"
+  pr_url="$(_repo_pr_url "$repo" "$pr")"
+  issue_url="$(_repo_issue_url "$repo" "$issue")"
 
   echo "[refinery/$rig] reviewing PR #$pr..."
 
@@ -1254,9 +1319,10 @@ _refinery_review_pr() {
     issue_body=$(gh issue view "$issue" --repo "$repo" --json body --jq '.body' 2>/dev/null || true)
   fi
 
-  local pr_title pr_body
+  local pr_title pr_body pr_title_field
   pr_title=$(gh pr view "$pr" --repo "$repo" --json title --jq '.title' 2>/dev/null || true)
   pr_body=$(gh pr view "$pr" --repo "$repo" --json body --jq '.body' 2>/dev/null || true)
+  pr_title_field="$(_escape_quotes "$pr_title")"
 
   # Truncate diff if too large
   local diff_truncated="$diff"
@@ -1303,7 +1369,7 @@ REVIEWMD
   if echo "$review_output" | grep -q "VERDICT: APPROVE"; then
     echo "[refinery/$rig] PR #$pr APPROVED"
     log_event "REFINERY_REVIEW_APPROVED pr=#$pr"
-    _notify_openclaw "[SGT Refinery] review approved rig=$rig pr=#$pr issue=#$issue"
+    _notify_openclaw "[SGT Refinery] review approved rig=$rig repo=$owner_repo pr=#$pr title=\"$pr_title_field\" issue=#$issue pr_url=$pr_url issue_url=$issue_url"
     gh pr comment "$pr" --repo "$repo" \
       --body "[sgt-refinery] **APPROVED** — reviewed and cleared for merge." 2>/dev/null || true
     return 0
@@ -1460,6 +1526,13 @@ _refinery_loop() {
       mq_backend="${BACKEND:-$(_ai_backend_default)}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
+      local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
+      mq_owner_repo="$(_repo_owner_repo "$mq_repo")"
+      mq_pr_title=$(gh pr view "$mq_pr" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
+      mq_pr_title_field="$(_escape_quotes "$mq_pr_title")"
+      mq_pr_url="$(_repo_pr_url "$mq_repo" "$mq_pr")"
+      mq_issue_url="$(_repo_issue_url "$mq_repo" "$mq_issue")"
+      mq_wake_title="$(_escape_wake_value "$mq_pr_title")"
 
       # Security gate: verify linked issue has sgt-authorized label
       if [[ -n "$mq_issue" && "$mq_issue" != "0" ]]; then
@@ -1539,8 +1612,8 @@ _refinery_loop() {
         if merge_result=$(gh pr merge "$mq_pr" --repo "$mq_repo" --squash --delete-branch 2>&1); then
           echo "[refinery/$rig] PR #$mq_pr merged successfully"
           log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
-          _notify_openclaw "[SGT Refinery] merged rig=$rig pr=#$mq_pr issue=#$mq_issue"
-          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig"
+          _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+          _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url"
           rm -f "$f"
         else
           echo "[refinery/$rig] merge failed: $merge_result"
@@ -1586,6 +1659,11 @@ Please address the feedback in the next iteration." 2>/dev/null || true
         d_issue="${ISSUE:-0}"
         d_rig="${RIG:-$rig}"
         local d_backend="${BACKEND:-$(_ai_backend_default)}"
+        local d_owner_repo d_issue_title d_issue_url d_wake_title
+        d_owner_repo="$(_repo_owner_repo "$d_repo")"
+        d_issue_title=$(gh issue view "$d_issue" --repo "$d_repo" --json title --jq '.title' 2>/dev/null || true)
+        d_issue_url="$(_repo_issue_url "$d_repo" "$d_issue")"
+        d_wake_title="$(_escape_wake_value "$d_issue_title")"
 
         # Only process dogs for this rig
         [[ "$d_rig" == "$rig" ]] || continue
@@ -1611,7 +1689,7 @@ Please address the feedback in the next iteration." 2>/dev/null || true
           gh issue close "$d_issue" --repo "$d_repo" 2>/dev/null || true
           echo "[refinery/$rig] dog $dname approved and issue #$d_issue closed"
           log_event "REFINERY_DOG_COMPLETE dog=$dname issue=#$d_issue"
-          _wake_mayor "dog-approved:$dname:#$d_issue:$rig"
+          _wake_mayor "dog-approved:$dname:#$d_issue:$rig|repo=$d_owner_repo|title=$d_wake_title|issue_url=$d_issue_url"
           # Clean up dog state + workspace
           local d_ws=""
           d_ws=$(grep '^WORKSPACE=' "$df" 2>/dev/null | cut -d= -f2)
@@ -2066,10 +2144,39 @@ _mayor_wake_summary() {
     return 0
   fi
 
-  if [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+):(.+)$ ]]; then
+  if [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+):([^|]+)\| ]]; then
+    local pr issue rig repo title pr_url issue_url
+    pr="${BASH_REMATCH[1]}"
+    issue="${BASH_REMATCH[2]}"
+    rig="${BASH_REMATCH[3]}"
+    repo="$(_wake_field "$reason" "repo")"
+    title="$(_escape_quotes "$(_wake_field "$reason" "title")")"
+    pr_url="$(_wake_field "$reason" "pr_url")"
+    issue_url="$(_wake_field "$reason" "issue_url")"
+    summary="merged PR #$pr (issue #$issue, rig $rig) | rig=$rig repo=${repo:-unknown} pr=#$pr title=\"${title:-unknown}\" issue=#$issue pr_url=${pr_url:-unknown} issue_url=${issue_url:-unknown}"
+  elif [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+):(.+)$ ]]; then
     summary="merged PR #${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]}, rig ${BASH_REMATCH[3]})"
+  elif [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+)\| ]]; then
+    local pr issue rig repo title pr_url issue_url
+    pr="${BASH_REMATCH[1]}"
+    issue="${BASH_REMATCH[2]}"
+    rig="$(_wake_field "$reason" "rig")"
+    repo="$(_wake_field "$reason" "repo")"
+    title="$(_escape_quotes "$(_wake_field "$reason" "title")")"
+    pr_url="$(_wake_field "$reason" "pr_url")"
+    issue_url="$(_wake_field "$reason" "issue_url")"
+    summary="merged PR #$pr (issue #$issue, rig ${rig:-unknown}) | rig=${rig:-unknown} repo=${repo:-unknown} pr=#$pr title=\"${title:-unknown}\" issue=#$issue pr_url=${pr_url:-unknown} issue_url=${issue_url:-unknown}"
   elif [[ "$reason" =~ ^merged:pr#([0-9]+):#([0-9]+)$ ]]; then
     summary="merged PR #${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]})"
+  elif [[ "$reason" =~ ^dog-approved:([^:]+):#([0-9]+):([^|]+)\| ]]; then
+    local dname issue rig repo title issue_url
+    dname="${BASH_REMATCH[1]}"
+    issue="${BASH_REMATCH[2]}"
+    rig="${BASH_REMATCH[3]}"
+    repo="$(_wake_field "$reason" "repo")"
+    title="$(_escape_quotes "$(_wake_field "$reason" "title")")"
+    issue_url="$(_wake_field "$reason" "issue_url")"
+    summary="dog approved $dname (issue #$issue, rig $rig) | rig=$rig repo=${repo:-unknown} title=\"${title:-unknown}\" issue=#$issue issue_url=${issue_url:-unknown}"
   elif [[ "$reason" =~ ^dog-approved:([^:]+):#([0-9]+):(.+)$ ]]; then
     summary="dog approved ${BASH_REMATCH[1]} (issue #${BASH_REMATCH[2]}, rig ${BASH_REMATCH[3]})"
   elif [[ "$reason" =~ ^dog-approved:([^:]+):#([0-9]+)$ ]]; then
