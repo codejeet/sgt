@@ -6451,6 +6451,63 @@ _mayor_prepare_briefing_for_cycle() {
   echo "${briefing}|${status}|${generated_at:-unknown}|${age:-1}|${stale_secs}|${stale_detected}|${path}"
 }
 
+_mayor_live_status_briefing_fallback() {
+  local briefing_path="${1:-$SGT_CONFIG/mayor-briefing.md}"
+  local now_iso now_epoch deacon_session hb_age hb_ts hb_state hb_stale_secs hb_health deacon_badge
+  local merge_queue_depth active_polecats
+
+  now_iso="$(date -Iseconds)"
+  now_epoch="$(date +%s)"
+
+  deacon_session="off"
+  tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_session="on"
+  hb_stale_secs="$(_deacon_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state <<< "$(_deacon_heartbeat_snapshot)"
+  hb_health="$(_deacon_heartbeat_health "$hb_age" "$hb_stale_secs")"
+  deacon_badge="$deacon_session"
+  if [[ "$deacon_session" == "on" && "$hb_health" != "healthy" ]]; then
+    deacon_badge="degraded"
+  fi
+
+  merge_queue_depth="$(_mayor_merge_queue_count_for_rig)"
+  [[ "$merge_queue_depth" =~ ^[0-9]+$ ]] || merge_queue_depth=0
+  active_polecats="$(_active_polecat_count)"
+  [[ "$active_polecats" =~ ^[0-9]+$ ]] || active_polecats=0
+
+  cat <<EOF
+# SGT System Briefing (fallback)
+
+You are the Mayor — the global coordinator for SGT (Simple GitHub Gastown).
+Primary briefing file was unavailable; use this live fallback summary for the current cycle.
+
+generated_at: $now_iso
+generated_at_epoch: $now_epoch
+fallback_reason: briefing-unavailable
+fallback_path: $briefing_path
+
+## Live Status Summary
+- deacon_status: $deacon_badge (session=$deacon_session heartbeat_state=${hb_state:-unknown} heartbeat_health=${hb_health:-unknown} heartbeat_age_seconds=${hb_age:-unknown} stale_after_seconds=${hb_stale_secs:-unknown})
+- merge_queue_depth: $merge_queue_depth
+- active_polecats: $active_polecats
+
+## System Status (live)
+\`\`\`
+$(cmd_status 2>&1 || true)
+\`\`\`
+EOF
+}
+
+_mayor_briefing_content_for_prompt() {
+  local briefing_path="${1:-$SGT_CONFIG/mayor-briefing.md}"
+  local content
+  if content="$(cat "$briefing_path" 2>/dev/null)"; then
+    printf '%s\n' "$content"
+    return 0
+  fi
+  log_event "MAYOR_BRIEFING_FALLBACK reason=briefing-unavailable path=\"$(_escape_quotes "$briefing_path")\""
+  _mayor_live_status_briefing_fallback "$briefing_path"
+}
+
 _mayor_ai_cycle_timeout_secs() {
   local raw="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}"
   if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -eq 0 ]]; then
@@ -7184,7 +7241,7 @@ _mayor_loop() {
       mkdir -p "$mayor_workspace"
       _mayor_dispatch_snapshot_file "$dispatch_snapshot_file"
 
-      local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path
+      local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path briefing_content
       if ! briefing_gate="$(_mayor_prepare_briefing_for_cycle)"; then
         IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "${briefing_gate:-$SGT_CONFIG/mayor-briefing.md|invalid|unknown|-1|$(_mayor_briefing_stale_secs)|true|aborted}"
         echo "[mayor] AI cycle aborted — briefing freshness gate failed (status=${briefing_status:-invalid} age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s path=${briefing_path:-aborted})"
@@ -7195,6 +7252,7 @@ _mayor_loop() {
       IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "$briefing_gate"
       echo "[mayor] briefing freshness gate path=${briefing_path} stale_detected=${briefing_stale_detected} age=${briefing_age}s threshold=${briefing_threshold}s generated_at=${briefing_generated_at}"
       log_event "MAYOR_BRIEFING_GATE_STATUS path=${briefing_path} stale_detected=${briefing_stale_detected} status=${briefing_status} generated_at=\"$(_escape_quotes "${briefing_generated_at}")\" age=${briefing_age}s threshold=${briefing_threshold}s"
+      briefing_content="$(_mayor_briefing_content_for_prompt "$briefing")"
 
       cat > "$mayor_workspace/CLAUDE.md" <<MAYORMD
 # Mayor — Emergency Decision
@@ -7209,7 +7267,7 @@ Snapshot freshness notes:
 $(echo -e "${snapshot_freshness:-  - none}")
 
 ## System State
-$(cat "$briefing")
+$briefing_content
 
 ## Commands
 - \`sgt sling <rig> "<task>"\` — Dispatch work

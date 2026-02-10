@@ -109,6 +109,8 @@ Mayor AI briefing generation also has a strict freshness gate:
 - Structured freshness telemetry is emitted on each path:
   - `MAYOR_BRIEFING_GATE stale_detected=<true|false> path=<fresh|refreshed|aborted> status=<fresh|stale|invalid|missing> generated_at="..." age=<n>s threshold=<n>s refresh_attempted=<true|false> ...`
   - `MAYOR_BRIEFING_GATE_STATUS path=<...> stale_detected=<...> status=<...> generated_at="..." age=<n>s threshold=<n>s` (just before AI invoke).
+- If the briefing file is missing/unreadable at prompt-render time, mayor now injects a live fallback briefing (instead of `cat` errors), including deacon heartbeat health, merge queue depth, and active polecat count.
+- Fallback path emits `MAYOR_BRIEFING_FALLBACK reason=briefing-unavailable path="<...>"` telemetry and still includes a full live `sgt status` snapshot for AI context.
 
 Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
