@@ -179,6 +179,11 @@ To disable this gate (not recommended on public repos), set:
 export SGT_REQUIRE_AUTH_LABEL=0
 ```
 
+Witness/refinery re-dispatches also apply live stale-event guards immediately before spawning a new polecat:
+- Re-sling revalidates that the linked issue is still `OPEN`.
+- For stale refinery queue events, re-sling also revalidates the source PR state and skips if it already drifted to `MERGED` or `CLOSED`.
+- Skips emit explicit operator-visible reasons (`[resling] stale event ... — skipping: ...`) and structured activity log events (`RESLING_SKIP_STALE ...`).
+
 ## OpenClaw notifications
 
 SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued); periodic all-clear checks stay quiet.
