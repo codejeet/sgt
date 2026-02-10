@@ -45,6 +45,26 @@ case "$CASE_NAME" in
     echo "ack=delivered message_id=success-$count"
     exit 0
     ;;
+  ack_copy)
+    echo "Copy."
+    exit 0
+    ;;
+  ack_ack)
+    echo "ACK!"
+    exit 0
+    ;;
+  ack_received)
+    echo "received,"
+    exit 0
+    ;;
+  ack_roger)
+    echo "rOgEr?"
+    exit 0
+    ;;
+  non_ack_reply)
+    echo "queued for routing"
+    exit 0
+    ;;
   transient_then_success)
     if [[ "$count" -eq 1 ]]; then
       echo "timeout waiting for transport ack" >&2
@@ -111,6 +131,32 @@ run_case_success() {
   grep -q '^CHANNEL=rigger$' "$receipt_file" || { echo "expected success receipt channel=rigger" >&2; exit 1; }
   grep -q '^ATTEMPT=1$' "$receipt_file" || { echo "expected success receipt attempt=1" >&2; exit 1; }
   grep -q '^OUTCOME=delivered$' "$receipt_file" || { echo "expected success receipt delivered outcome" >&2; exit 1; }
+}
+
+run_case_positive_ack_variant() {
+  local case_name="$1" expected_matcher="$2" notify_message="$3"
+  local env_meta home_dir mock_bin state_dir receipt_dir receipt_file decision_log
+  env_meta="$(setup_case_env "$case_name")"
+  IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
+
+  env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    SGT_MOCK_NOTIFY_STATE="$state_dir" \
+    SGT_MOCK_NOTIFY_CASE="$case_name" \
+    bash --noprofile --norc -c "set -euo pipefail; sgt mayor notify \"$notify_message\" >/dev/null"
+
+  [[ "$(cat "$state_dir/openclaw.count")" == "1" ]] || { echo "expected $case_name to send exactly once" >&2; exit 1; }
+  receipt_dir="$home_dir/sgt/.sgt/mayor-notify-receipts"
+  [[ -d "$receipt_dir" ]] || { echo "expected receipt directory for $case_name" >&2; exit 1; }
+  receipt_file="$(find "$receipt_dir" -type f | head -n1)"
+  grep -q '^OUTCOME=delivered$' "$receipt_file" || { echo "expected delivered outcome for $case_name" >&2; exit 1; }
+  decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
+  grep -q "MAYOR NOTIFY RECEIPT .*outcome=delivered .*matcher=$expected_matcher" "$decision_log" || {
+    echo "expected matcher=$expected_matcher in decision log for $case_name" >&2
+    exit 1
+  }
 }
 
 run_case_transient_then_success() {
@@ -209,9 +255,43 @@ run_case_restart_replay() {
   }
 }
 
+run_case_non_ack_retry_and_escalate() {
+  local env_meta home_dir mock_bin state_dir decision_log
+  env_meta="$(setup_case_env non_ack_reply)"
+  IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
+
+  env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    SGT_MOCK_NOTIFY_STATE="$state_dir" \
+    SGT_MOCK_NOTIFY_CASE="non_ack_reply" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "non-ack case" >/dev/null || true'
+
+  [[ "$(cat "$state_dir/openclaw.count")" == "2" ]] || { echo "expected non-ack case to retry once before escalation" >&2; exit 1; }
+  decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=1 .*outcome=missing-ack .*matcher=no-ack-pattern' "$decision_log" || {
+    echo "expected attempt 1 missing-ack matcher in non-ack case" >&2
+    exit 1
+  }
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=2 .*outcome=missing-ack .*matcher=no-ack-pattern' "$decision_log" || {
+    echo "expected attempt 2 missing-ack matcher in non-ack case" >&2
+    exit 1
+  }
+  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-missing-ack' "$decision_log")" -ne 1 ]]; then
+    echo "expected one notify-missing-ack escalation decision in non-ack case" >&2
+    exit 1
+  fi
+}
+
 run_case_success
+run_case_positive_ack_variant ack_copy copy-token "copy ack variant case"
+run_case_positive_ack_variant ack_ack ack-token "ack token variant case"
+run_case_positive_ack_variant ack_received received-token "received token variant case"
+run_case_positive_ack_variant ack_roger roger-token "roger token variant case"
 run_case_transient_then_success
 run_case_hard_failure_deduped_escalation
 run_case_restart_replay
+run_case_non_ack_retry_and_escalate
 
 echo "ALL TESTS PASSED"

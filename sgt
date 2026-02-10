@@ -713,6 +713,68 @@ _mayor_notify_is_transient_failure() {
   [[ "$(_one_line "$text" | tr '[:upper:]' '[:lower:]')" =~ (timeout|timed[[:space:]-]?out|network|connection[[:space:]-]?reset|connection[[:space:]-]?refused|temporary|temporarily|try[[:space:]-]?again|http[[:space:]-]?5[0-9]{2}|5[0-9]{2}|secondary[[:space:]-]?rate[[:space:]-]?limit|rate[[:space:]-]?limit) ]]
 }
 
+_mayor_notify_receipt_has_token() {
+  local text="${1:-}" token="${2:-}"
+  [[ -n "$token" ]] || return 1
+  [[ "$text" =~ (^|[^[:alnum:]_])${token}([^[:alnum:]_]|$) ]]
+}
+
+_mayor_notify_classify_receipt() {
+  local send_rc="${1:-1}" details="${2:-}" details_one_line details_lower
+  _MAYOR_NOTIFY_CLASSIFY_OUTCOME="transport-failure"
+  _MAYOR_NOTIFY_CLASSIFY_REASON="transport-command-failed"
+  _MAYOR_NOTIFY_CLASSIFY_MATCHER="transport-command-failed"
+  details_one_line="$(_one_line "$details")"
+  details_lower="$(printf '%s' "$details_one_line" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "$send_rc" -eq 0 ]]; then
+    if [[ "$details_lower" =~ stale[[:space:]_-]*ack|ack[[:space:]_-]*stale|mismatched[[:space:]_-]*ack ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="stale-ack"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="stale-ack"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="stale-ack-pattern"
+    elif [[ "$details_lower" =~ (^|[^[:alnum:]_])ack[[:space:]]*=[[:space:]]*(delivered|ok|true|1)([^[:alnum:]_]|$) ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="ack-assignment"
+    elif [[ "$details_lower" =~ (^|[^[:alnum:]_])message_id([^[:alnum:]_]|$)|(^|[^[:alnum:]_])delivery_id([^[:alnum:]_]|$)|(^|[^[:alnum:]_])receipt([^[:alnum:]_]|$)|(^|[^[:alnum:]_])delivered([^[:alnum:]_]|$) ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="receipt-identifier"
+    elif _mayor_notify_receipt_has_token "$details_lower" "ack"; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="ack-token"
+    elif _mayor_notify_receipt_has_token "$details_lower" "copy"; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="copy-token"
+    elif _mayor_notify_receipt_has_token "$details_lower" "received"; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="received-token"
+    elif _mayor_notify_receipt_has_token "$details_lower" "roger"; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="roger-token"
+    else
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="no-ack-pattern"
+    fi
+    return 0
+  fi
+
+  if _mayor_notify_is_transient_failure "$details_one_line"; then
+    _MAYOR_NOTIFY_CLASSIFY_OUTCOME="transport-failure"
+    _MAYOR_NOTIFY_CLASSIFY_REASON="transport-transient-failure"
+    _MAYOR_NOTIFY_CLASSIFY_MATCHER="transient-transport-pattern"
+  else
+    _MAYOR_NOTIFY_CLASSIFY_OUTCOME="transport-failure"
+    _MAYOR_NOTIFY_CLASSIFY_REASON="transport-hard-failure"
+    _MAYOR_NOTIFY_CLASSIFY_MATCHER="hard-transport-pattern"
+  fi
+}
+
 _mayor_dispatch_trigger_key() {
   local reason="${1:-}" pr repo merged_head owner_repo
   if [[ "$reason" =~ ^merged:pr#([0-9]+):# ]]; then
@@ -3184,7 +3246,7 @@ _mayor_notify_rigger() {
   local suppress_decision_log="${2:-0}"
   local channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
   local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" escalated=0
-  local verify_outcome="" verify_reason="" verify_details="" attempt=0 should_retry=0
+  local verify_outcome="" verify_reason="" verify_matcher="" verify_details="" attempt=0 should_retry=0
   local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
 
   [[ -n "$message" ]] || return 1
@@ -3283,31 +3345,15 @@ _mayor_notify_rigger() {
     set -e
     verify_details="$(_one_line "$verify_details")"
 
-    if [[ "$send_rc" -eq 0 ]]; then
-      if [[ "$verify_details" =~ [Ss]tale[[:space:]_-]?[Aa]ck|[Aa]ck[[:space:]_-]?[Ss]tale|mismatched[[:space:]_-]?[Aa]ck ]]; then
-        verify_outcome="stale-ack"
-        verify_reason="stale-ack"
-      elif [[ "$verify_details" =~ [Aa]ck|[Dd]eliver|[Rr]eceipt|message_id|delivery_id ]]; then
-        verify_outcome="delivered"
-        verify_reason="ack-verified"
-      else
-        verify_outcome="missing-ack"
-        verify_reason="missing-ack"
-      fi
-    else
-      if _mayor_notify_is_transient_failure "$verify_details"; then
-        verify_outcome="transport-failure"
-        verify_reason="transport-transient-failure"
-      else
-        verify_outcome="transport-failure"
-        verify_reason="transport-hard-failure"
-      fi
-    fi
+    _mayor_notify_classify_receipt "$send_rc" "$verify_details"
+    verify_outcome="${_MAYOR_NOTIFY_CLASSIFY_OUTCOME:-transport-failure}"
+    verify_reason="${_MAYOR_NOTIFY_CLASSIFY_REASON:-transport-command-failed}"
+    verify_matcher="${_MAYOR_NOTIFY_CLASSIFY_MATCHER:-unknown}"
 
     _mayor_notify_receipt_record "$channel" "$target" "$message_key" "$attempt" "$verify_outcome" "$verify_reason" || true
-    log_event "MAYOR_NOTIFY_RECEIPT channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason details=\"$(_escape_quotes "$verify_details")\""
+    log_event "MAYOR_NOTIFY_RECEIPT channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher details=\"$(_escape_quotes "$verify_details")\""
     if [[ "$suppress_decision_log" != "1" ]]; then
-      _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason" "$context" "$SGT_ROOT" || true
+      _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher" "$context" "$SGT_ROOT" || true
     fi
     _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
 
