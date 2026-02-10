@@ -171,6 +171,21 @@ Mayor also watches refinery queue items that are stuck in `REVIEW_UNCLEAR`:
 export SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS=900
 ```
 
+Mayor also watches witness/refinery heartbeats for stuck-but-still-running sessions:
+- Witness and refinery loops emit per-rig heartbeat files under `~/.sgt/`.
+- If heartbeat age exceeds the stale threshold, mayor emits an escalation event with exact `stale_seconds` and `last_heartbeat`.
+- Escalations are deduped per agent (`witness/<rig>` or `refinery/<rig>`) per dedupe window, and reset on heartbeat recovery.
+- Defaults are:
+
+```bash
+export SGT_AGENT_HEARTBEAT_STALE_SECS=180
+export SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS=900
+```
+
+Runbook action mapping for stuck agents:
+- `notify`: witness/refinery heartbeat stale incidents (session still up, but loop appears stuck) escalate to Rigger with stale context.
+- `nuke`: use `sgt nuke <polecat>` for stale individual polecat workers.
+
 ## Refinery merge retries
 
 Refinery merge attempts now use bounded retry with jitter for transient `gh pr merge` failures.

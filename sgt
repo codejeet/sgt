@@ -21,6 +21,7 @@ SGT_MAYOR_LOCK_LEASE_SECS="${SGT_MAYOR_LOCK_LEASE_SECS:-}" # defaults to interva
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
 SGT_MAYOR_WAKE_DEDUPE_TTL="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}" # 15 seconds
 SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
+SGT_AGENT_HEARTBEAT_STALE_SECS="${SGT_AGENT_HEARTBEAT_STALE_SECS:-180}" # 3 minutes
 SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" # 1 hour
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
@@ -29,6 +30,8 @@ SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
+SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE="$SGT_CONFIG/mayor-agent-heartbeat-watchdog.state"
+SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}" # 15 minutes
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
@@ -647,13 +650,36 @@ _critical_alert_cooldown_secs() {
   echo "$raw"
 }
 
-_deacon_heartbeat_snapshot() {
-  if [[ ! -f "$SGT_DEACON_HEARTBEAT" ]]; then
+_agent_heartbeat_stale_secs() {
+  local raw="${SGT_AGENT_HEARTBEAT_STALE_SECS:-180}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="180"
+  fi
+  echo "$raw"
+}
+
+_mayor_agent_heartbeat_dedupe_secs() {
+  local raw="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="900"
+  fi
+  echo "$raw"
+}
+
+_agent_heartbeat_path() {
+  local agent="${1:-}" rig="${2:-}"
+  [[ -n "$agent" && -n "$rig" ]] || return 1
+  echo "$SGT_CONFIG/${agent}-${rig}-heartbeat.json"
+}
+
+_heartbeat_snapshot_file() {
+  local heartbeat_file="${1:-}"
+  if [[ -z "$heartbeat_file" || ! -f "$heartbeat_file" ]]; then
     echo "-1||missing"
     return 0
   fi
 
-  python3 - "$SGT_DEACON_HEARTBEAT" <<'PY' 2>/dev/null || echo "-1||invalid"
+  python3 - "$heartbeat_file" <<'PY' 2>/dev/null || echo "-1||invalid"
 import datetime
 import json
 import time
@@ -686,6 +712,88 @@ if age < 0:
     age = 0
 print(f"{age}|{raw_ts}|ok")
 PY
+}
+
+_deacon_heartbeat_snapshot() {
+  _heartbeat_snapshot_file "$SGT_DEACON_HEARTBEAT"
+}
+
+_agent_heartbeat_snapshot() {
+  local agent="${1:-}" rig="${2:-}" heartbeat_file
+  heartbeat_file="$(_agent_heartbeat_path "$agent" "$rig")" || {
+    echo "-1||invalid"
+    return 0
+  }
+  _heartbeat_snapshot_file "$heartbeat_file"
+}
+
+_write_agent_heartbeat() {
+  local agent="${1:-}" rig="${2:-}" cycle="${3:-0}" heartbeat_file now
+  heartbeat_file="$(_agent_heartbeat_path "$agent" "$rig")" || return 1
+  now="$(date -Iseconds)"
+  cat > "$heartbeat_file" <<HEARTBEAT
+{
+  "timestamp": "$now",
+  "cycle": ${cycle:-0},
+  "pid": $$,
+  "agent": "$agent",
+  "rig": "$rig"
+}
+HEARTBEAT
+}
+
+_mayor_agent_heartbeat_watchdog_key() {
+  local agent="${1:-}" rig="${2:-}"
+  [[ -n "$agent" && -n "$rig" ]] || return 1
+  printf '%s|%s' "$agent" "$rig"
+}
+
+_mayor_should_notify_agent_heartbeat_watchdog() {
+  local agent="${1:-}" rig="${2:-}"
+  [[ -n "$agent" && -n "$rig" ]] || return 1
+
+  local dedupe_secs now key prev_line prev_epoch state_tmp
+  dedupe_secs="$(_mayor_agent_heartbeat_dedupe_secs)"
+  now="$(date +%s)"
+  key="$(_mayor_agent_heartbeat_watchdog_key "$agent" "$rig")" || return 1
+  prev_epoch=""
+
+  if [[ -f "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" ]]; then
+    prev_line=$(awk -F'\t' -v key="$key" '$1==key {print; exit}' "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" 2>/dev/null || true)
+    if [[ -n "$prev_line" ]]; then
+      IFS=$'\t' read -r _ prev_epoch _ <<< "$prev_line"
+    fi
+  fi
+
+  if [[ "$dedupe_secs" -gt 0 && "$prev_epoch" =~ ^[0-9]+$ ]]; then
+    local age=$((now - prev_epoch))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -lt "$dedupe_secs" ]]; then
+      return 1
+    fi
+  fi
+
+  state_tmp="$(mktemp)"
+  if [[ -f "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" ]]; then
+    awk -F'\t' -v key="$key" '$1!=key {print $0}' "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" > "$state_tmp" 2>/dev/null || true
+  fi
+  printf '%s\t%s\t%s\n' "$key" "$now" "$dedupe_secs" >> "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE"
+  return 0
+}
+
+_mayor_reset_agent_heartbeat_watchdog() {
+  local agent="${1:-}" rig="${2:-}"
+  [[ -n "$agent" && -n "$rig" ]] || return 0
+  [[ -f "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" ]] || return 0
+
+  local key state_tmp
+  key="$(_mayor_agent_heartbeat_watchdog_key "$agent" "$rig")" || return 0
+  state_tmp="$(mktemp)"
+  awk -F'\t' -v key="$key" '$1!=key {print $0}' "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE" > "$state_tmp" 2>/dev/null || true
+  mv "$state_tmp" "$SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE"
 }
 
 _deacon_heartbeat_health() {
@@ -2264,11 +2372,14 @@ _witness_loop() {
   local repo
   repo="$(rig_repo "$rig")"
   local owner_repo="${repo#https://github.com/}"
+  local cycle=0
 
   log_event "WITNESS_START rig=$rig"
   echo "[witness/$rig] started — monitoring polecats"
 
   while true; do
+    cycle=$((cycle + 1))
+    _write_agent_heartbeat "witness" "$rig" "$cycle" || true
     local now
     now=$(date +%s)
 
@@ -2768,6 +2879,7 @@ _refinery_loop() {
   local rig="$1"
   local repo
   repo="$(rig_repo "$rig")"
+  local cycle=0
 
   log_event "REFINERY_START rig=$rig"
 
@@ -2778,6 +2890,8 @@ _refinery_loop() {
   echo "[refinery/$rig] started — event-driven (fallback every 30s)"
 
   while true; do
+    cycle=$((cycle + 1))
+    _write_agent_heartbeat "refinery" "$rig" "$cycle" || true
     # Block on FIFO with timeout — wakes on event OR periodic scan
     local wake_reason=""
     read -t 30 -u 4 wake_reason 2>/dev/null || true
@@ -3764,20 +3878,40 @@ _mayor_loop() {
     fi
 
     # Check witnesses and refineries
+    local agent_hb_stale_secs
+    agent_hb_stale_secs="$(_agent_heartbeat_stale_secs)"
     for rig_file in "$SGT_RIGS"/*; do
       [[ -f "$rig_file" ]] || continue
       local rname
       rname="$(basename "$rig_file")"
-      if ! tmux has-session -t "sgt-witness-$rname" 2>/dev/null; then
-        issues_found+="  - witness/$rname is DOWN\n"
-        sgt witness start "$rname" 2>/dev/null
-        actions_taken+="  - restarted witness/$rname\n"
-      fi
-      if ! tmux has-session -t "sgt-refinery-$rname" 2>/dev/null; then
-        issues_found+="  - refinery/$rname is DOWN\n"
-        sgt refinery start "$rname" 2>/dev/null
-        actions_taken+="  - restarted refinery/$rname\n"
-      fi
+      for agent in witness refinery; do
+        local agent_session
+        agent_session="sgt-${agent}-${rname}"
+        if ! tmux has-session -t "$agent_session" 2>/dev/null; then
+          issues_found+="  - ${agent}/$rname is DOWN\n"
+          sgt "$agent" start "$rname" 2>/dev/null
+          actions_taken+="  - restarted ${agent}/$rname\n"
+          _mayor_reset_agent_heartbeat_watchdog "$agent" "$rname"
+          continue
+        fi
+
+        local agent_hb_age agent_hb_ts agent_hb_state
+        IFS='|' read -r agent_hb_age agent_hb_ts agent_hb_state <<< "$(_agent_heartbeat_snapshot "$agent" "$rname")"
+        if [[ "$agent_hb_state" == "ok" && "$agent_hb_age" =~ ^[0-9]+$ ]]; then
+          if [[ "$agent_hb_age" -gt "$agent_hb_stale_secs" ]]; then
+            issues_found+="  - ${agent}/$rname heartbeat stale (stale_seconds=${agent_hb_age}s threshold>${agent_hb_stale_secs}s last_heartbeat=${agent_hb_ts})\n"
+            if _mayor_should_notify_agent_heartbeat_watchdog "$agent" "$rname"; then
+              _mayor_notify_rigger "mayor escalated: ${agent}/$rname heartbeat stale stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=${agent_hb_ts} runbook_action=notify"
+              actions_taken+="  - escalated stale ${agent}/$rname heartbeat (stale_seconds=${agent_hb_age}s)\n"
+              log_event "MAYOR_AGENT_HEARTBEAT_NOTIFY agent=$agent rig=$rname stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=$(_escape_quotes "$agent_hb_ts") dedupe_window=$(_mayor_agent_heartbeat_dedupe_secs)"
+            else
+              log_event "MAYOR_AGENT_HEARTBEAT_SUPPRESS agent=$agent rig=$rname stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=$(_escape_quotes "$agent_hb_ts") dedupe_window=$(_mayor_agent_heartbeat_dedupe_secs)"
+            fi
+          else
+            _mayor_reset_agent_heartbeat_watchdog "$agent" "$rname"
+          fi
+        fi
+      done
     done
 
     # === 2. Check merge queue (refinery handles review + merge) ===
