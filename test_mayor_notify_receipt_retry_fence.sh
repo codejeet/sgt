@@ -185,8 +185,16 @@ run_case_transient_then_success() {
     echo "expected transient case decision-log entry for failed attempt" >&2
     exit 1
   }
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=1 .*reason=transport-transient-failure .*matcher=transient-transport-pattern' "$decision_log" || {
+    echo "expected transient case attempt 1 matcher/reason context in decision log" >&2
+    exit 1
+  }
   grep -q 'MAYOR NOTIFY RECEIPT .*attempt=2 .*outcome=delivered' "$decision_log" || {
     echo "expected transient case decision-log entry for retry success" >&2
+    exit 1
+  }
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=2 .*reason=ack-verified .*matcher=ack-assignment' "$decision_log" || {
+    echo "expected transient case attempt 2 matcher/reason context in decision log" >&2
     exit 1
   }
 }
@@ -214,12 +222,12 @@ run_case_hard_failure_deduped_escalation() {
 
   [[ "$(cat "$state_dir/openclaw.count")" == "1" ]] || { echo "expected hard failure replay to stay deduped at one send attempt" >&2; exit 1; }
   decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
-  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-transport-hard-failure' "$decision_log")" -ne 1 ]]; then
-    echo "expected exactly one hard-failure escalation decision" >&2
+  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-transport-failure .*raw_reason=notify-transport-hard-failure .*matcher=hard-transport-pattern' "$decision_log")" -ne 1 ]]; then
+    echo "expected exactly one hard-failure escalation decision with normalized reason and matcher" >&2
     exit 1
   fi
-  if [[ "$(grep -c 'MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped' "$decision_log")" -ne 1 ]]; then
-    echo "expected one deduped replay skip decision" >&2
+  if [[ "$(grep -c 'MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped .*normalized_reason=notify-transport-failure .*matcher=hard-transport-pattern' "$decision_log")" -ne 1 ]]; then
+    echo "expected one deduped replay skip decision with matcher context" >&2
     exit 1
   fi
 }
@@ -249,8 +257,8 @@ run_case_restart_replay() {
 
   [[ "$(cat "$state_dir/openclaw.count")" == "2" ]] || { echo "expected restart replay to avoid additional sends after retry budget exhausted" >&2; exit 1; }
   decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
-  grep -q 'MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped' "$decision_log" || {
-    echo "expected restart replay deduped escalation reason in decision log" >&2
+  grep -q 'MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped .*normalized_reason=notify-transport-failure .*raw_reason=transport-transient-failure .*matcher=transient-transport-pattern' "$decision_log" || {
+    echo "expected restart replay deduped escalation decision to preserve matcher context" >&2
     exit 1
   }
 }
@@ -278,8 +286,8 @@ run_case_non_ack_retry_and_escalate() {
     echo "expected attempt 2 missing-ack matcher in non-ack case" >&2
     exit 1
   }
-  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-missing-ack' "$decision_log")" -ne 1 ]]; then
-    echo "expected one notify-missing-ack escalation decision in non-ack case" >&2
+  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-missing-ack .*raw_reason=notify-missing-ack .*matcher=no-ack-pattern' "$decision_log")" -ne 1 ]]; then
+    echo "expected one notify-missing-ack escalation decision with matcher context in non-ack case" >&2
     exit 1
   fi
 }
