@@ -28,6 +28,7 @@ SGT_MAYOR_FIFO="$SGT_CONFIG/mayor.fifo"
 SGT_MAYOR_LOCK="$SGT_CONFIG/mayor.lock"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
+SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
@@ -709,6 +710,106 @@ _mayor_critical_alert_message() {
   echo "critical/high issues on $rig repo=$repo: ${first:-unknown}${more}"
 }
 
+_mayor_review_unclear_stale_secs() {
+  local raw="${SGT_MAYOR_REVIEW_UNCLEAR_STALE_SECS:-900}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=900
+  echo "$raw"
+}
+
+_mayor_review_watchdog_signature() {
+  local state="${1:-}" unclear_since="${2:-}" head_sha="${3:-}"
+  printf 'state=%s|since=%s|head=%s' "${state:-unknown}" "${unclear_since:-0}" "${head_sha:-unknown}"
+}
+
+_mayor_should_notify_review_watchdog() {
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" state="${4:-}" unclear_since="${5:-}" head_sha="${6:-}"
+  [[ -n "$rig" && -n "$repo" && -n "$pr" && -n "$state" ]] || return 1
+
+  local key signature now prev_line prev_signature state_tmp
+  key="${rig}|${repo}|${pr}"
+  signature="$(_mayor_review_watchdog_signature "$state" "$unclear_since" "$head_sha")"
+  now="$(date +%s)"
+  prev_signature=""
+
+  if [[ -f "$SGT_MAYOR_REVIEW_WATCHDOG_STATE" ]]; then
+    prev_line=$(awk -F'\t' -v key="$key" '$1==key {print; exit}' "$SGT_MAYOR_REVIEW_WATCHDOG_STATE" 2>/dev/null || true)
+    if [[ -n "$prev_line" ]]; then
+      IFS=$'\t' read -r _ prev_signature _ <<< "$prev_line"
+    fi
+  fi
+
+  if [[ "$prev_signature" == "$signature" ]]; then
+    return 1
+  fi
+
+  state_tmp="$(mktemp)"
+  if [[ -f "$SGT_MAYOR_REVIEW_WATCHDOG_STATE" ]]; then
+    awk -F'\t' -v key="$key" '$1!=key {print $0}' "$SGT_MAYOR_REVIEW_WATCHDOG_STATE" > "$state_tmp" 2>/dev/null || true
+  fi
+  printf '%s\t%s\t%s\n' "$key" "$signature" "$now" >> "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_REVIEW_WATCHDOG_STATE"
+  return 0
+}
+
+_mayor_review_watchdog_collect_stale() {
+  local now_epoch="${1:-$(date +%s)}"
+  local threshold="${2:-$(_mayor_review_unclear_stale_secs)}"
+  local merge_dir="$SGT_CONFIG/merge-queue"
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=0
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || now_epoch="$(date +%s)"
+  [[ -d "$merge_dir" ]] || return 0
+
+  local f mqname mq_rig mq_pr mq_repo mq_issue mq_head_sha mq_review_state mq_review_unclear_since age
+  for f in "$merge_dir"/*; do
+    [[ -f "$f" ]] || continue
+    mqname="$(basename "$f")"
+    mq_pr=""
+    mq_rig=""
+    mq_repo=""
+    mq_issue=""
+    mq_head_sha=""
+    mq_review_state=""
+    mq_review_unclear_since=""
+    eval "$(grep -E '^(RIG|PR|REPO|ISSUE|HEAD_SHA|REVIEW_STATE|REVIEW_UNCLEAR_SINCE)=' "$f")"
+    mq_rig="${RIG:-}"
+    mq_pr="${PR:-}"
+    mq_repo="${REPO:-}"
+    mq_issue="${ISSUE:-0}"
+    mq_head_sha="${HEAD_SHA:-}"
+    mq_review_state="${REVIEW_STATE:-REVIEW_PENDING}"
+    mq_review_unclear_since="${REVIEW_UNCLEAR_SINCE:-}"
+    [[ "$mq_review_state" == "REVIEW_UNCLEAR" ]] || continue
+    [[ "$mq_review_unclear_since" =~ ^[0-9]+$ ]] || continue
+    age=$((now_epoch - mq_review_unclear_since))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -ge "$threshold" ]]; then
+      printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "${mqname:-unknown}" "${mq_rig:-unknown}" "${mq_pr:-}" "${mq_repo:-}" "${mq_issue:-0}" \
+        "${mq_review_state}" "${mq_review_unclear_since}" "${age}" "${mq_head_sha:-}" "${threshold}"
+    fi
+  done
+}
+
+_mayor_review_watchdog_status_snapshot() {
+  local threshold now_epoch line count oldest_age age
+  threshold="$(_mayor_review_unclear_stale_secs)"
+  now_epoch="$(date +%s)"
+  count=0
+  oldest_age=0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    IFS='|' read -r _ _ _ _ _ _ _ age _ _ <<< "$line"
+    [[ "$age" =~ ^[0-9]+$ ]] || age=0
+    count=$((count + 1))
+    if [[ "$age" -gt "$oldest_age" ]]; then
+      oldest_age="$age"
+    fi
+  done < <(_mayor_review_watchdog_collect_stale "$now_epoch" "$threshold")
+  printf '%s|%s|%s\n' "$count" "$oldest_age" "$threshold"
+}
+
 _mayor_pre_dispatch_revalidate() {
   local repo="${1:-}"
   local owner_repo owner name snapshot open_prs open_authorized
@@ -758,14 +859,36 @@ _pr_head_sha() {
   gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid // ""' 2>/dev/null || true
 }
 
+_merge_queue_set_field() {
+  local queue_file="${1:-}" field="${2:-}" value="${3:-}"
+  [[ -n "$queue_file" && -f "$queue_file" && -n "$field" ]] || return 1
+  if grep -q "^${field}=" "$queue_file"; then
+    sed -i -E "s|^${field}=.*|${field}=${value}|" "$queue_file"
+  else
+    printf '%s=%s\n' "$field" "$value" >> "$queue_file"
+  fi
+}
+
 _merge_queue_set_head_sha() {
   local queue_file="${1:-}" head_sha="${2:-}"
-  [[ -n "$queue_file" && -f "$queue_file" ]] || return 1
-  if grep -q '^HEAD_SHA=' "$queue_file"; then
-    sed -i -E "s/^HEAD_SHA=.*/HEAD_SHA=${head_sha}/" "$queue_file"
-  else
-    printf 'HEAD_SHA=%s\n' "$head_sha" >> "$queue_file"
+  _merge_queue_set_field "$queue_file" "HEAD_SHA" "$head_sha"
+}
+
+_merge_queue_mark_review_state() {
+  local queue_file="${1:-}" review_state="${2:-}"
+  [[ -n "$queue_file" && -f "$queue_file" && -n "$review_state" ]] || return 1
+  local now review_unclear_since
+  now="$(date +%s)"
+  review_unclear_since=""
+  if [[ "$review_state" == "REVIEW_UNCLEAR" ]]; then
+    review_unclear_since=$(grep -E '^REVIEW_UNCLEAR_SINCE=' "$queue_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    if [[ ! "$review_unclear_since" =~ ^[0-9]+$ ]]; then
+      review_unclear_since="$now"
+    fi
   fi
+  _merge_queue_set_field "$queue_file" "REVIEW_STATE" "$review_state" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UPDATED_AT" "$now" || return 1
+  _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_SINCE" "$review_unclear_since" || return 1
 }
 
 _refinery_merge_attempt_key() {
@@ -1529,6 +1652,13 @@ cmd_status() {
     fi
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "decision-log warning: ${log_fail_age}s ago context=$log_fail_context error=$log_fail_error" "$(_reset)"
   fi
+  local review_watch_count review_watch_oldest review_watch_threshold
+  IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
+  if [[ "$review_watch_count" =~ ^[0-9]+$ && "$review_watch_count" -gt 0 ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "review watchdog: ${review_watch_count} stalled REVIEW_UNCLEAR (oldest=${review_watch_oldest}s threshold>=${review_watch_threshold}s)" "$(_reset)"
+  else
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
+  fi
 
   _section "Dogs"
   local dog_count=0
@@ -2068,6 +2198,9 @@ HEAD_SHA=$pr_head_sha
 AUTO_MERGE=$p_auto_merge
 BACKEND=${BACKEND:-$(_ai_backend_default)}
 TYPE=polecat
+REVIEW_STATE=REVIEW_PENDING
+REVIEW_UPDATED_AT=$(date +%s)
+REVIEW_UNCLEAR_SINCE=
 QUEUED=$(date -Iseconds)
 MQSTATE
 
@@ -2192,6 +2325,9 @@ PR=$pr_num
 HEAD_SHA=$orphan_head_sha
 AUTO_MERGE=true
 TYPE=polecat
+REVIEW_STATE=REVIEW_PENDING
+REVIEW_UPDATED_AT=$(date +%s)
+REVIEW_UNCLEAR_SINCE=
 QUEUED=$(date -Iseconds)
 MQSTATE
 
@@ -2416,9 +2552,9 @@ Closing PR and dispatching rework." 2>/dev/null || true
     REFINERY_REJECT_REASON="$reject_reason"
     return 1
   else
-    echo "[refinery/$rig] PR #$pr — review inconclusive, treating as APPROVE"
+    echo "[refinery/$rig] PR #$pr — review inconclusive, marking REVIEW_UNCLEAR"
     log_event "REFINERY_REVIEW_UNCLEAR pr=#$pr"
-    return 0
+    return 2
   fi
 }
 
@@ -2539,7 +2675,8 @@ _refinery_loop() {
       mqname="$(basename "$f")"
 
       local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA)=' "$f")"
+      local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since=""
+      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE)=' "$f")"
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -2549,6 +2686,9 @@ _refinery_loop() {
       mq_type="${TYPE:-polecat}"
       mq_backend="${BACKEND:-$(_ai_backend_default)}"
       mq_head_sha="${HEAD_SHA:-}"
+      mq_review_state="${REVIEW_STATE:-REVIEW_PENDING}"
+      mq_review_updated_at="${REVIEW_UPDATED_AT:-}"
+      mq_review_unclear_since="${REVIEW_UNCLEAR_SINCE:-}"
 
       echo "[refinery/$rig] processing $mq_type: PR #$mq_pr ($mq_branch)"
       local mq_owner_repo mq_pr_title mq_pr_title_field mq_pr_url mq_issue_url mq_wake_title
@@ -2649,7 +2789,13 @@ _refinery_loop() {
 
       # === AI REVIEW ===
       REFINERY_REJECT_REASON=""
-      if _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig" "$mq_backend"; then
+      local review_rc
+      set +e
+      _refinery_review_pr "$mq_repo" "$mq_pr" "$mq_issue" "$rig" "$mq_backend"
+      review_rc=$?
+      set -e
+      if [[ "$review_rc" -eq 0 ]]; then
+        _merge_queue_mark_review_state "$f" "REVIEW_APPROVED" || true
         # Revalidate immediately before merge to prevent stale queue merges.
         local live_head_sha premerge_reason=""
         if ! live_head_sha=$(_refinery_revalidate_pr_open_head "$mq_repo" "$mq_pr" "$mq_head_sha" "$f"); then
@@ -2720,7 +2866,24 @@ _refinery_loop() {
             --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
           _refinery_merge_attempt_release "$claimed_attempt_file"
         fi
+      elif [[ "$review_rc" -eq 2 ]]; then
+        local unclear_since unclear_age now_epoch
+        _merge_queue_mark_review_state "$f" "REVIEW_UNCLEAR" || true
+        unclear_since=$(grep -E '^REVIEW_UNCLEAR_SINCE=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        now_epoch="$(date +%s)"
+        unclear_age=0
+        if [[ "$unclear_since" =~ ^[0-9]+$ ]]; then
+          unclear_age=$((now_epoch - unclear_since))
+          if [[ "$unclear_age" -lt 0 ]]; then
+            unclear_age=0
+          fi
+        fi
+        echo "[refinery/$rig] PR #$mq_pr held in REVIEW_UNCLEAR (age=${unclear_age}s)"
+        log_event "REFINERY_REVIEW_UNCLEAR_PENDING pr=#$mq_pr issue=#$mq_issue age=${unclear_age}s"
+        _refinery_merge_attempt_release "$claimed_attempt_file"
+        continue
       else
+        _merge_queue_mark_review_state "$f" "REVIEW_REJECTED" || true
         # REJECTED — close PR, re-dispatch with feedback
         echo "[refinery/$rig] PR #$mq_pr rejected — dispatching rework"
         gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
@@ -3359,6 +3522,7 @@ _mayor_loop() {
     local actions_taken=""
     local notify_rigger=""
     local snapshot_freshness=""
+    local review_watchdog_notes=""
 
     if [[ "$wake_reason" != "periodic" ]]; then
       local event_reason wake_summary event_key now_ts last_seen age skip_reason
@@ -3463,6 +3627,28 @@ _mayor_loop() {
     if [[ "$mq_count" =~ ^[0-9]+$ && "$mq_count" -gt 0 ]]; then
       issues_found+="  - merge queue has $mq_count item(s)\n"
     fi
+
+    # === 2b. Watchdog: stalled REVIEW_UNCLEAR refinery queue items ===
+    local review_watch_line
+    while IFS= read -r review_watch_line; do
+      [[ -n "$review_watch_line" ]] || continue
+      local rw_queue rw_rig rw_pr rw_repo rw_issue rw_state rw_since rw_age rw_head rw_threshold
+      IFS='|' read -r rw_queue rw_rig rw_pr rw_repo rw_issue rw_state rw_since rw_age rw_head rw_threshold <<< "$review_watch_line"
+      local rw_owner_repo rw_pr_url rw_issue_url
+      rw_owner_repo="$(_repo_owner_repo "$rw_repo")"
+      rw_pr_url="$(_repo_pr_url "$rw_repo" "$rw_pr")"
+      rw_issue_url="$(_repo_issue_url "$rw_repo" "$rw_issue")"
+      issues_found+="  - refinery review unclear PR #$rw_pr on ${rw_owner_repo} (rig=${rw_rig} age=${rw_age}s threshold>=${rw_threshold}s queue=${rw_queue})\n"
+      review_watchdog_notes+="  - queue=${rw_queue} rig=${rw_rig} pr=#${rw_pr} state=${rw_state} age=${rw_age}s threshold>=${rw_threshold}s since=${rw_since}\n"
+      needs_ai=true
+      if _mayor_should_notify_review_watchdog "$rw_rig" "$rw_repo" "$rw_pr" "$rw_state" "$rw_since" "$rw_head"; then
+        _mayor_notify_rigger "mayor escalated: refinery review stalled rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s threshold=${rw_threshold}s pr_url=$rw_pr_url issue_url=$rw_issue_url"
+        actions_taken+="  - escalated stalled refinery review for PR #$rw_pr ($rw_owner_repo, age=${rw_age}s)\n"
+        log_event "MAYOR_REVIEW_WATCHDOG_NOTIFY rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s threshold=${rw_threshold}s"
+      else
+        log_event "MAYOR_REVIEW_WATCHDOG_SUPPRESS rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s"
+      fi
+    done < <(_mayor_review_watchdog_collect_stale)
 
     # === 3. Check for stale polecats (running > 30min) ===
     for pf in "$SGT_CONFIG/polecats"/*; do
@@ -3572,6 +3758,9 @@ ISSUE=${linked_issue}
 HEAD_SHA=$orphan_head_sha
 TYPE=polecat
 AUTO_MERGE=true
+REVIEW_STATE=REVIEW_PENDING
+REVIEW_UPDATED_AT=$(date +%s)
+REVIEW_UNCLEAR_SINCE=
 QUEUED=$(date -Iseconds)
 MQORPHAN
                 actions_taken+="  - queued orphaned PR #$pr_num ($rname) for refinery\n"
@@ -3601,6 +3790,9 @@ MQORPHAN
       fi
       if [[ -n "$snapshot_freshness" ]]; then
         cycle_entry+="$(printf '  Snapshot Freshness:\n%b' "$snapshot_freshness")"
+      fi
+      if [[ -n "$review_watchdog_notes" ]]; then
+        cycle_entry+="$(printf '  Review Watchdog:\n%b' "$review_watchdog_notes")"
       fi
       if _mayor_record_decision "$cycle_entry" "cycle-summary" "$SGT_ROOT"; then
         echo "[mayor] logged issues/actions"
