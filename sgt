@@ -1367,6 +1367,11 @@ PSTATE
 
 cmd_status() {
   ensure_init
+  local status_term_cols status_pr_title_cols
+  status_term_cols="$(_term_cols)"
+  [[ "$status_term_cols" =~ ^[0-9]+$ ]] || status_term_cols=80
+  status_pr_title_cols=$((status_term_cols - 10))
+  (( status_pr_title_cols < 0 )) && status_pr_title_cols=0
 
   _section "Agents"
 
@@ -1512,7 +1517,7 @@ cmd_status() {
 
       # Optional: show PR title as a second dense line (only if present)
       if [[ -n "$pr_title" ]]; then
-        printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:$((_term_cols()-10))}" "$(_reset)"
+        printf "  %s%s%s\n" "$(_fg_gray)" "      ↳ ${pr_title:0:status_pr_title_cols}" "$(_reset)"
       fi
     )
   done
@@ -1522,6 +1527,7 @@ cmd_status() {
   else
     printf "\n%s%s%s\n" "$(_fg_gray)" "$count polecat(s) tracked" "$(_reset)"
   fi
+  return 0
 }
 
 
