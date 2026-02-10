@@ -34,6 +34,7 @@ SGT_MAYOR_CI_CHECK_WATCHDOG_STATE="$SGT_CONFIG/mayor-ci-check-watchdog.state"
 SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE="$SGT_CONFIG/mayor-agent-heartbeat-watchdog.state"
 SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}" # 15 minutes
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
+SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
@@ -5053,89 +5054,172 @@ cmd_daemon_status() {
 
 _mayor_build_briefing() {
   local briefing="$SGT_CONFIG/mayor-briefing.md"
+  local briefing_tmp now_iso now_epoch
+  now_iso="$(date -Iseconds)"
+  now_epoch="$(date +%s)"
+  briefing_tmp="$(mktemp "$SGT_CONFIG/mayor-briefing.tmp.XXXXXX")"
 
-  cat > "$briefing" <<'HEADER'
+  cat > "$briefing_tmp" <<HEADER
 # SGT System Briefing
 
 You are the Mayor — the global coordinator for SGT (Simple GitHub Gastown).
 Review this briefing and take action.
 
+generated_at: $now_iso
+generated_at_epoch: $now_epoch
+
 HEADER
 
   # System status
-  echo "## System Status" >> "$briefing"
-  echo '```' >> "$briefing"
-  cmd_status 2>&1 >> "$briefing"
-  echo '```' >> "$briefing"
-  echo "" >> "$briefing"
+  echo "## System Status" >> "$briefing_tmp"
+  echo '```' >> "$briefing_tmp"
+  cmd_status 2>&1 >> "$briefing_tmp"
+  echo '```' >> "$briefing_tmp"
+  echo "" >> "$briefing_tmp"
 
   # Recent log
-  echo "## Recent Activity (last 30 events)" >> "$briefing"
-  echo '```' >> "$briefing"
-  tail -30 "$SGT_LOG" 2>/dev/null >> "$briefing" || echo "no log" >> "$briefing"
-  echo '```' >> "$briefing"
-  echo "" >> "$briefing"
+  echo "## Recent Activity (last 30 events)" >> "$briefing_tmp"
+  echo '```' >> "$briefing_tmp"
+  tail -30 "$SGT_LOG" 2>/dev/null >> "$briefing_tmp" || echo "no log" >> "$briefing_tmp"
+  echo '```' >> "$briefing_tmp"
+  echo "" >> "$briefing_tmp"
 
   # Merge queue (refinery handles review + merge)
-  echo "## Merge Queue (pending refinery review + merge)" >> "$briefing"
+  echo "## Merge Queue (pending refinery review + merge)" >> "$briefing_tmp"
   local mq_count=0
   if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
     for mqf in "$SGT_CONFIG/merge-queue"/*; do
       [[ -f "$mqf" ]] || continue
       mq_count=$((mq_count + 1))
-      echo "- $(basename "$mqf"): $(grep '^PR=' "$mqf" | cut -d= -f2)" >> "$briefing"
+      echo "- $(basename "$mqf"): $(grep '^PR=' "$mqf" | cut -d= -f2)" >> "$briefing_tmp"
     done
   fi
-  [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$briefing"
-  echo "" >> "$briefing"
+  [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$briefing_tmp"
+  echo "" >> "$briefing_tmp"
 
   # Open issues across all rigs (sgt-authorized only)
-  echo "## Open Issues (all rigs, sgt-authorized)" >> "$briefing"
+  echo "## Open Issues (all rigs, sgt-authorized)" >> "$briefing_tmp"
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
     local rname repo
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
-    echo "### $rname ($repo)" >> "$briefing"
+    echo "### $rname ($repo)" >> "$briefing_tmp"
     gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number,title,labels,milestone \
       --jq '.[] | "- #\(.number): \(.title) [\(.labels | map(.name) | join(","))] \(if .milestone then "(" + .milestone.title + ")" else "" end)"' \
-      2>/dev/null >> "$briefing" || echo "  (couldn't fetch)" >> "$briefing"
-    echo "" >> "$briefing"
+      2>/dev/null >> "$briefing_tmp" || echo "  (couldn't fetch)" >> "$briefing_tmp"
+    echo "" >> "$briefing_tmp"
   done
 
   # Open PRs across all rigs
-  echo "## Open PRs (all rigs)" >> "$briefing"
+  echo "## Open PRs (all rigs)" >> "$briefing_tmp"
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
     local rname repo
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
-    echo "### $rname" >> "$briefing"
+    echo "### $rname" >> "$briefing_tmp"
     gh pr list --repo "$repo" --state open --json number,title,headRefName,mergeable \
       --jq '.[] | "- PR #\(.number): \(.title) [\(.headRefName)] mergeable=\(.mergeable)"' \
-      2>/dev/null >> "$briefing" || echo "  (couldn't fetch)" >> "$briefing"
-    echo "" >> "$briefing"
+      2>/dev/null >> "$briefing_tmp" || echo "  (couldn't fetch)" >> "$briefing_tmp"
+    echo "" >> "$briefing_tmp"
   done
 
   # Escalation config
   if [[ -f "$SGT_ESCALATION" ]]; then
-    echo "## Escalation Rules" >> "$briefing"
-    echo '```json' >> "$briefing"
-    cat "$SGT_ESCALATION" >> "$briefing"
-    echo '```' >> "$briefing"
-    echo "" >> "$briefing"
+    echo "## Escalation Rules" >> "$briefing_tmp"
+    echo '```json' >> "$briefing_tmp"
+    cat "$SGT_ESCALATION" >> "$briefing_tmp"
+    echo '```' >> "$briefing_tmp"
+    echo "" >> "$briefing_tmp"
   fi
 
   # Mayor history (last decisions)
   if [[ -f "$SGT_CONFIG/mayor-decisions.log" ]]; then
-    echo "## Recent Mayor Decisions" >> "$briefing"
-    echo '```' >> "$briefing"
-    tail -20 "$SGT_CONFIG/mayor-decisions.log" >> "$briefing"
-    echo '```' >> "$briefing"
-    echo "" >> "$briefing"
+    echo "## Recent Mayor Decisions" >> "$briefing_tmp"
+    echo '```' >> "$briefing_tmp"
+    tail -20 "$SGT_CONFIG/mayor-decisions.log" >> "$briefing_tmp"
+    echo '```' >> "$briefing_tmp"
+    echo "" >> "$briefing_tmp"
   fi
 
+  mv -f "$briefing_tmp" "$briefing"
   echo "$briefing"
+}
+
+_mayor_briefing_stale_secs() {
+  local secs="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}"
+  [[ "$secs" =~ ^[0-9]+$ ]] || secs=5
+  echo "$secs"
+}
+
+_mayor_briefing_snapshot() {
+  local briefing="${1:-$SGT_CONFIG/mayor-briefing.md}"
+  local stale_secs="${2:-$(_mayor_briefing_stale_secs)}"
+  local now_epoch generated_epoch generated_at age status
+  now_epoch="$(date +%s)"
+
+  if [[ ! -f "$briefing" ]]; then
+    echo "missing|unknown|-1|$stale_secs"
+    return 1
+  fi
+
+  generated_at="$(awk -F': ' '/^generated_at: / {print $2; exit}' "$briefing" 2>/dev/null || true)"
+  generated_epoch="$(awk -F': ' '/^generated_at_epoch: / {print $2; exit}' "$briefing" 2>/dev/null || true)"
+  if [[ -z "$generated_at" || -z "$generated_epoch" || ! "$generated_epoch" =~ ^[0-9]+$ ]]; then
+    echo "invalid|${generated_at:-unknown}|-1|$stale_secs"
+    return 1
+  fi
+
+  age=$((now_epoch - generated_epoch))
+  (( age < 0 )) && age=0
+  if [[ "$age" -gt "$stale_secs" ]]; then
+    status="stale"
+  else
+    status="fresh"
+  fi
+  echo "${status}|${generated_at}|${age}|${stale_secs}"
+  [[ "$status" == "fresh" ]]
+}
+
+_mayor_prepare_briefing_for_cycle() {
+  local briefing="$SGT_CONFIG/mayor-briefing.md"
+  local stale_secs pre_snapshot pre_status pre_generated_at pre_age pre_threshold stale_detected
+  local snapshot status generated_at age threshold refresh_attempted path
+  stale_secs="$(_mayor_briefing_stale_secs)"
+  pre_snapshot="$(_mayor_briefing_snapshot "$briefing" "$stale_secs" || true)"
+  IFS='|' read -r pre_status pre_generated_at pre_age pre_threshold <<< "${pre_snapshot:-missing|unknown|-1|$stale_secs}"
+
+  stale_detected="false"
+  if [[ "$pre_status" != "fresh" ]]; then
+    stale_detected="true"
+  fi
+
+  _mayor_build_briefing >/dev/null || return 1
+  snapshot="$(_mayor_briefing_snapshot "$briefing" "$stale_secs" || true)"
+  IFS='|' read -r status generated_at age threshold <<< "${snapshot:-invalid|unknown|-1|$stale_secs}"
+
+  refresh_attempted="false"
+  path="fresh"
+  if [[ "$status" != "fresh" ]]; then
+    refresh_attempted="true"
+    _mayor_build_briefing >/dev/null || return 1
+    snapshot="$(_mayor_briefing_snapshot "$briefing" "$stale_secs" || true)"
+    IFS='|' read -r status generated_at age threshold <<< "${snapshot:-invalid|unknown|-1|$stale_secs}"
+    path="refreshed"
+  elif [[ "$stale_detected" == "true" ]]; then
+    path="refreshed"
+  fi
+
+  if [[ "$status" != "fresh" ]]; then
+    path="aborted"
+    log_event "MAYOR_BRIEFING_GATE stale_detected=$stale_detected path=$path status=$status generated_at=\"$(_escape_quotes "${generated_at:-unknown}")\" age=${age:-unknown}s threshold=${stale_secs}s refresh_attempted=$refresh_attempted pre_status=$pre_status pre_generated_at=\"$(_escape_quotes "${pre_generated_at:-unknown}")\" pre_age=${pre_age:-unknown}s"
+    echo "${briefing}|${status}|${generated_at:-unknown}|${age:-1}|${stale_secs}|${stale_detected}|${path}"
+    return 1
+  fi
+
+  log_event "MAYOR_BRIEFING_GATE stale_detected=$stale_detected path=$path status=$status generated_at=\"$(_escape_quotes "${generated_at:-unknown}")\" age=${age:-unknown}s threshold=${stale_secs}s refresh_attempted=$refresh_attempted pre_status=$pre_status pre_generated_at=\"$(_escape_quotes "${pre_generated_at:-unknown}")\" pre_age=${pre_age:-unknown}s"
+  echo "${briefing}|${status}|${generated_at:-unknown}|${age:-1}|${stale_secs}|${stale_detected}|${path}"
 }
 
 _mayor_wake_summary() {
@@ -5668,8 +5752,17 @@ _mayor_loop() {
       mkdir -p "$mayor_workspace"
       _mayor_dispatch_snapshot_file "$dispatch_snapshot_file"
 
-      local briefing
-      briefing=$(_mayor_build_briefing)
+      local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path
+      if ! briefing_gate="$(_mayor_prepare_briefing_for_cycle)"; then
+        IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "${briefing_gate:-$SGT_CONFIG/mayor-briefing.md|invalid|unknown|-1|$(_mayor_briefing_stale_secs)|true|aborted}"
+        echo "[mayor] AI cycle aborted — briefing freshness gate failed (status=${briefing_status:-invalid} age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s path=${briefing_path:-aborted})"
+        _mayor_record_decision "MAYOR AI CYCLE ABORT reason_code=stale-briefing path=${briefing_path:-aborted} status=${briefing_status:-invalid} stale_detected=${briefing_stale_detected:-true} generated_at=\"${briefing_generated_at:-unknown}\" age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s" "briefing-freshness-gate" "$SGT_ROOT" || true
+        log_event "MAYOR_AI_CYCLE aborted reason=stale-briefing path=${briefing_path:-aborted} status=${briefing_status:-invalid} stale_detected=${briefing_stale_detected:-true} generated_at=\"$(_escape_quotes "${briefing_generated_at:-unknown}")\" age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s"
+        continue
+      fi
+      IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "$briefing_gate"
+      echo "[mayor] briefing freshness gate path=${briefing_path} stale_detected=${briefing_stale_detected} age=${briefing_age}s threshold=${briefing_threshold}s generated_at=${briefing_generated_at}"
+      log_event "MAYOR_BRIEFING_GATE_STATUS path=${briefing_path} stale_detected=${briefing_stale_detected} status=${briefing_status} generated_at=\"$(_escape_quotes "${briefing_generated_at}")\" age=${briefing_age}s threshold=${briefing_threshold}s"
 
       cat > "$mayor_workspace/CLAUDE.md" <<MAYORMD
 # Mayor — Emergency Decision
