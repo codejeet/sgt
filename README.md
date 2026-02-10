@@ -84,6 +84,18 @@ Mayor wake processing is also cycle-idempotent:
 - Replayed identical `merged:*` wake events in that cycle produce only one AI dispatch decision.
 - Non-periodic wake summaries are emitted once per coalesced event in order.
 
+Mayor wake processing also applies short-lived cross-cycle stale-trigger suppression:
+- Mayor dedupes identical wake trigger keys (event key before `|` metadata, e.g. `merged:pr#77:#40:rig-a`) for a short TTL window.
+- Distinct wake keys still pass through immediately, even inside that dedupe window.
+- Default wake dedupe TTL: `15` seconds, configurable with:
+
+```bash
+export SGT_MAYOR_WAKE_DEDUPE_TTL=15
+```
+
+Set `SGT_MAYOR_WAKE_DEDUPE_TTL=0` to disable wake-trigger dedupe.
+- Suppressed stale triggers emit an explicit skip reason in mayor output, Rigger notification status, and `~/.sgt/mayor-decisions.log` (`MAYOR WAKE SKIP (duplicate-trigger)`).
+
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
 
