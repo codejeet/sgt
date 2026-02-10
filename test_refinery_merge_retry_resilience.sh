@@ -43,7 +43,30 @@ inc_file() {
 }
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then
-  echo "sgt-authorized"
+  shift 2
+  json_fields=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_fields="${2:-}"
+        shift 2
+        ;;
+      --jq)
+        shift 2
+        ;;
+      --repo)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  case "$json_fields" in
+    labels) echo "sgt-authorized" ;;
+    state) echo "OPEN" ;;
+    *) echo "" ;;
+  esac
   exit 0
 fi
 
@@ -86,6 +109,9 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
         echo "OPEN|live111"
       fi
       ;;
+    state,mergeCommit)
+      echo "MERGED|mergeabc123"
+      ;;
     *)
       echo ""
       ;;
@@ -121,6 +147,14 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "comment" ]]; then
 fi
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "comment" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "api" ]]; then
+  if [[ "${2:-}" == "repos/acme/demo/branches/sgt%2Ftest-pr123" ]]; then
+    echo "Not Found" >&2
+    exit 1
+  fi
   exit 0
 fi
 

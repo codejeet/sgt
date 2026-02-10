@@ -43,7 +43,30 @@ inc_file() {
 }
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then
-  echo "sgt-authorized"
+  shift 2
+  json_fields=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_fields="${2:-}"
+        shift 2
+        ;;
+      --jq)
+        shift 2
+        ;;
+      --repo)
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  case "$json_fields" in
+    labels) echo "sgt-authorized" ;;
+    state) echo "OPEN" ;;
+    *) echo "" ;;
+  esac
   exit 0
 fi
 
@@ -81,6 +104,9 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
     state,headRefOid)
       inc_file "$STATE_HEAD_CALLS_FILE" >/dev/null
       echo "OPEN|live111"
+      ;;
+    state,mergeCommit)
+      echo "MERGED|mergeauto123"
       ;;
     *)
       echo ""
@@ -137,6 +163,14 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "comment" ]]; then
 fi
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "comment" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "api" ]]; then
+  if [[ "${2:-}" == "repos/acme/demo/branches/sgt%2Ftest-pr123" ]]; then
+    echo "Not Found" >&2
+    exit 1
+  fi
   exit 0
 fi
 
@@ -239,8 +273,8 @@ fi
         echo "expected exactly 2 merge calls across duplicate replay" >&2
         return 1
       fi
-      if ! grep -q 'duplicate merge skipped — reason_code=duplicate-merge-attempt-key' "$home_dir/sgt/refinery-pass2.out"; then
-        echo "expected duplicate merge attempt skip on replay" >&2
+      if ! grep -q 'duplicate merge key already verified — no-op' "$home_dir/sgt/refinery-pass2.out"; then
+        echo "expected duplicate verified-success no-op on replay" >&2
         return 1
       fi
       auto_event_count="$(grep -c 'REFINERY_MERGE_RETRY_AUTO repo=acme/demo pr=#123 reason=branch-policy-requires-auto-merge' "$home_dir/sgt/sgt.log" || true)"
