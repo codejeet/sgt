@@ -69,6 +69,11 @@ export SGT_MAYOR_DISPATCH_COOLDOWN=21600
 
 Set `SGT_MAYOR_DISPATCH_COOLDOWN=0` to disable suppression.
 
+Mayor AI dispatches also include a stale-state revalidation immediately before issue creation:
+- The mayor path performs a single live snapshot check for open PRs and open `sgt-authorized` issues on the target rig repo.
+- If either count is non-zero (or live state cannot be confirmed), dispatch is skipped.
+- A reasoned operator-visible line is emitted (`[mayor] dispatch skipped ...`) and a corresponding entry is appended to `~/.sgt/mayor-decisions.log`.
+
 Mayor wake processing is also cycle-idempotent:
 - Within a single mayor loop cycle, repeated identical wake events are coalesced.
 - Replayed identical `merged:*` wake events in that cycle produce only one AI dispatch decision.

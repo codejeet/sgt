@@ -62,4 +62,7 @@ BASH
 echo "=== duplicate sling suppression during cooldown ==="
 "$REPO_ROOT/test_mayor_dispatch_idempotency.sh"
 
+echo "=== stale snapshot dispatch race guard ==="
+"$REPO_ROOT/test_mayor_stale_dispatch_race.sh"
+
 echo "ALL TESTS PASSED"
