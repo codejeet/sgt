@@ -2154,6 +2154,11 @@ _mayor_loop() {
       if [[ -n "$wake_summary" ]]; then
         _mayor_notify_rigger "$wake_summary"
       fi
+
+      # If work just merged/advanced, invoke AI to queue the next issues.
+      if [[ "$wake_reason" == merged:* || "$wake_reason" == dog-approved:* ]]; then
+        needs_ai=true
+      fi
     fi
 
     # === 1. Check agent health ===
@@ -2350,6 +2355,11 @@ $(cat "$briefing")
 - \`gh pr merge <pr#> --repo <repo> --squash --delete-branch\` — Merge PR
 
 Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
+
+If an issue/PR just merged, you should proactively:
+- queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
+- prefer keeping each issue small enough for an overnight polecat
+
 After deciding, report your actions: sgt mayor notify "<summary of what you did>"
 MAYORMD
 
