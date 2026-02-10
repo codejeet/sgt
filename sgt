@@ -679,7 +679,7 @@ _mayor_notify_attempt_state_file() {
 _mayor_notify_state_load() {
   local file="${1:-}"
   [[ -n "$file" && -f "$file" ]] || return 1
-  eval "$(grep -E '^(CHANNEL|TARGET|MESSAGE_KEY|ATTEMPT_COUNT|RETRY_USED|LAST_OUTCOME|LAST_REASON|LAST_VERIFIED_AT|ESCALATED)=' "$file" 2>/dev/null || true)"
+  eval "$(grep -E '^(CHANNEL|TARGET|MESSAGE_KEY|ATTEMPT_COUNT|RETRY_USED|LAST_OUTCOME|LAST_REASON|LAST_MATCHER|LAST_VERIFIED_AT|ESCALATED)=' "$file" 2>/dev/null || true)"
   _MAYOR_NOTIFY_STATE_CHANNEL="${CHANNEL:-}"
   _MAYOR_NOTIFY_STATE_TARGET="${TARGET:-}"
   _MAYOR_NOTIFY_STATE_MESSAGE_KEY="${MESSAGE_KEY:-}"
@@ -687,13 +687,14 @@ _mayor_notify_state_load() {
   _MAYOR_NOTIFY_STATE_RETRY_USED="${RETRY_USED:-0}"
   _MAYOR_NOTIFY_STATE_LAST_OUTCOME="${LAST_OUTCOME:-none}"
   _MAYOR_NOTIFY_STATE_LAST_REASON="${LAST_REASON:-none}"
+  _MAYOR_NOTIFY_STATE_LAST_MATCHER="${LAST_MATCHER:-unknown}"
   _MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT="${LAST_VERIFIED_AT:-}"
   _MAYOR_NOTIFY_STATE_ESCALATED="${ESCALATED:-0}"
   return 0
 }
 
 _mayor_notify_state_write() {
-  local file="${1:-}" channel="${2:-}" target="${3:-}" message_key="${4:-}" attempt_count="${5:-0}" retry_used="${6:-0}" last_outcome="${7:-none}" last_reason="${8:-none}" last_verified_at="${9:-}" escalated="${10:-0}"
+  local file="${1:-}" channel="${2:-}" target="${3:-}" message_key="${4:-}" attempt_count="${5:-0}" retry_used="${6:-0}" last_outcome="${7:-none}" last_reason="${8:-none}" last_verified_at="${9:-}" escalated="${10:-0}" last_matcher="${11:-unknown}"
   local state_tmp
   [[ -n "$file" && -n "$channel" && -n "$target" && -n "$message_key" ]] || return 1
   state_tmp="${file}.tmp.$$"
@@ -705,6 +706,7 @@ ATTEMPT_COUNT=$(_escape_wake_value "$attempt_count")
 RETRY_USED=$(_escape_wake_value "$retry_used")
 LAST_OUTCOME=$(_escape_wake_value "$last_outcome")
 LAST_REASON=$(_escape_wake_value "$last_reason")
+LAST_MATCHER=$(_escape_wake_value "$last_matcher")
 LAST_VERIFIED_AT=$(_escape_wake_value "$last_verified_at")
 ESCALATED=$(_escape_wake_value "$escalated")
 EOF
@@ -750,6 +752,19 @@ _mayor_notify_receipt_has_token() {
   local text="${1:-}" token="${2:-}"
   [[ -n "$token" ]] || return 1
   [[ "$text" =~ (^|[^[:alnum:]_])${token}([^[:alnum:]_]|$) ]]
+}
+
+_mayor_notify_decision_outcome() {
+  local outcome="${1:-}" reason="${2:-}"
+  if [[ "$outcome" == "delivered" ]]; then
+    echo "delivered"
+    return 0
+  fi
+  if [[ "$outcome" == "missing-ack" || "$outcome" == "stale-ack" || "$reason" == "missing-ack" || "$reason" == "stale-ack" ]]; then
+    echo "missing-ack"
+    return 0
+  fi
+  echo "transport-failure"
 }
 
 _mayor_notify_classify_receipt() {
@@ -3283,8 +3298,8 @@ _mayor_notify_rigger() {
   local message="${1:-}"
   local suppress_decision_log="${2:-0}"
   local channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
-  local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" escalated=0
-  local verify_outcome="" verify_reason="" verify_matcher="" verify_details="" attempt=0 should_retry=0
+  local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" last_matcher="unknown" escalated=0
+  local verify_outcome="" verify_reason="" verify_matcher="" verify_details="" decision_outcome="" attempt=0 should_retry=0
   local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
 
   [[ -n "$message" ]] || return 1
@@ -3326,9 +3341,10 @@ _mayor_notify_rigger() {
     retry_used="${_MAYOR_NOTIFY_STATE_RETRY_USED:-0}"
     last_outcome="${_MAYOR_NOTIFY_STATE_LAST_OUTCOME:-none}"
     last_reason="${_MAYOR_NOTIFY_STATE_LAST_REASON:-none}"
+    last_matcher="${_MAYOR_NOTIFY_STATE_LAST_MATCHER:-unknown}"
     escalated="${_MAYOR_NOTIFY_STATE_ESCALATED:-0}"
   else
-    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "0" "0" "none" "none" "" "0" || return 1
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "0" "0" "none" "none" "" "0" "none" || return 1
   fi
 
   if [[ "$last_outcome" == "delivered" ]]; then
@@ -3340,29 +3356,35 @@ _mayor_notify_rigger() {
   fi
 
   if [[ "$retry_used" =~ ^[0-9]+$ ]] && (( retry_used >= 1 )) && [[ "$last_outcome" != "delivered" ]]; then
+    local last_decision_outcome last_decision_reason
+    last_decision_outcome="$(_mayor_notify_decision_outcome "$last_outcome" "$last_reason")"
+    last_decision_reason="notify-$last_decision_outcome"
     if [[ "${escalated:-0}" != "1" ]]; then
       echo "[mayor] notify escalation: retry budget exhausted target=$target message_key=$message_key"
-      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
-      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" || true
+      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome prior_reason=$last_reason matcher=${last_matcher:-unknown}"
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" "${last_matcher:-unknown}" || true
       if [[ "$suppress_decision_log" != "1" ]]; then
-        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted normalized_reason=$last_decision_reason skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_decision_outcome raw_outcome=$last_outcome raw_reason=$last_reason matcher=${last_matcher:-unknown}" "$context" "$SGT_ROOT" || true
       fi
     else
-      log_event "MAYOR_NOTIFY_ESCALATE_SUPPRESS reason=already-escalated channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
+      log_event "MAYOR_NOTIFY_ESCALATE_SUPPRESS reason=already-escalated channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome prior_reason=$last_reason matcher=${last_matcher:-unknown}"
       if [[ "$suppress_decision_log" != "1" ]]; then
-        _mayor_record_decision "MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+        _mayor_record_decision "MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped normalized_reason=$last_decision_reason channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_decision_outcome raw_outcome=$last_outcome raw_reason=$last_reason matcher=${last_matcher:-unknown}" "$context" "$SGT_ROOT" || true
       fi
     fi
     return 1
   fi
 
   if [[ "$attempt_count" =~ ^[0-9]+$ ]] && (( attempt_count >= 2 )); then
+    local last_decision_outcome last_decision_reason
+    last_decision_outcome="$(_mayor_notify_decision_outcome "$last_outcome" "$last_reason")"
+    last_decision_reason="notify-$last_decision_outcome"
     if [[ "${escalated:-0}" != "1" ]]; then
       echo "[mayor] notify escalation: retry budget exhausted target=$target message_key=$message_key"
-      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome"
-      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" || true
+      log_event "MAYOR_NOTIFY_ESCALATE reason=notify-retry-budget-exhausted channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key prior_outcome=$last_outcome prior_reason=$last_reason matcher=${last_matcher:-unknown}"
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$last_outcome" "retry-budget-exhausted" "${_MAYOR_NOTIFY_STATE_LAST_VERIFIED_AT:-}" "1" "${last_matcher:-unknown}" || true
       if [[ "$suppress_decision_log" != "1" ]]; then
-        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_outcome" "$context" "$SGT_ROOT" || true
+        _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted normalized_reason=$last_decision_reason skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_decision_outcome raw_outcome=$last_outcome raw_reason=$last_reason matcher=${last_matcher:-unknown}" "$context" "$SGT_ROOT" || true
       fi
     fi
     return 1
@@ -3387,13 +3409,14 @@ _mayor_notify_rigger() {
     verify_outcome="${_MAYOR_NOTIFY_CLASSIFY_OUTCOME:-transport-failure}"
     verify_reason="${_MAYOR_NOTIFY_CLASSIFY_REASON:-transport-command-failed}"
     verify_matcher="${_MAYOR_NOTIFY_CLASSIFY_MATCHER:-unknown}"
+    decision_outcome="$(_mayor_notify_decision_outcome "$verify_outcome" "$verify_reason")"
 
     _mayor_notify_receipt_record "$channel" "$target" "$message_key" "$attempt" "$verify_outcome" "$verify_reason" || true
     log_event "MAYOR_NOTIFY_RECEIPT channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher details=\"$(_escape_quotes "$verify_details")\""
     if [[ "$suppress_decision_log" != "1" ]]; then
-      _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher" "$context" "$SGT_ROOT" || true
+      _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$decision_outcome raw_outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher" "$context" "$SGT_ROOT" || true
     fi
-    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
 
     if [[ "$verify_outcome" == "delivered" ]]; then
       echo "[mayor] notified Rigger: $message"
@@ -3411,12 +3434,12 @@ _mayor_notify_rigger() {
     if [[ "$should_retry" -eq 1 ]]; then
       retry_used=1
       attempt_count="$attempt"
-      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt_count" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
       continue
     fi
     if [[ "$attempt" -eq 1 ]]; then
       retry_used=1
-      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+      _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
     fi
     break
   done
@@ -3426,15 +3449,16 @@ _mayor_notify_rigger() {
   fi
 
   if [[ "$escalated" != "1" ]]; then
-    local escalate_reason
+    local escalate_reason decision_escalate_reason
     escalate_reason="notify-$verify_reason"
+    decision_escalate_reason="notify-$decision_outcome"
     echo "[mayor] notify escalation: $escalate_reason target=$target message_key=$message_key"
-    log_event "MAYOR_NOTIFY_ESCALATE reason=$escalate_reason channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt outcome=$verify_outcome"
+    log_event "MAYOR_NOTIFY_ESCALATE reason=$escalate_reason channel=$channel target=\"$(_escape_quotes "$target")\" message_key=$message_key attempt=$attempt outcome=$verify_outcome matcher=$verify_matcher"
     if [[ "$suppress_decision_log" != "1" ]]; then
-      _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=$escalate_reason retry=manual channel=$channel target=$target message_key=$message_key attempt=$attempt outcome=$verify_outcome" "$context" "$SGT_ROOT" || true
+      _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=$decision_escalate_reason raw_reason=$escalate_reason retry=manual channel=$channel target=$target message_key=$message_key attempt=$attempt outcome=$decision_outcome raw_outcome=$verify_outcome matcher=$verify_matcher" "$context" "$SGT_ROOT" || true
     fi
     escalated=1
-    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "${retry_used:-1}" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" || true
+    _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "${retry_used:-1}" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
   fi
   return 1
 }
