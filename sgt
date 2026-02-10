@@ -891,6 +891,86 @@ _merge_queue_mark_review_state() {
   _merge_queue_set_field "$queue_file" "REVIEW_UNCLEAR_SINCE" "$review_unclear_since" || return 1
 }
 
+_merge_queue_repo_pr_key() {
+  local repo="${1:-}" pr="${2:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  echo "${owner_repo}|pr=${pr}"
+}
+
+_merge_queue_canonical_name() {
+  local rig="${1:-}" pr="${2:-}"
+  echo "${rig}-pr${pr}"
+}
+
+_merge_queue_find_by_repo_pr() {
+  local repo="${1:-}" pr="${2:-}"
+  local key merge_dir f q_repo q_pr q_key
+  key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  merge_dir="$SGT_CONFIG/merge-queue"
+  [[ -d "$merge_dir" ]] || return 1
+  for f in "$merge_dir"/*; do
+    [[ -f "$f" ]] || continue
+    q_repo=""
+    q_pr=""
+    eval "$(grep -E '^(REPO|PR)=' "$f" 2>/dev/null || true)"
+    q_repo="${REPO:-}"
+    q_pr="${PR:-}"
+    [[ -n "$q_repo" && -n "$q_pr" ]] || continue
+    q_key="$(_merge_queue_repo_pr_key "$q_repo" "$q_pr")"
+    if [[ "$q_key" == "$key" ]]; then
+      echo "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_merge_queue_enqueue_polecat() {
+  local rig="${1:-}" repo="${2:-}" branch="${3:-}" issue="${4:-}" pr="${5:-}" head_sha="${6:-}"
+  local auto_merge="${7:-true}" backend="${8:-$(_ai_backend_default)}" polecat="${9:-}" source="${10:-unknown}"
+  [[ -n "$rig" && -n "$repo" && -n "$pr" ]] || return 1
+
+  local merge_dir queue_key owner_repo queue_name queue_file existing_file existing_name reason reason_code
+  merge_dir="$SGT_CONFIG/merge-queue"
+  mkdir -p "$merge_dir"
+
+  queue_key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  queue_name="$(_merge_queue_canonical_name "$rig" "$pr")"
+  queue_file="$merge_dir/$queue_name"
+
+  existing_file="$(_merge_queue_find_by_repo_pr "$repo" "$pr" || true)"
+  if [[ -n "$existing_file" ]]; then
+    existing_name="$(basename "$existing_file")"
+    reason_code="duplicate-queue-key"
+    reason="duplicate queue key (repo+pr) already queued"
+    echo "[merge-queue/$rig] duplicate queue skipped — reason_code=$reason_code reason=\"$reason\" key=$queue_key existing=$existing_name incoming=$queue_name source=$source"
+    log_event "MERGE_QUEUE_DUPLICATE_SKIP rig=$rig repo=$owner_repo pr=#$pr reason_code=$reason_code reason=\"$(_escape_quotes "$reason")\" key=\"$(_escape_quotes "$queue_key")\" existing=$existing_name incoming=$queue_name source=$source"
+    return 1
+  fi
+
+  cat > "$queue_file" <<MQSTATE
+POLECAT=${polecat:-$queue_name}
+RIG=$rig
+REPO=$repo
+BRANCH=$branch
+ISSUE=${issue:-0}
+PR=$pr
+HEAD_SHA=$head_sha
+AUTO_MERGE=$auto_merge
+BACKEND=$backend
+TYPE=polecat
+REVIEW_STATE=REVIEW_PENDING
+REVIEW_UPDATED_AT=$(date +%s)
+REVIEW_UNCLEAR_SINCE=
+QUEUED=$(date -Iseconds)
+MQSTATE
+  return 0
+}
+
 _refinery_merge_attempt_key() {
   local repo="${1:-}" pr="${2:-}" head_sha="${3:-}"
   local owner_repo
@@ -2184,27 +2264,11 @@ _witness_loop() {
           echo "[witness/$rig] $pname completed — PR #$pr_number OPEN, queuing for refinery"
           log_event "WITNESS_PR_READY $pname pr=#$pr_number"
 
-          mkdir -p "$SGT_CONFIG/merge-queue"
           local pr_head_sha
           pr_head_sha="$(_pr_head_sha "$p_repo" "$pr_number")"
-          cat > "$SGT_CONFIG/merge-queue/$pname" <<MQSTATE
-POLECAT=$pname
-RIG=$rig
-REPO=$p_repo
-BRANCH=$p_branch
-ISSUE=$p_issue
-PR=$pr_number
-HEAD_SHA=$pr_head_sha
-AUTO_MERGE=$p_auto_merge
-BACKEND=${BACKEND:-$(_ai_backend_default)}
-TYPE=polecat
-REVIEW_STATE=REVIEW_PENDING
-REVIEW_UPDATED_AT=$(date +%s)
-REVIEW_UNCLEAR_SINCE=
-QUEUED=$(date -Iseconds)
-MQSTATE
-
-          _wake_refinery "$rig" "pr-ready:$pname:#$pr_number"
+          if _merge_queue_enqueue_polecat "$rig" "$p_repo" "$p_branch" "$p_issue" "$pr_number" "$pr_head_sha" "$p_auto_merge" "${BACKEND:-$(_ai_backend_default)}" "$pname" "witness-pr-ready"; then
+            _wake_refinery "$rig" "pr-ready:$pname:#$pr_number"
+          fi
 
           # Clean up polecat worktree + state
           if [[ -d "$p_worktree" ]]; then
@@ -2312,26 +2376,11 @@ MQSTATE
           echo "[witness/$rig] orphaned PR #$pr_num on branch $pr_branch — queuing for refinery"
           log_event "WITNESS_ORPHAN_PR pr=#$pr_num branch=$pr_branch"
 
-          mkdir -p "$SGT_CONFIG/merge-queue"
           local orphan_head_sha
           orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
-          cat > "$SGT_CONFIG/merge-queue/$orphan_pname" <<MQSTATE
-POLECAT=$orphan_pname
-RIG=$rig
-REPO=$repo
-BRANCH=$pr_branch
-ISSUE=${orphan_issue:-0}
-PR=$pr_num
-HEAD_SHA=$orphan_head_sha
-AUTO_MERGE=true
-TYPE=polecat
-REVIEW_STATE=REVIEW_PENDING
-REVIEW_UPDATED_AT=$(date +%s)
-REVIEW_UNCLEAR_SINCE=
-QUEUED=$(date -Iseconds)
-MQSTATE
-
-          _wake_refinery "$rig" "orphan-pr:$orphan_pname:#$pr_num"
+          if _merge_queue_enqueue_polecat "$rig" "$repo" "$pr_branch" "${orphan_issue:-0}" "$pr_num" "$orphan_head_sha" "true" "$(_ai_backend_default)" "$orphan_pname" "witness-orphan-pr"; then
+            _wake_refinery "$rig" "orphan-pr:$orphan_pname:#$pr_num"
+          fi
         fi
       done <<< "$orphan_prs"
     fi
@@ -3758,25 +3807,10 @@ _mayor_loop() {
             local mergeable
             mergeable=$(gh pr view "$pr_num" --repo "$repo" --json mergeable --jq '.mergeable' 2>/dev/null)
             if [[ "$mergeable" == "MERGEABLE" ]]; then
-              local mqf="$SGT_CONFIG/merge-queue/${rname}-pr${pr_num}"
-              if [[ ! -f "$mqf" ]]; then
-                mkdir -p "$SGT_CONFIG/merge-queue"
-                local orphan_head_sha
-                orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
-                cat > "$mqf" <<MQORPHAN
-RIG=$rname
-REPO=$repo
-PR=$pr_num
-BRANCH=$pr_branch
-ISSUE=${linked_issue}
-HEAD_SHA=$orphan_head_sha
-TYPE=polecat
-AUTO_MERGE=true
-REVIEW_STATE=REVIEW_PENDING
-REVIEW_UPDATED_AT=$(date +%s)
-REVIEW_UNCLEAR_SINCE=
-QUEUED=$(date -Iseconds)
-MQORPHAN
+              local orphan_head_sha orphan_polecat
+              orphan_head_sha="$(_pr_head_sha "$repo" "$pr_num")"
+              orphan_polecat="${pr_branch#sgt/}"
+              if _merge_queue_enqueue_polecat "$rname" "$repo" "$pr_branch" "${linked_issue}" "$pr_num" "$orphan_head_sha" "true" "$(_ai_backend_default)" "$orphan_polecat" "mayor-orphan-pr"; then
                 actions_taken+="  - queued orphaned PR #$pr_num ($rname) for refinery\n"
                 _wake_refinery "$rname" "orphan-pr:#$pr_num"
               fi

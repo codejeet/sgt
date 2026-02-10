@@ -192,6 +192,13 @@ When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`
 - a structured activity log event: `REFINERY_DUPLICATE_SKIP ...`
 
+Merge-queue enqueueing is also idempotent at `repo+PR` granularity (witness + mayor orphan dispatch paths):
+- Queue items are keyed by `owner/repo|pr=<n>`, so the same PR cannot be queued under multiple aliases.
+- Alias replays (for example `sgt-691e731c` vs `sgt-pr84`) are skipped before writing a second queue file.
+- Duplicate skips emit operator and log observability with reason code `duplicate-queue-key`:
+  - status line: `[merge-queue/<rig>] duplicate queue skipped — reason_code=duplicate-queue-key ...`
+  - activity log: `MERGE_QUEUE_DUPLICATE_SKIP rig=<rig> repo=<owner/repo> pr=#<n> ...`
+
 ## Security gate (sgt-authorized label)
 
 By default, SGT requires issues/PRs to be linked to an issue labeled `sgt-authorized` before witnesses/refineries will queue or merge work.
