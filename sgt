@@ -904,7 +904,7 @@ _refinery_revalidate_pr_open_head() {
 
 _resling_pre_dispatch_revalidate() {
   local repo="${1:-}" issue_number="${2:-}" source_pr="${3:-}"
-  local issue_state pr_state
+  local issue_state pr_snapshot pr_state pr_mergeable
 
   issue_state=$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)
   if [[ -z "$issue_state" ]]; then
@@ -917,13 +917,18 @@ _resling_pre_dispatch_revalidate() {
   fi
 
   if [[ -n "$source_pr" && "$source_pr" != "0" ]]; then
-    pr_state=$(gh pr view "$source_pr" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)
-    if [[ -z "$pr_state" ]]; then
+    pr_snapshot=$(gh pr view "$source_pr" --repo "$repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
+    if [[ -z "$pr_snapshot" || "$pr_snapshot" != *"|"* ]]; then
       echo "unable to query live PR state for #$source_pr"
       return 1
     fi
-    if [[ "$pr_state" == "MERGED" || "$pr_state" == "CLOSED" ]]; then
+    IFS='|' read -r pr_state pr_mergeable <<< "$pr_snapshot"
+    if [[ "$pr_state" != "OPEN" ]]; then
       echo "source PR #$source_pr state=$pr_state"
+      return 1
+    fi
+    if [[ "$pr_mergeable" != "MERGEABLE" ]]; then
+      echo "source PR #$source_pr mergeable=${pr_mergeable:-unknown}"
       return 1
     fi
   fi
@@ -2115,7 +2120,7 @@ MQSTATE
             log_event "WITNESS_RESLING $pname issue=#$p_issue"
 
             # Re-sling with a new polecat (reuse existing issue — don't create a new one)
-            _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled"
+            _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled" "witness-stalled:$pname:#$p_issue"
           fi
         fi
       fi
@@ -2205,18 +2210,21 @@ _resling_existing_issue() {
   local backend="${5:-$(_ai_backend_default)}"
   local source_pr="${6:-}"
   local source_event="${7:-unknown}"
+  local source_event_key="${8:-$source_event}"
+  source_event_key="$(_wake_trigger_key "$source_event_key")"
+  [[ -n "$source_event_key" ]] || source_event_key="${source_event:-unknown}"
 
   local stale_reason=""
   if ! stale_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
     echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: $stale_reason"
-    log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_pr=${source_pr:-none} reason=\"$(_escape_quotes "$stale_reason")\""
+    log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$stale_reason")\""
     return 1
   fi
 
   # Security gate: verify issue has sgt-authorized label
   if ! _has_sgt_authorized "$repo" "$issue_number"; then
     echo "[resling] issue #$issue_number lacks sgt-authorized label — skipping"
-    log_event "RESLING_SKIP_UNAUTHORIZED issue=#$issue_number rig=$rig"
+    log_event "RESLING_SKIP_UNAUTHORIZED issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" skip_reason=\"issue lacks sgt-authorized\""
     return 1
   fi
 
@@ -2239,6 +2247,15 @@ _resling_existing_issue() {
     cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
   fi
   _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
+
+  local final_gate_reason=""
+  if ! final_gate_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
+    echo "[resling] dispatch-instant gate ($source_event) for issue #$issue_number — skipping: $final_gate_reason"
+    log_event "RESLING_SKIP_FINAL_GATE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$final_gate_reason")\""
+    git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree"
+    git -C "$rpath" branch -D "$branch" 2>/dev/null || true
+    return 1
+  fi
 
   cat > "$SGT_POLECATS/$pname" <<PSTATE
 RIG=$rig
@@ -2625,7 +2642,7 @@ _refinery_loop() {
             --body "[sgt-refinery] Merge conflict on PR #$mq_pr. Re-dispatching." 2>/dev/null || true
           local issue_title_resling
           issue_title_resling=$(gh issue view "$mq_issue" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
-          [[ -n "$issue_title_resling" ]] && _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo" "$mq_backend" "$mq_pr" "refinery-conflict"
+          [[ -n "$issue_title_resling" ]] && _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo" "$mq_backend" "$mq_pr" "refinery-conflict" "refinery-conflict:$mqname:#$mq_pr"
         fi
         continue
       fi
@@ -2721,7 +2738,7 @@ Please address the feedback in the next iteration." 2>/dev/null || true
           issue_title_resling=$(gh issue view "$mq_issue" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
           if [[ -n "$issue_title_resling" ]]; then
             echo "[refinery/$rig] re-slinging issue #$mq_issue"
-            _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo" "$mq_backend" "$mq_pr" "refinery-reject"
+            _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo" "$mq_backend" "$mq_pr" "refinery-reject" "refinery-reject:$mqname:#$mq_pr"
           fi
         fi
       fi

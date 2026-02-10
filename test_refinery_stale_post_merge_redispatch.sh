@@ -107,15 +107,19 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
       echo "Stale post-merge redispatch PR"
       ;;
     state)
-      call_n="$(inc_file "$PR_STATE_CALLS_FILE")"
-      if [[ "$call_n" -eq 1 ]]; then
-        echo "OPEN"
-      else
-        echo "MERGED"
-      fi
+      inc_file "$PR_STATE_CALLS_FILE" >/dev/null
+      echo "OPEN"
       ;;
     mergeable)
       echo "CONFLICTING"
+      ;;
+    state,mergeable)
+      call_n="$(inc_file "$PR_STATE_CALLS_FILE")"
+      if [[ "$call_n" -le 2 ]]; then
+        echo "OPEN|MERGEABLE"
+      else
+        echo "MERGED|MERGEABLE"
+      fi
       ;;
     *)
       echo ""
@@ -169,6 +173,42 @@ exit 0
 TMUX
 chmod +x "$MOCK_BIN/tmux"
 
+cat > "$MOCK_BIN/git" <<'GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-C" ]]; then
+  shift 2
+fi
+
+case "${1:-}" in
+  fetch)
+    exit 0
+    ;;
+  symbolic-ref)
+    echo "refs/remotes/origin/master"
+    exit 0
+    ;;
+  worktree)
+    if [[ "${2:-}" == "add" ]]; then
+      mkdir -p "${5:-}"
+      exit 0
+    fi
+    if [[ "${2:-}" == "remove" ]]; then
+      rm -rf "${4:-}"
+      exit 0
+    fi
+    ;;
+  branch)
+    exit 0
+    ;;
+esac
+
+echo "mock git unsupported: $*" >&2
+exit 1
+GIT
+chmod +x "$MOCK_BIN/git"
+
 env -i \
   HOME="$HOME_DIR" \
   PATH="$MOCK_BIN:$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin" \
@@ -220,23 +260,28 @@ if [[ -f "$TMUX_NEW_SESSION_MARKER" ]]; then
   exit 1
 fi
 
-if ! grep -q 'stale event (refinery-conflict)' "$OUT_FILE"; then
-  echo "expected stale-event skip message in refinery output" >&2
+if ! grep -q 'dispatch-instant gate (refinery-conflict)' "$OUT_FILE"; then
+  echo "expected dispatch-instant gate skip message in refinery output" >&2
   exit 1
 fi
 
 if ! grep -q 'source PR #123 state=MERGED' "$OUT_FILE"; then
-  echo "expected stale-event skip reason to include merged source PR state" >&2
+  echo "expected final gate skip reason to include merged source PR state" >&2
   exit 1
 fi
 
-if [[ "$(cat "$ISSUE_STATE_CALLS" 2>/dev/null || echo 0)" -lt 1 ]]; then
-  echo "expected live issue-state revalidation before stale redispatch skip" >&2
+if [[ "$(cat "$ISSUE_STATE_CALLS" 2>/dev/null || echo 0)" -lt 2 ]]; then
+  echo "expected issue-state revalidation at both stale check and dispatch-instant gate" >&2
   exit 1
 fi
 
-if ! grep -q 'RESLING_SKIP_STALE issue=#77 rig=test source_event=refinery-conflict source_pr=123' "$LOG_FILE"; then
-  echo "expected structured stale redispatch skip entry in activity log" >&2
+if [[ "$(cat "$PR_STATE_CALLS" 2>/dev/null || echo 0)" -lt 3 ]]; then
+  echo "expected source PR state to be checked for queue pass, stale check, and dispatch-instant gate" >&2
+  exit 1
+fi
+
+if ! grep -q 'RESLING_SKIP_FINAL_GATE issue=#77 rig=test source_event=refinery-conflict source_event_key="refinery-conflict:test-pr123:#123" source_pr=123 skip_reason="source PR #123 state=MERGED"' "$LOG_FILE"; then
+  echo "expected structured final-gate skip entry with source event key and reason in activity log" >&2
   exit 1
 fi
 
