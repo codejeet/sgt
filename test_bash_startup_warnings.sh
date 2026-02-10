@@ -18,6 +18,31 @@ check_no_legacy_heredoc_pattern() {
   fi
 }
 
+check_bash_parse() {
+  local stderr_file
+  stderr_file="$(mktemp)"
+
+  if bash -n "$SGT_SCRIPT" 2>"$stderr_file"; then
+    :
+  else
+    echo "FAIL: bash -n failed for $SGT_SCRIPT"
+    cat "$stderr_file"
+    FAIL=1
+    rm -f "$stderr_file"
+    return
+  fi
+
+  if grep -Eiq "$WARN_RE" "$stderr_file"; then
+    echo "FAIL: bash -n emitted parse warning"
+    cat "$stderr_file"
+    FAIL=1
+  else
+    echo "PASS: bash -n emitted no parse warning"
+  fi
+
+  rm -f "$stderr_file"
+}
+
 check_command() {
   local name="$1"
   shift
@@ -45,9 +70,11 @@ check_command() {
 
 echo "=== bash startup warning regression ==="
 check_no_legacy_heredoc_pattern
+check_bash_parse
 check_command "sgt --help" --help
 check_command "sgt status" status
 check_command "sgt sweep" sweep
+check_command "sgt sling" sling
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1
