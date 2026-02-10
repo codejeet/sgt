@@ -89,6 +89,9 @@ echo "=== mayor stalled refinery REVIEW_UNCLEAR watchdog ==="
 echo "=== mayor stale witness/refinery heartbeat watchdog ==="
 "$REPO_ROOT/test_mayor_agent_heartbeat_watchdog.sh"
 
+echo "=== mayor stale required CI check watchdog ==="
+"$REPO_ROOT/test_mayor_ci_check_watchdog.sh"
+
 echo "=== mayor decision log durability ==="
 "$REPO_ROOT/test_mayor_decision_log_durability.sh"
 
