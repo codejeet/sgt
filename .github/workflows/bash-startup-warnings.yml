@@ -1,0 +1,15 @@
+name: Bash Startup Warnings
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  startup-warning-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bash startup warning regression test
+        run: ./test_bash_startup_warnings.sh

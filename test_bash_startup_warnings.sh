@@ -21,6 +21,17 @@ check_no_heredoc_in_notify_parser() {
   fi
 }
 
+check_no_heredoc_in_command_substitution() {
+  if grep -nE '\$\(cat[[:space:]]*<<' "$SGT_SCRIPT" >/tmp/sgt_heredoc_subst_hits.$$; then
+    echo "FAIL: found heredoc within command substitution"
+    cat /tmp/sgt_heredoc_subst_hits.$$
+    FAIL=1
+  else
+    echo "PASS: no heredoc-within-command-substitution patterns found"
+  fi
+  rm -f /tmp/sgt_heredoc_subst_hits.$$
+}
+
 check_bash_parse() {
   local stderr_file
   stderr_file="$(mktemp)"
@@ -127,6 +138,7 @@ check_command_clean_shell() {
 
 echo "=== bash startup warning regression ==="
 check_no_heredoc_in_notify_parser
+check_no_heredoc_in_command_substitution
 check_bash_parse
 TMP_HOME="$(mktemp -d)"
 trap 'rm -rf "$TMP_HOME"' EXIT

@@ -513,20 +513,19 @@ cmd_sling() {
   done
 
   local issue_url issue_number
-  issue_url=$(gh issue create \
-    --repo "$repo" \
-    --title "$task" \
-    --body "$(cat <<EOF
-## Task
+  local issue_body
+  printf -v issue_body '## Task
 
-$task
+%s
 
 ---
 
-*Created by sgt — polecat: \`$pname\`*
-*Branch: \`$branch\`*
-EOF
-)" \
+*Created by sgt — polecat: `%s`*
+*Branch: `%s`*' "$task" "$pname" "$branch"
+  issue_url=$(gh issue create \
+    --repo "$repo" \
+    --title "$task" \
+    --body "$issue_body" \
     $label_args 2>&1) || die "failed to create issue: $issue_url"
 
   issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
@@ -2560,36 +2559,25 @@ cmd_dog() {
   info "creating issue for dog task..."
   _ensure_sgt_authorized_label "$repo"
   local issue_url issue_number
-  issue_url=$(gh issue create \
-    --repo "$repo" \
-    --title "[Dog] $task" \
-    --body "$(cat <<EOF
-## Research/Analysis Task
+  local issue_body
+  printf -v issue_body '## Research/Analysis Task
 
-$task
+%s
 
 ---
 
-*Created by sgt — dog: \`$dname\`*
-*Type: non-coding (results posted as comments)*
-EOF
-)" \
+*Created by sgt — dog: `%s`*
+*Type: non-coding (results posted as comments)*' "$task" "$dname"
+  issue_url=$(gh issue create \
+    --repo "$repo" \
+    --title "[Dog] $task" \
+    --body "$issue_body" \
     --label "dog" --label "sgt-authorized" 2>&1) || {
     # Label might not exist, try without dog label
     issue_url=$(gh issue create \
       --repo "$repo" \
       --title "[Dog] $task" \
-      --body "$(cat <<EOF
-## Research/Analysis Task
-
-$task
-
----
-
-*Created by sgt — dog: \`$dname\`*
-*Type: non-coding (results posted as comments)*
-EOF
-)" \
+      --body "$issue_body" \
     --label "sgt-authorized" 2>&1) || die "failed to create issue: $issue_url"
   }
 
@@ -3048,20 +3036,19 @@ cmd_molecule_run() {
 
       # Create issue with dependency info in body
       local issue_url issue_number
+      local issue_body
+      printf -v issue_body '## Molecule: %s (step %s)
+
+%s
+
+**Convoy:** %s
+
+---
+*Part of molecule run. Dispatched by sgt.*' "$molecule" "$step_idx" "$task" "$convoy_name"
       issue_url=$(gh issue create \
         --repo "$repo" \
         --title "[${molecule}/${step_idx}] $task" \
-        --body "$(cat <<EOF
-## Molecule: $molecule (step $step_idx)
-
-$task
-
-**Convoy:** $convoy_name
-
----
-*Part of molecule run. Dispatched by sgt.*
-EOF
-)" \
+        --body "$issue_body" \
         --label "sgt-authorized" 2>&1) || warn "failed to create issue for step $step_idx"
 
       if [[ -n "$issue_url" ]]; then
