@@ -170,6 +170,23 @@ _wake_field() {
   echo ""
 }
 
+_dedupe_wake_reasons() {
+  local -A seen=()
+  local reason
+  for reason in "$@"; do
+    [[ -n "$reason" ]] || continue
+    if [[ -z "${seen[$reason]+x}" ]]; then
+      seen["$reason"]=1
+      echo "$reason"
+    fi
+  done
+}
+
+_wake_requires_dispatch_decision() {
+  local reason="${1:-}"
+  [[ "$reason" == merged:* || "$reason" == dog-approved:* ]]
+}
+
 _normalize_label() {
   local label="${1:-}"
   label="$(_one_line "$label")"
@@ -2310,14 +2327,24 @@ _mayor_loop() {
   while true; do
     # Block on fd 3 with timeout — wakes on event OR periodic check
     local wake_reason=""
+    local wake_events=()
+    local cycle_events=()
     read -t "$SGT_MAYOR_INTERVAL" -u 3 wake_reason 2>/dev/null || true
     if [[ -n "$wake_reason" ]]; then
       echo "[mayor] woken by event: $wake_reason"
+      wake_events+=("$wake_reason")
       # Drain any queued events (coalesce rapid-fire wakes)
       local extra=""
       while read -t 0.1 -u 3 extra 2>/dev/null; do
         echo "[mayor] coalescing event: $extra"
+        wake_events+=("$extra")
       done
+      local deduped_event=""
+      while IFS= read -r deduped_event; do
+        [[ -n "$deduped_event" ]] || continue
+        cycle_events+=("$deduped_event")
+      done < <(_dedupe_wake_reasons "${wake_events[@]+"${wake_events[@]}"}")
+      wake_reason="${cycle_events[0]}"
     else
       echo "[mayor] periodic check at $(date -Iseconds)"
       wake_reason="periodic"
@@ -2331,16 +2358,18 @@ _mayor_loop() {
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
 
     if [[ "$wake_reason" != "periodic" ]]; then
-      local wake_summary
-      wake_summary=$(_mayor_wake_summary "$wake_reason")
-      if [[ -n "$wake_summary" ]]; then
-        _mayor_notify_rigger "$wake_summary"
-      fi
-
-      # If work just merged/advanced, invoke AI to queue the next issues.
-      if [[ "$wake_reason" == merged:* || "$wake_reason" == dog-approved:* ]]; then
-        needs_ai=true
-      fi
+      local event_reason wake_summary
+      for event_reason in "${cycle_events[@]+"${cycle_events[@]}"}"; do
+        wake_summary=$(_mayor_wake_summary "$event_reason")
+        if [[ -n "$wake_summary" ]]; then
+          _mayor_notify_rigger "$wake_summary"
+        fi
+        # Trigger at most one AI dispatch decision per cycle, even if
+        # merged/dog-approved wake events are replayed within that cycle.
+        if _wake_requires_dispatch_decision "$event_reason"; then
+          needs_ai=true
+        fi
+      done
     fi
 
     # === 1. Check agent health ===
