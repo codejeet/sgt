@@ -86,4 +86,7 @@ echo "=== refinery stale queue item guard ==="
 echo "=== refinery stale post-merge redispatch guard ==="
 "$REPO_ROOT/test_refinery_stale_post_merge_redispatch.sh"
 
+echo "=== refinery stale-close dispatch hard-stop ==="
+"$REPO_ROOT/test_refinery_stale_close_event_hard_stop.sh"
+
 echo "ALL TESTS PASSED"

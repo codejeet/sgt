@@ -235,7 +235,7 @@ if [[ "$(cat "$ISSUE_STATE_CALLS" 2>/dev/null || echo 0)" -lt 1 ]]; then
   exit 1
 fi
 
-if ! grep -q 'RESLING_SKIP_STALE issue=#77 rig=test source_event=refinery-conflict source_pr=123' "$LOG_FILE"; then
+if ! grep -q 'RESLING_SKIP_STALE issue=#77 rig=test gate=pre-dispatch source_event=refinery-conflict source_event_key=refinery-conflict source_pr=123 skip_reason=source-pr-not-open' "$LOG_FILE"; then
   echo "expected structured stale redispatch skip entry in activity log" >&2
   exit 1
 fi

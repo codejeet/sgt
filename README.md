@@ -183,7 +183,12 @@ export SGT_REQUIRE_AUTH_LABEL=0
 Witness/refinery re-dispatches also apply live stale-event guards immediately before spawning a new polecat:
 - Re-sling revalidates that the linked issue is still `OPEN`.
 - For stale refinery queue events, re-sling also revalidates the source PR state and skips if it already drifted to `MERGED` or `CLOSED`.
-- Skips emit explicit operator-visible reasons (`[resling] stale event ... — skipping: ...`) and structured activity log events (`RESLING_SKIP_STALE ...`).
+- Re-sling now applies a final dispatch-instant hard-stop gate immediately before spawn: abort when issue is not `OPEN`, or when source PR is not `OPEN`/`MERGEABLE`.
+- Skips emit explicit operator-visible reasons (`[resling] stale event ... — skipping: ...` / `... dispatch hard-stop: ...`) and structured activity log events (`RESLING_SKIP_STALE ...`) with forensic fields:
+  - `gate=<pre-dispatch|dispatch-instant>`
+  - `source_event_key=<event key before | metadata>`
+  - `skip_reason=<normalized reason key>`
+  - `reason="<human-readable detail>"`
 
 ## OpenClaw notifications
 

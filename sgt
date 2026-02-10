@@ -875,6 +875,60 @@ _resling_pre_dispatch_revalidate() {
   fi
 }
 
+_resling_final_dispatch_revalidate() {
+  local repo="${1:-}" issue_number="${2:-}" source_pr="${3:-}"
+  local issue_state live_snapshot pr_state pr_mergeable
+
+  issue_state=$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)
+  if [[ -z "$issue_state" ]]; then
+    echo "unable to query live issue state for #$issue_number"
+    return 1
+  fi
+  if [[ "$issue_state" != "OPEN" ]]; then
+    echo "issue #$issue_number state=$issue_state"
+    return 1
+  fi
+
+  if [[ -n "$source_pr" && "$source_pr" != "0" ]]; then
+    live_snapshot=$(gh pr view "$source_pr" --repo "$repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
+    if [[ -z "$live_snapshot" || "$live_snapshot" != *"|"* ]]; then
+      echo "unable to query live PR state/mergeable for #$source_pr"
+      return 1
+    fi
+    IFS='|' read -r pr_state pr_mergeable <<< "$live_snapshot"
+    if [[ "$pr_state" != "OPEN" ]]; then
+      echo "source PR #$source_pr state=${pr_state:-unknown}"
+      return 1
+    fi
+    if [[ "$pr_mergeable" != "MERGEABLE" ]]; then
+      echo "source PR #$source_pr mergeable=${pr_mergeable:-unknown}"
+      return 1
+    fi
+  fi
+}
+
+_resling_skip_reason_key() {
+  local reason="${1:-}"
+  case "$reason" in
+    "unable to query live issue state for #"*) echo "issue-state-unavailable" ;;
+    "issue #"*" state="*) echo "issue-not-open" ;;
+    "unable to query live PR state for #"*) echo "source-pr-state-unavailable" ;;
+    "unable to query live PR state/mergeable for #"*) echo "source-pr-state-unavailable" ;;
+    "source PR #"*" state="*) echo "source-pr-not-open" ;;
+    "source PR #"*" mergeable="*) echo "source-pr-not-mergeable" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+_resling_log_skip_stale() {
+  local rig="${1:-}" issue_number="${2:-}" source_event="${3:-unknown}"
+  local source_pr="${4:-}" stale_reason="${5:-}" gate="${6:-pre-dispatch}"
+  local source_event_key reason_key
+  source_event_key="$(_wake_trigger_key "$source_event")"
+  reason_key="$(_resling_skip_reason_key "$stale_reason")"
+  log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig gate=$gate source_event=$source_event source_event_key=${source_event_key:-none} source_pr=${source_pr:-none} skip_reason=$reason_key reason=\"$(_escape_quotes "$stale_reason")\""
+}
+
 _find_recent_duplicate_issue() {
   local repo="${1:-}" title="${2:-}" cooldown_secs="${3:-0}"
   shift 3 || true
@@ -2155,7 +2209,7 @@ _resling_existing_issue() {
   local stale_reason=""
   if ! stale_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
     echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: $stale_reason"
-    log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_pr=${source_pr:-none} reason=\"$(_escape_quotes "$stale_reason")\""
+    _resling_log_skip_stale "$rig" "$issue_number" "$source_event" "$source_pr" "$stale_reason" "pre-dispatch"
     return 1
   fi
 
@@ -2185,6 +2239,15 @@ _resling_existing_issue() {
     cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
   fi
   _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
+
+  local final_reason=""
+  if ! final_reason=$(_resling_final_dispatch_revalidate "$repo" "$issue_number" "$source_pr"); then
+    echo "[resling] stale event ($source_event) for issue #$issue_number — dispatch hard-stop: $final_reason"
+    _resling_log_skip_stale "$rig" "$issue_number" "$source_event" "$source_pr" "$final_reason" "dispatch-instant"
+    git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree"
+    git -C "$rpath" branch -D "$branch" 2>/dev/null || true
+    return 1
+  fi
 
   cat > "$SGT_POLECATS/$pname" <<PSTATE
 RIG=$rig

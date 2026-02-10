@@ -15,3 +15,6 @@
 - Added refinery merge resilience regression coverage for transient-then-success and retry-time head-drift skip paths in `test_refinery_merge_retry_resilience.sh`.
 - `sgt status` now guards terminal-width initialization for non-TTY/narrow environments, avoids nounset crashes in PR-title truncation, and always exits `0` after rendering.
 - Added regression coverage for status rendering with unset/narrow `COLUMNS` in `test_status_non_tty_term_cols_guard.sh`.
+- Witness/refinery stale-event re-sling now enforces a dispatch-instant hard-stop gate that aborts spawn when the issue is no longer `OPEN` or the source PR is not `OPEN`/`MERGEABLE`.
+- Structured stale-skip activity logs now include `gate`, `source_event_key`, and normalized `skip_reason` fields alongside the human-readable reason for forensic traceability.
+- Added regression coverage for late `MERGED`/`CLOSED` replay against stale queued dispatch candidates in `test_refinery_stale_close_event_hard_stop.sh`.
