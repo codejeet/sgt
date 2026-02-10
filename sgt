@@ -112,6 +112,50 @@ log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
 }
 
+_MAYOR_DECISION_LOG_LAST_ERROR=""
+
+_mayor_decision_log_append() {
+  local entry="${1:-}"
+  local workspace="${2:-$SGT_ROOT}"
+  local log_file="$SGT_CONFIG/mayor-decisions.log"
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  _MAYOR_DECISION_LOG_LAST_ERROR=""
+
+  if ! command -v flock >/dev/null 2>&1; then
+    _MAYOR_DECISION_LOG_LAST_ERROR="flock command not found"
+    return 1
+  fi
+
+  if ! mkdir -p "$SGT_CONFIG" 2>/dev/null; then
+    _MAYOR_DECISION_LOG_LAST_ERROR="failed to create $SGT_CONFIG"
+    return 1
+  fi
+
+  if ! {
+    flock -x 9 &&
+    printf '[%s] workspace=%s\n' "$ts" "$workspace" >&9 &&
+    printf '%s\n' "$entry" >&9
+  } 9>>"$log_file" 2>/dev/null; then
+    _MAYOR_DECISION_LOG_LAST_ERROR="failed to append $log_file"
+    return 1
+  fi
+}
+
+_mayor_record_decision() {
+  local entry="${1:-}"
+  local context="${2:-cycle}"
+  local workspace="${3:-$SGT_ROOT}"
+  if _mayor_decision_log_append "$entry" "$workspace"; then
+    return 0
+  fi
+  local err
+  err="$(_escape_quotes "${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}")"
+  echo "[mayor] decision log write failed ($context): ${_MAYOR_DECISION_LOG_LAST_ERROR:-unknown}"
+  log_event "MAYOR_DECISION_LOG_WRITE_FAILED context=$context workspace=\"$(_escape_quotes "$workspace")\" error=\"$err\""
+  return 1
+}
+
 _repo_owner_repo() {
   local repo="${1:-}"
   repo="${repo#https://github.com/}"
@@ -841,16 +885,15 @@ cmd_sling() {
   fi
 
   if [[ "${SGT_MAYOR_DISPATCH_REVALIDATE:-0}" == "1" ]]; then
-    local revalidation_reason ts
+    local revalidation_reason
     if ! revalidation_reason=$(_mayor_pre_dispatch_revalidate "$repo"); then
-      ts="$(date '+%Y-%m-%d %H:%M:%S')"
       echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
-      {
-        echo "[$ts] MAYOR DISPATCH SKIP (stale-state)"
-        echo "  rig=$rig"
-        echo "  reason=$revalidation_reason"
-        echo "  task=\"$(_escape_quotes "$task")\""
-      } >> "$SGT_CONFIG/mayor-decisions.log"
+      local stale_entry=""
+      stale_entry+="MAYOR DISPATCH SKIP (stale-state)"$'\n'
+      stale_entry+="  rig=$rig"$'\n'
+      stale_entry+="  reason=$revalidation_reason"$'\n'
+      stale_entry+="  task=\"$(_escape_quotes "$task")\""
+      _mayor_record_decision "$stale_entry" "dispatch-skip-stale" "$SGT_ROOT" || true
       log_event "MAYOR_DISPATCH_SKIP_STALE rig=$rig reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
       return 0
     fi
@@ -2610,8 +2653,6 @@ _mayor_loop() {
     local issues_found=""
     local actions_taken=""
     local notify_rigger=""
-    local ts
-    ts="$(date '+%Y-%m-%d %H:%M:%S')"
 
     if [[ "$wake_reason" != "periodic" ]]; then
       local event_reason wake_summary
@@ -2819,16 +2860,21 @@ MQORPHAN
     if [[ -z "$issues_found" && -z "$actions_taken" ]]; then
       # Only log periodic all-clears, not event-triggered ones
       if [[ "$wake_reason" == "periodic" ]]; then
-        echo "[$ts] all clear" >> "$SGT_CONFIG/mayor-decisions.log"
+        _mayor_record_decision "all clear" "periodic-all-clear" "$SGT_ROOT" || true
       fi
       echo "[mayor] all clear"
     else
-      {
-        echo "[$ts] MAYOR CYCLE (trigger: $wake_reason)"
-        [[ -n "$issues_found" ]] && echo -e "  Issues:\n$issues_found"
-        [[ -n "$actions_taken" ]] && echo -e "  Actions:\n$actions_taken"
-      } >> "$SGT_CONFIG/mayor-decisions.log"
-      echo "[mayor] logged issues/actions"
+      local cycle_entry
+      cycle_entry="$(printf 'MAYOR CYCLE (trigger: %s)\n' "$wake_reason")"
+      if [[ -n "$issues_found" ]]; then
+        cycle_entry+="$(printf '  Issues:\n%b' "$issues_found")"
+      fi
+      if [[ -n "$actions_taken" ]]; then
+        cycle_entry+="$(printf '  Actions:\n%b' "$actions_taken")"
+      fi
+      if _mayor_record_decision "$cycle_entry" "cycle-summary" "$SGT_ROOT"; then
+        echo "[mayor] logged issues/actions"
+      fi
 
       # Notify Rigger of significant actions via OpenClaw
       if [[ -n "$notify_rigger" ]]; then

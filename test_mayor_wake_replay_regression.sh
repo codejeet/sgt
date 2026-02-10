@@ -68,6 +68,9 @@ echo "=== stale snapshot dispatch race guard ==="
 echo "=== mayor critical alert cooldown dedupe ==="
 "$REPO_ROOT/test_mayor_critical_alert_cooldown.sh"
 
+echo "=== mayor decision log durability ==="
+"$REPO_ROOT/test_mayor_decision_log_durability.sh"
+
 echo "=== refinery stale queue item guard ==="
 "$REPO_ROOT/test_refinery_stale_queue_item.sh"
 

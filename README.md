@@ -74,6 +74,11 @@ Mayor AI dispatches also include a stale-state revalidation immediately before i
 - If either count is non-zero (or live state cannot be confirmed), dispatch is skipped.
 - A reasoned operator-visible line is emitted (`[mayor] dispatch skipped ...`) and a corresponding entry is appended to `~/.sgt/mayor-decisions.log`.
 
+Mayor decision logging is durable:
+- Decision entries are appended atomically under a file lock.
+- Each entry is prefixed with a UTC ISO-8601 timestamp and `workspace=<path>`.
+- If a decision-log write fails, mayor continues the cycle and emits `MAYOR_DECISION_LOG_WRITE_FAILED` to `~/.sgt/sgt.log`.
+
 Mayor wake processing is also cycle-idempotent:
 - Within a single mayor loop cycle, repeated identical wake events are coalesced.
 - Replayed identical `merged:*` wake events in that cycle produce only one AI dispatch decision.
