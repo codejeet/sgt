@@ -248,7 +248,8 @@ _ai_cmd() {
       ;;
     codex)
       # Non-interactive agent run; allow full access like the previous claude invocation.
-      printf 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color auto %q' "$prompt"
+      # Force Codex CLI to use OpenAI directly (ignore any local proxy env like OPENAI_BASE_URL).
+      printf 'OPENAI_BASE_URL= OPENAI_API_BASE= OPENAI_HOST= codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color auto %q' "$prompt"
       ;;
     *)
       die "unknown backend: $backend"
@@ -268,7 +269,7 @@ _ai_promptfile() {
       local out="$workdir/.codex-last-message.txt"
       rm -f "$out" 2>/dev/null || true
       # Feed the file content as stdin prompt (more reliable than shell-escaping huge text)
-      ( cd "$workdir" && codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - < "$prompt_file" >/dev/null 2>&1 ) || true
+      ( cd "$workdir" && OPENAI_BASE_URL= OPENAI_API_BASE= OPENAI_HOST= codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - < "$prompt_file" >/dev/null 2>&1 ) || true
       cat "$out" 2>/dev/null || true
       ;;
     *)
@@ -288,7 +289,7 @@ _ai_prompt() {
     codex)
       local out="$workdir/.codex-last-message.txt"
       rm -f "$out" 2>/dev/null || true
-      ( cd "$workdir" && printf "%s" "$prompt" | codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - >/dev/null 2>&1 ) || true
+      ( cd "$workdir" && printf "%s" "$prompt" | OPENAI_BASE_URL= OPENAI_API_BASE= OPENAI_HOST= codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color never -o "$out" - >/dev/null 2>&1 ) || true
       cat "$out" 2>/dev/null || true
       ;;
     *)
