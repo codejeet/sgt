@@ -3919,7 +3919,224 @@ PSTATE
 
 # ─── Status ───────────────────────────────────────────────────────────
 
-cmd_status() {
+_json_escape() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+_json_quote() {
+  printf '"%s"' "$(_json_escape "${1:-}")"
+}
+
+_json_print_array() {
+  local first=1 item
+  printf '['
+  for item in "$@"; do
+    if [[ "$first" -eq 0 ]]; then
+      printf ','
+    fi
+    first=0
+    printf '%s' "$item"
+  done
+  printf ']'
+}
+
+cmd_status_json() {
+  ensure_init
+  local -a agents=() dogs=() crew=() merge_queue=() polecats=()
+  local daemon_alive="off" daemon_pid="" daemon_pid_json
+  if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
+    daemon_alive="on"
+    daemon_pid="$(cat "$SGT_DAEMON_PID")"
+  fi
+  daemon_pid_json="null"
+  if [[ -n "$daemon_pid" ]]; then
+    daemon_pid_json="$(_json_quote "$daemon_pid")"
+  fi
+  agents+=("{\"name\":$(_json_quote "daemon"),\"status\":$(_json_quote "$daemon_alive"),\"pid\":$daemon_pid_json}")
+
+  local deacon_alive="off"
+  tmux has-session -t "sgt-deacon" 2>/dev/null && deacon_alive="on"
+  local hb_age hb_ts hb_state hb_stale_secs hb_health deacon_badge
+  hb_stale_secs="$(_deacon_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state <<< "$(_deacon_heartbeat_snapshot)"
+  hb_health="$(_deacon_heartbeat_health "$hb_age" "$hb_stale_secs")"
+  deacon_badge="$deacon_alive"
+  if [[ "$deacon_alive" == "on" && "$hb_health" != "healthy" ]]; then
+    deacon_badge="degraded"
+  fi
+  agents+=("{\"name\":$(_json_quote "deacon"),\"status\":$(_json_quote "$deacon_badge"),\"session\":$(_json_quote "$deacon_alive"),\"heartbeat\":{\"age_seconds\":$(_json_quote "$hb_age"),\"timestamp\":$(_json_quote "$hb_ts"),\"state\":$(_json_quote "$hb_state"),\"health\":$(_json_quote "$hb_health"),\"stale_seconds\":$(_json_quote "$hb_stale_secs")}}")
+
+  local rig_file rig_name w_alive r_alive
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    rig_name="$(basename "$rig_file")"
+    w_alive="off"
+    r_alive="off"
+    tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null && w_alive="on"
+    tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null && r_alive="on"
+    agents+=("{\"name\":$(_json_quote "witness/$rig_name"),\"rig\":$(_json_quote "$rig_name"),\"status\":$(_json_quote "$w_alive")}")
+    agents+=("{\"name\":$(_json_quote "refinery/$rig_name"),\"rig\":$(_json_quote "$rig_name"),\"status\":$(_json_quote "$r_alive")}")
+  done
+
+  local mayor_alive="off"
+  tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
+  local mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until
+  IFS='|' read -r mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until <<< "$(_mayor_lock_snapshot)"
+  local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
+  IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
+  log_fail_age=""
+  if [[ "$log_fail_ts" =~ ^[0-9]+$ ]]; then
+    log_fail_age=$(( $(date +%s) - log_fail_ts ))
+    if [[ "$log_fail_age" -lt 0 ]]; then
+      log_fail_age=0
+    fi
+  fi
+  local review_watch_count review_watch_oldest review_watch_threshold
+  IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
+  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+
+  local df dname
+  if [[ -d "$SGT_CONFIG/dogs" ]]; then
+    for df in "$SGT_CONFIG/dogs"/*; do
+      [[ -f "$df" ]] || continue
+      local SESSION ISSUE
+      SESSION=""
+      ISSUE=""
+      source "$df" 2>/dev/null || true
+      dname="$(basename "$df")"
+      local dog_alive="dead"
+      tmux has-session -t "$SESSION" 2>/dev/null && dog_alive="alive"
+      dogs+=("{\"name\":$(_json_quote "$dname"),\"status\":$(_json_quote "$dog_alive"),\"issue\":$(_json_quote "$ISSUE")}")
+    done
+  fi
+
+  local cf cname
+  if [[ -d "$SGT_CONFIG/crew" ]]; then
+    for cf in "$SGT_CONFIG/crew"/*; do
+      [[ -f "$cf" ]] || continue
+      local SESSION ROLE RIG
+      SESSION=""
+      ROLE=""
+      RIG=""
+      source "$cf" 2>/dev/null || true
+      cname="$(basename "$cf")"
+      local crew_alive="asleep"
+      tmux has-session -t "$SESSION" 2>/dev/null && crew_alive="awake"
+      crew+=("{\"name\":$(_json_quote "$cname"),\"status\":$(_json_quote "$crew_alive"),\"role\":$(_json_quote "$ROLE"),\"rig\":$(_json_quote "$RIG")}")
+    done
+  fi
+
+  local mqf
+  if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
+    for mqf in "$SGT_CONFIG/merge-queue"/*; do
+      [[ -f "$mqf" ]] || continue
+      local PR RIG
+      PR=""
+      RIG=""
+      source "$mqf" 2>/dev/null || true
+      merge_queue+=("{\"name\":$(_json_quote "$(basename "$mqf")"),\"pr\":$(_json_quote "$PR"),\"rig\":$(_json_quote "$RIG")}")
+    done
+  fi
+
+  local f pname
+  for f in "$SGT_POLECATS"/*; do
+    [[ -f "$f" ]] || continue
+    pname="$(basename "$f")"
+
+    local SESSION RIG REPO BRANCH ISSUE WORKTREE
+    SESSION=""
+    RIG=""
+    REPO=""
+    BRANCH=""
+    ISSUE="?"
+    WORKTREE=""
+    if ! source "$f" 2>/dev/null; then
+      polecats+=("{\"name\":$(_json_quote "$pname"),\"status\":$(_json_quote "unknown"),\"issue\":$(_json_quote "?"),\"warning\":$(_json_quote "metadata unreadable (possibly mid-write race)")}")
+      continue
+    fi
+
+    local session rig repo branch issue missing_fields
+    session="${SESSION:-}"
+    rig="${RIG:-}"
+    repo="${REPO:-}"
+    branch="${BRANCH:-}"
+    issue="${ISSUE:-?}"
+    missing_fields=""
+    [[ -z "$session" ]] && missing_fields="${missing_fields} SESSION"
+    [[ -z "$repo" ]] && missing_fields="${missing_fields} REPO"
+    [[ -z "$branch" ]] && missing_fields="${missing_fields} BRANCH"
+    if [[ -n "$missing_fields" ]]; then
+      polecats+=("{\"name\":$(_json_quote "$pname"),\"status\":$(_json_quote "unknown"),\"issue\":$(_json_quote "$issue"),\"warning\":$(_json_quote "metadata missing:${missing_fields} (possible race)")}")
+      continue
+    fi
+
+    local alive="dead"
+    tmux has-session -t "$session" 2>/dev/null && alive="alive"
+    local pr_number pr_state pr_title warning_text
+    pr_number=""
+    pr_state=""
+    pr_title=""
+    warning_text=""
+    local canonical_repo resolve_meta resolve_code resolve_reason
+    if canonical_repo="$(_resolve_rig_repo_canonical "status-open-pr-check" "$rig" "$repo" "1")"; then
+      local pr_meta
+      pr_meta="$(gh pr list --repo "$canonical_repo" --head "$branch" --state all --json number,state,title --jq 'if length == 0 then "" else "\(.[0].number)\t\(.[0].state // "")\t\(.[0].title // "")" end' 2>/dev/null || true)"
+      if [[ -n "$pr_meta" ]]; then
+        IFS=$'\t' read -r pr_number pr_state pr_title <<< "$pr_meta"
+      fi
+    else
+      resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
+      IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+      warning_text="PR metadata skipped: ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})"
+    fi
+
+    if [[ "$alive" == "dead" && -n "$pr_number" && ( "$pr_state" == "MERGED" || "$pr_state" == "CLOSED" ) ]]; then
+      local cleanup_reason cleanup_line
+      cleanup_reason="stale-pr-merged"
+      if [[ "$pr_state" == "CLOSED" ]]; then
+        cleanup_reason="stale-pr-closed"
+      fi
+      cleanup_line="$(_mayor_cleanup_stale_polecat "$f" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "${WORKTREE:-}" "$cleanup_reason" "" "$pr_number" "$pr_state" 2>/dev/null || true)"
+      if [[ "$cleanup_line" == CLEANED\|* ]]; then
+        log_event "POLECAT_AUTO_PRUNE source=status polecat=$pname pr=#${pr_number:-unknown} state=${pr_state:-unknown} reason_code=$cleanup_reason"
+        continue
+      fi
+    fi
+
+    if [[ "$alive" == "dead" && -z "$pr_number" && -z "$warning_text" ]]; then
+      warning_text="PR metadata unavailable (possible race)"
+    fi
+
+    polecats+=("{\"name\":$(_json_quote "$pname"),\"status\":$(_json_quote "$alive"),\"issue\":$(_json_quote "$issue"),\"rig\":$(_json_quote "$rig"),\"repo\":$(_json_quote "$repo"),\"branch\":$(_json_quote "$branch"),\"session\":$(_json_quote "$session"),\"pr\":{\"number\":$(_json_quote "$pr_number"),\"state\":$(_json_quote "$pr_state"),\"title\":$(_json_quote "$pr_title")},\"warning\":$(_json_quote "$warning_text")}")
+  done
+
+  printf '{\n'
+  printf '  "agents": '
+  _json_print_array "${agents[@]}"
+  printf ',\n'
+  printf '  "dogs": '
+  _json_print_array "${dogs[@]}"
+  printf ',\n'
+  printf '  "crew": '
+  _json_print_array "${crew[@]}"
+  printf ',\n'
+  printf '  "merge_queue": '
+  _json_print_array "${merge_queue[@]}"
+  printf ',\n'
+  printf '  "polecats": '
+  _json_print_array "${polecats[@]}"
+  printf ',\n'
+  printf '  "summary": {"polecat_count": %s}\n' "${#polecats[@]}"
+  printf '}\n'
+}
+
+_cmd_status_human() {
   ensure_init
   local status_term_cols status_pr_title_cols
   status_term_cols="$(_term_cols)"
@@ -4142,6 +4359,32 @@ cmd_status() {
     printf "\n%s%s%s\n" "$(_fg_gray)" "$count polecat(s) tracked" "$(_reset)"
   fi
   return 0
+}
+
+cmd_status() {
+  local json_mode=0
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --json)
+        json_mode=1
+        ;;
+      -h|--help)
+        echo "usage: sgt status [--json]"
+        return 0
+        ;;
+      *)
+        die "usage: sgt status [--json]"
+        ;;
+    esac
+    shift
+  done
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    cmd_status_json
+    return 0
+  fi
+
+  _cmd_status_human
 }
 
 
@@ -7647,7 +7890,7 @@ Core Commands:
     --label <label>               Add label (repeatable)
     --auto-merge                  Auto-merge PR on CI pass
     --backend <claude|codex>      Select AI backend for this polecat (default: SGT_AI_BACKEND)
-  status                        Show all agents, polecats, dogs, crew
+  status [--json]               Show all agents, polecats, dogs, crew
   peek <target>                 View output (polecat, witness/<rig>, refinery/<rig>,
                                 deacon, mayor, dog/<name>, crew/<name>)
   nuke <polecat>                Kill polecat and clean up
@@ -7767,7 +8010,7 @@ main() {
       esac
       ;;
     sling)          cmd_sling "$@" ;;
-    status|st)      cmd_status ;;
+    status|st)      cmd_status "$@" ;;
     peek)           cmd_peek "$@" ;;
     nuke)           cmd_nuke "$@" ;;
     sweep)          cmd_sweep ;;
