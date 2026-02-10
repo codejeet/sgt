@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SGT_SCRIPT="$(dirname "$0")/sgt"
-WARN_RE='warning: command substitution: [0-9]+ unterminated here-document'
+WARN_RE='unterminated here-document'
 FAIL=0
 
 check_no_legacy_heredoc_pattern() {
@@ -45,36 +45,49 @@ check_bash_parse() {
 
 check_command() {
   local name="$1"
-  shift
+  local expected_exit="$2"
+  shift 2
 
-  local stderr_file
+  local stdout_file stderr_file cmd_exit
+  stdout_file="$(mktemp)"
   stderr_file="$(mktemp)"
 
-  if bash -lc "\"$SGT_SCRIPT\" $*" >/dev/null 2>"$stderr_file"; then
-    :
+  set +e
+  "$SGT_SCRIPT" "$@" >"$stdout_file" 2>"$stderr_file"
+  cmd_exit=$?
+  set -e
+
+  if [[ "$cmd_exit" -ne "$expected_exit" ]]; then
+    echo "FAIL: $name exit code changed (expected $expected_exit, got $cmd_exit)"
+    FAIL=1
   else
-    # This regression focuses on parse warnings, not runtime preconditions.
-    :
+    echo "PASS: $name exit code is $expected_exit"
   fi
 
   if grep -Eiq "$WARN_RE" "$stderr_file"; then
-    echo "FAIL: $name emitted bash parse warning"
+    echo "FAIL: $name emitted here-doc warning"
     cat "$stderr_file"
     FAIL=1
   else
-    echo "PASS: $name emitted no bash parse warning"
+    echo "PASS: $name emitted no here-doc warning"
   fi
 
-  rm -f "$stderr_file"
+  if [[ ! -s "$stdout_file" ]]; then
+    echo "FAIL: $name produced empty stdout"
+    FAIL=1
+  else
+    echo "PASS: $name produced stdout"
+  fi
+
+  rm -f "$stdout_file" "$stderr_file"
 }
 
 echo "=== bash startup warning regression ==="
 check_no_legacy_heredoc_pattern
 check_bash_parse
-check_command "sgt --help" --help
-check_command "sgt status" status
-check_command "sgt sweep" sweep
-check_command "sgt sling" sling
+check_command "sgt --help" 0 --help
+check_command "sgt status" 0 status
+check_command "sgt sweep" 0 sweep
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1
