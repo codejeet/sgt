@@ -231,6 +231,9 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 - Once a merge action has been attempted for that key, the fence is kept across retries, future refinery cycles, and process restarts.
 - Duplicate PR-ready queue replays for the same key are skipped before any additional merge action runs.
 - If a replayed queue candidate is marked `REVIEW_APPROVED` but lacks `REVIEWED_HEAD_SHA`, refinery blocks merge, emits explicit telemetry, and resets it to `REVIEW_PENDING` for a fresh review/revalidation path.
+- When mergeability is `CONFLICTING`, refinery now writes durable conflict evidence under `~/.sgt/refinery-conflicts/` including original PR/head/attempt/timestamp context (`ORIGIN_PR`, `ORIGIN_HEAD_SHA`, `ORIGIN_ATTEMPT_KEY`, `ORIGIN_TS`).
+- Conflict re-sling is now guarded by a per-issue claim (`~/.sgt/resling-issue-claims/`) so concurrent conflict handlers dedupe to one active re-sling per issue.
+- On refinery restart, pending conflict evidence is replayed and resumed from disk without spawning duplicate polecats; already-dispatched evidence is treated as complete.
 - Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
 
 Configure retry behavior with:
@@ -249,6 +252,10 @@ Observability:
 - `REFINERY_MERGE_FAILED pr=#... attempt=<n>/<max> class=<class> transient=<true|false> error="..."`
 - `REFINERY_DUPLICATE_SKIP pr=#... issue=#... reason_code=duplicate-merge-attempt-key reason="duplicate merge-attempt key (repo+pr+head) already processed" key="owner/repo|pr=<n>|head=<sha>"`
 - `REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA pr=#... issue=#... queue=<queue-file> ...`
+- `REFINERY_CONFLICT_EVIDENCE_WRITTEN pr=#... issue=#... head=<sha> attempt_key="owner/repo|pr=<n>|head=<sha>" evidence="~/.sgt/refinery-conflicts/<id>.state"`
+- `REFINERY_CONFLICT_RESLING_DEDUPE issue=#... reason_code=<active-resling-claim|active-polecat-existing> ...`
+- `REFINERY_CONFLICT_RESLING_RESUMED issue=#... source_pr=<n> polecat=<name> evidence="..."`
+- `REFINERY_CONFLICT_RESLING_SKIPPED issue=#... status=<SKIPPED_STALE|SKIPPED_UNAUTHORIZED|PENDING> reason="..."`
 
 When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`

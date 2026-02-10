@@ -136,6 +136,8 @@ _MAYOR_DISPATCH_TRIGGER_KEY=""
 _MAYOR_DISPATCH_TRIGGER_FILE=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
+_RESLING_LAST_POLECAT=""
+_RESLING_ISSUE_CLAIM_FILE=""
 
 _decision_log_alert_cooldown_secs() {
   local raw="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}"
@@ -1234,9 +1236,11 @@ _pr_head_sha() {
 
 _merge_queue_set_field() {
   local queue_file="${1:-}" field="${2:-}" value="${3:-}"
+  local safe_value
   [[ -n "$queue_file" && -f "$queue_file" && -n "$field" ]] || return 1
+  safe_value="$(printf '%s' "$value" | sed -e 's/[&|\\]/\\&/g')"
   if grep -q "^${field}=" "$queue_file"; then
-    sed -i -E "s|^${field}=.*|${field}=${value}|" "$queue_file"
+    sed -i -E "s|^${field}=.*|${field}=${safe_value}|" "$queue_file"
   else
     printf '%s=%s\n' "$field" "$value" >> "$queue_file"
   fi
@@ -1408,6 +1412,272 @@ _refinery_merge_attempt_release() {
   [[ -n "$key_file" ]] || key_file="${_REFINERY_MERGE_ATTEMPT_FILE:-}"
   [[ -n "$key_file" ]] || return 0
   rm -f "$key_file" 2>/dev/null || true
+}
+
+_resling_issue_key() {
+  local repo="${1:-}" issue="${2:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  echo "${owner_repo}|issue=${issue}"
+}
+
+_resling_issue_key_id() {
+  local key="${1:-}"
+  _refinery_merge_attempt_key_id "$key"
+}
+
+_refinery_conflict_evidence_file() {
+  local repo="${1:-}" issue="${2:-}" key key_id
+  key="$(_resling_issue_key "$repo" "$issue")"
+  key_id="$(_resling_issue_key_id "$key")"
+  echo "$SGT_CONFIG/refinery-conflicts/${key_id}.state"
+}
+
+_refinery_conflict_record() {
+  local rig="${1:-}" repo="${2:-}" issue="${3:-}" source_pr="${4:-}" source_head_sha="${5:-}" attempt_key="${6:-}" queue_name="${7:-}" backend="${8:-}" source_event_key="${9:-}"
+  local now_epoch now_iso evidence_file conflict_count existing_origin_pr existing_origin_head existing_origin_attempt existing_origin_ts
+  local key
+  [[ -n "$repo" && -n "$issue" ]] || return 1
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  evidence_file="$(_refinery_conflict_evidence_file "$repo" "$issue")"
+  mkdir -p "$SGT_CONFIG/refinery-conflicts" || return 1
+  key="$(_resling_issue_key "$repo" "$issue")"
+
+  if [[ ! -f "$evidence_file" ]]; then
+    cat > "$evidence_file" <<EOF
+KEY=$key
+RIG=${rig:-unknown}
+REPO=$repo
+ISSUE=$issue
+ORIGIN_PR=${source_pr:-unknown}
+ORIGIN_HEAD_SHA=${source_head_sha:-unknown}
+ORIGIN_ATTEMPT_KEY=${attempt_key:-unknown}
+ORIGIN_TS=$now_epoch
+ORIGIN_AT=$now_iso
+CONFLICT_COUNT=0
+STATUS=PENDING
+SOURCE_EVENT=refinery-conflict
+SOURCE_EVENT_KEY=${source_event_key:-unknown}
+BACKEND=${backend:-$(_ai_backend_default)}
+RESLING_DISPATCHED_POLECAT=
+LAST_OUTCOME=
+LAST_REASON=
+EOF
+  fi
+
+  conflict_count=$(grep -E '^CONFLICT_COUNT=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [[ "$conflict_count" =~ ^[0-9]+$ ]] || conflict_count=0
+  conflict_count=$((conflict_count + 1))
+
+  existing_origin_pr=$(grep -E '^ORIGIN_PR=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  existing_origin_head=$(grep -E '^ORIGIN_HEAD_SHA=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  existing_origin_attempt=$(grep -E '^ORIGIN_ATTEMPT_KEY=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  existing_origin_ts=$(grep -E '^ORIGIN_TS=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+
+  if [[ -z "$existing_origin_pr" ]]; then
+    _merge_queue_set_field "$evidence_file" "ORIGIN_PR" "${source_pr:-unknown}" || true
+  fi
+  if [[ -z "$existing_origin_head" ]]; then
+    _merge_queue_set_field "$evidence_file" "ORIGIN_HEAD_SHA" "${source_head_sha:-unknown}" || true
+  fi
+  if [[ -z "$existing_origin_attempt" ]]; then
+    _merge_queue_set_field "$evidence_file" "ORIGIN_ATTEMPT_KEY" "${attempt_key:-unknown}" || true
+  fi
+  if [[ ! "$existing_origin_ts" =~ ^[0-9]+$ ]]; then
+    _merge_queue_set_field "$evidence_file" "ORIGIN_TS" "$now_epoch" || true
+    _merge_queue_set_field "$evidence_file" "ORIGIN_AT" "$now_iso" || true
+  fi
+
+  _merge_queue_set_field "$evidence_file" "RIG" "${rig:-unknown}" || true
+  _merge_queue_set_field "$evidence_file" "BACKEND" "${backend:-$(_ai_backend_default)}" || true
+  _merge_queue_set_field "$evidence_file" "SOURCE_EVENT" "refinery-conflict" || true
+  _merge_queue_set_field "$evidence_file" "SOURCE_EVENT_KEY" "${source_event_key:-unknown}" || true
+  _merge_queue_set_field "$evidence_file" "LAST_PR" "${source_pr:-unknown}" || true
+  _merge_queue_set_field "$evidence_file" "LAST_HEAD_SHA" "${source_head_sha:-unknown}" || true
+  _merge_queue_set_field "$evidence_file" "LAST_ATTEMPT_KEY" "${attempt_key:-unknown}" || true
+  _merge_queue_set_field "$evidence_file" "LAST_TS" "$now_epoch" || true
+  _merge_queue_set_field "$evidence_file" "LAST_AT" "$now_iso" || true
+  _merge_queue_set_field "$evidence_file" "CONFLICT_COUNT" "$conflict_count" || true
+  _merge_queue_set_field "$evidence_file" "STATUS" "PENDING" || true
+  _merge_queue_set_field "$evidence_file" "LAST_OUTCOME" "conflict-recorded" || true
+  _merge_queue_set_field "$evidence_file" "LAST_REASON" "merge conflict detected" || true
+
+  echo "$evidence_file"
+}
+
+_resling_find_existing_issue_polecat() {
+  local rig="${1:-}" repo="${2:-}" issue="${3:-}"
+  local owner_repo f p_owner_repo p_issue p_rig
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  for f in "$SGT_POLECATS"/*; do
+    [[ -f "$f" ]] || continue
+    p_owner_repo=""
+    p_issue=""
+    p_rig=""
+    eval "$(grep -E '^(REPO|ISSUE|RIG)=' "$f" 2>/dev/null || true)"
+    p_owner_repo="$(_repo_owner_repo "${REPO:-}")"
+    [[ -n "$p_owner_repo" ]] || p_owner_repo="${REPO:-}"
+    p_issue="${ISSUE:-}"
+    p_rig="${RIG:-}"
+    [[ -n "$p_issue" && -n "$p_owner_repo" ]] || continue
+    if [[ "$p_owner_repo" == "$owner_repo" && "$p_issue" == "$issue" && ( -z "$rig" || "$p_rig" == "$rig" ) ]]; then
+      basename "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_resling_issue_claim_release() {
+  local claim_file="${1:-}"
+  [[ -n "$claim_file" ]] || claim_file="${_RESLING_ISSUE_CLAIM_FILE:-}"
+  [[ -n "$claim_file" ]] || return 0
+  rm -f "$claim_file" 2>/dev/null || true
+  if [[ "${_RESLING_ISSUE_CLAIM_FILE:-}" == "$claim_file" ]]; then
+    _RESLING_ISSUE_CLAIM_FILE=""
+  fi
+}
+
+_resling_issue_claim_acquire() {
+  local repo="${1:-}" issue="${2:-}" source_event="${3:-}" source_event_key="${4:-}" evidence_file="${5:-}"
+  local key key_id key_dir key_file now_iso now_epoch existing_pid
+  _RESLING_ISSUE_CLAIM_FILE=""
+  key="$(_resling_issue_key "$repo" "$issue")"
+  key_id="$(_resling_issue_key_id "$key")"
+  key_dir="$SGT_CONFIG/resling-issue-claims"
+  key_file="$key_dir/$key_id"
+  now_iso="$(date -Iseconds)"
+  now_epoch="$(date +%s)"
+  mkdir -p "$key_dir" || return 1
+  if ! ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+    existing_pid="$(awk -F= '$1=="OWNER_PID"{print $2; exit}' "$key_file" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" && "$existing_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$existing_pid" 2>/dev/null; then
+      rm -f "$key_file" 2>/dev/null || true
+      if ! ( set -o noclobber; : > "$key_file" ) 2>/dev/null; then
+        return 1
+      fi
+    else
+      return 1
+    fi
+  fi
+  cat > "$key_file" <<EOF
+KEY=$key
+REPO=$repo
+ISSUE=$issue
+SOURCE_EVENT=${source_event:-unknown}
+SOURCE_EVENT_KEY=${source_event_key:-unknown}
+EVIDENCE=${evidence_file:-none}
+OWNER_PID=$$
+OWNER_STARTED_TS=$now_epoch
+CLAIMED_AT=$now_iso
+EOF
+  _RESLING_ISSUE_CLAIM_FILE="$key_file"
+  return 0
+}
+
+_refinery_conflict_resling_resume() {
+  local rig="${1:-}" evidence_file="${2:-}"
+  local issue repo source_pr source_event source_event_key backend issue_title evidence_rig evidence_status existing_polecat
+  local claim_file last_reason
+  [[ -n "$evidence_file" && -f "$evidence_file" ]] || return 1
+
+  repo="$(grep -E '^REPO=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  issue="$(grep -E '^ISSUE=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  source_pr="$(grep -E '^ORIGIN_PR=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  source_event="$(grep -E '^SOURCE_EVENT=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  source_event_key="$(grep -E '^SOURCE_EVENT_KEY=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  backend="$(grep -E '^BACKEND=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  evidence_rig="$(grep -E '^RIG=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  evidence_status="$(grep -E '^STATUS=' "$evidence_file" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+
+  [[ -n "$repo" && -n "$issue" ]] || return 1
+  [[ -n "$source_event" ]] || source_event="refinery-conflict"
+  [[ -n "$source_event_key" ]] || source_event_key="refinery-conflict:issue-${issue}"
+  [[ -n "$backend" ]] || backend="$(_ai_backend_default)"
+  if [[ -n "$evidence_rig" && "$evidence_rig" != "$rig" ]]; then
+    return 0
+  fi
+
+  if [[ "$evidence_status" == "RESLING_DISPATCHED" || "$evidence_status" == "SKIPPED_FINAL" || "$evidence_status" == "SKIPPED_STALE" || "$evidence_status" == "SKIPPED_UNAUTHORIZED" ]]; then
+    return 0
+  fi
+
+  if existing_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue"); then
+    _merge_queue_set_field "$evidence_file" "STATUS" "RESLING_DISPATCHED" || true
+    _merge_queue_set_field "$evidence_file" "RESLING_DISPATCHED_POLECAT" "$existing_polecat" || true
+    _merge_queue_set_field "$evidence_file" "LAST_OUTCOME" "dedupe-existing-polecat" || true
+    _merge_queue_set_field "$evidence_file" "LAST_REASON" "active polecat already exists for issue" || true
+    echo "[refinery/$rig] conflict replay dedupe for issue #$issue — active polecat=$existing_polecat"
+    log_event "REFINERY_CONFLICT_RESLING_DEDUPE issue=#$issue repo=$(_repo_owner_repo "$repo") reason_code=active-polecat-existing polecat=$existing_polecat evidence=\"$(_escape_quotes "$evidence_file")\""
+    return 0
+  fi
+
+  if ! _resling_issue_claim_acquire "$repo" "$issue" "$source_event" "$source_event_key" "$evidence_file"; then
+    echo "[refinery/$rig] conflict replay dedupe for issue #$issue — reason_code=active-resling-claim"
+    log_event "REFINERY_CONFLICT_RESLING_DEDUPE issue=#$issue repo=$(_repo_owner_repo "$repo") reason_code=active-resling-claim source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" evidence=\"$(_escape_quotes "$evidence_file")\""
+    return 0
+  fi
+  claim_file="${_RESLING_ISSUE_CLAIM_FILE:-}"
+  _merge_queue_set_field "$evidence_file" "STATUS" "RESLING_IN_PROGRESS" || true
+  _merge_queue_set_field "$evidence_file" "RESLING_CLAIM_FILE" "$claim_file" || true
+  _merge_queue_set_field "$evidence_file" "RESLING_STARTED_AT" "$(date -Iseconds)" || true
+
+  issue_title="$(gh issue view "$issue" --repo "$repo" --json title --jq '.title' 2>/dev/null || true)"
+  if [[ -z "$issue_title" ]]; then
+    last_reason="unable to query issue title during conflict replay"
+    _merge_queue_set_field "$evidence_file" "STATUS" "PENDING" || true
+    _merge_queue_set_field "$evidence_file" "LAST_OUTCOME" "resume-error" || true
+    _merge_queue_set_field "$evidence_file" "LAST_REASON" "$last_reason" || true
+    log_event "REFINERY_CONFLICT_RESLING_RESUME_ERROR issue=#$issue repo=$(_repo_owner_repo "$repo") reason=\"$(_escape_quotes "$last_reason")\" evidence=\"$(_escape_quotes "$evidence_file")\""
+    _resling_issue_claim_release "$claim_file"
+    return 1
+  fi
+
+  _RESLING_LAST_POLECAT=""
+  if _resling_existing_issue "$rig" "$issue" "$issue_title" "$repo" "$backend" "$source_pr" "$source_event" "$source_event_key"; then
+    _merge_queue_set_field "$evidence_file" "STATUS" "RESLING_DISPATCHED" || true
+    _merge_queue_set_field "$evidence_file" "RESLING_DISPATCHED_POLECAT" "${_RESLING_LAST_POLECAT:-unknown}" || true
+    _merge_queue_set_field "$evidence_file" "RESLING_COMPLETED_AT" "$(date -Iseconds)" || true
+    _merge_queue_set_field "$evidence_file" "LAST_OUTCOME" "resling-dispatched" || true
+    _merge_queue_set_field "$evidence_file" "LAST_REASON" "resling dispatched from conflict evidence" || true
+    log_event "REFINERY_CONFLICT_RESLING_RESUMED issue=#$issue repo=$(_repo_owner_repo "$repo") source_pr=${source_pr:-unknown} polecat=${_RESLING_LAST_POLECAT:-unknown} evidence=\"$(_escape_quotes "$evidence_file")\""
+  else
+    local stale_reason=""
+    local skip_status="PENDING"
+    local skip_reason="resling flow skipped by guardrail"
+    local skip_outcome="resling-skipped"
+    if existing_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue"); then
+      skip_status="RESLING_DISPATCHED"
+      skip_outcome="dedupe-existing-polecat"
+      skip_reason="active polecat already exists for issue"
+      _merge_queue_set_field "$evidence_file" "RESLING_DISPATCHED_POLECAT" "$existing_polecat" || true
+    elif ! _has_sgt_authorized "$repo" "$issue"; then
+      skip_status="SKIPPED_UNAUTHORIZED"
+      skip_reason="issue lacks sgt-authorized label"
+    elif ! stale_reason=$(_resling_pre_dispatch_revalidate "$repo" "$issue" "$source_pr"); then
+      skip_status="SKIPPED_STALE"
+      skip_reason="$stale_reason"
+    fi
+    _merge_queue_set_field "$evidence_file" "STATUS" "$skip_status" || true
+    _merge_queue_set_field "$evidence_file" "LAST_OUTCOME" "$skip_outcome" || true
+    _merge_queue_set_field "$evidence_file" "LAST_REASON" "$skip_reason" || true
+    log_event "REFINERY_CONFLICT_RESLING_SKIPPED issue=#$issue repo=$(_repo_owner_repo "$repo") status=$skip_status reason=\"$(_escape_quotes "$skip_reason")\" evidence=\"$(_escape_quotes "$evidence_file")\""
+  fi
+
+  _resling_issue_claim_release "$claim_file"
+  return 0
+}
+
+_refinery_conflict_replay_pending() {
+  local rig="${1:-}" evidence_dir="${SGT_CONFIG}/refinery-conflicts" evidence_file
+  [[ -d "$evidence_dir" ]] || return 0
+  for evidence_file in "$evidence_dir"/*.state; do
+    [[ -f "$evidence_file" ]] || continue
+    _refinery_conflict_resling_resume "$rig" "$evidence_file" || true
+  done
 }
 
 _refinery_merge_retry_max_attempts() {
@@ -2840,7 +3110,15 @@ _resling_existing_issue() {
     return 1
   fi
 
+  local existing_issue_polecat=""
+  if existing_issue_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number"); then
+    echo "[resling] issue #$issue_number already has active polecat $existing_issue_polecat — skipping duplicate re-sling"
+    log_event "RESLING_SKIP_DUPLICATE_ACTIVE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} existing_polecat=$existing_issue_polecat skip_reason=\"active polecat already exists for issue\""
+    return 1
+  fi
+
   local rpath pname branch session_name
+  _RESLING_LAST_POLECAT=""
   rpath="$(rig_path "$rig")"
   pname="$(polecat_name "$rig")"
   branch="sgt/${pname}"
@@ -2887,6 +3165,7 @@ PSTATE
   tmux new-session -d -s "$session_name" -c "$worktree" \
     "$( _ai_cmd "$backend" "Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
+  _RESLING_LAST_POLECAT="$pname"
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
 
@@ -3146,6 +3425,7 @@ _refinery_loop() {
 
     local merge_dir="$SGT_CONFIG/merge-queue"
     mkdir -p "$merge_dir"
+    _refinery_conflict_replay_pending "$rig" || true
 
     # ── Process PR queue (polecats) ──
     for f in "$merge_dir"/${rig}-*; do
@@ -3246,6 +3526,7 @@ _refinery_loop() {
       fi
 
       local claimed_attempt_file=""
+      local claimed_attempt_key=""
       if ! _refinery_merge_attempt_claim "$mq_repo" "$mq_pr" "$mq_head_sha" "$mqname"; then
         local duplicate_key duplicate_reason duplicate_reason_code
         duplicate_key="${_REFINERY_MERGE_ATTEMPT_KEY:-unknown}"
@@ -3257,25 +3538,32 @@ _refinery_loop() {
         continue
       fi
       claimed_attempt_file="${_REFINERY_MERGE_ATTEMPT_FILE:-}"
+      claimed_attempt_key="${_REFINERY_MERGE_ATTEMPT_KEY:-}"
 
       # Check mergeability
       local pr_mergeable
       pr_mergeable=$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable' 2>/dev/null || true)
       if [[ "$pr_mergeable" == "CONFLICTING" ]]; then
+        local conflict_evidence_file conflict_event_key
+        conflict_event_key="refinery-conflict:${mqname}:#${mq_pr}"
+        conflict_evidence_file="$(_refinery_conflict_record "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$mq_head_sha" "$claimed_attempt_key" "$mqname" "$mq_backend" "$conflict_event_key" || true)"
         echo "[refinery/$rig] PR #$mq_pr has merge conflicts — requesting rework"
-        log_event "REFINERY_CONFLICT pr=#$mq_pr"
+        if [[ -n "$conflict_evidence_file" ]]; then
+          echo "[refinery/$rig] conflict evidence recorded for issue #$mq_issue (pr=$mq_pr head=${mq_head_sha:-unknown} attempt_key=${claimed_attempt_key:-unknown})"
+        fi
+        log_event "REFINERY_CONFLICT pr=#$mq_pr issue=#$mq_issue head=${mq_head_sha:-unknown} attempt_key=\"$(_escape_quotes "${claimed_attempt_key:-unknown}")\" evidence=\"$(_escape_quotes "${conflict_evidence_file:-none}")\""
+        if [[ -n "$conflict_evidence_file" ]]; then
+          log_event "REFINERY_CONFLICT_EVIDENCE_WRITTEN pr=#$mq_pr issue=#$mq_issue head=${mq_head_sha:-unknown} attempt_key=\"$(_escape_quotes "${claimed_attempt_key:-unknown}")\" evidence=\"$(_escape_quotes "$conflict_evidence_file")\""
+        fi
         gh pr comment "$mq_pr" --repo "$mq_repo" \
           --body "[sgt-refinery] Merge conflict detected. Closing and re-dispatching." 2>/dev/null || true
         gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
         rm -f "$f"
-        # Re-sling
-        if [[ "$mq_issue" != "0" && -n "$mq_issue" ]]; then
+        if [[ "$mq_issue" != "0" && -n "$mq_issue" && -n "$conflict_evidence_file" ]]; then
           gh issue reopen "$mq_issue" --repo "$mq_repo" 2>/dev/null || true
           gh issue comment "$mq_issue" --repo "$mq_repo" \
             --body "[sgt-refinery] Merge conflict on PR #$mq_pr. Re-dispatching." 2>/dev/null || true
-          local issue_title_resling
-          issue_title_resling=$(gh issue view "$mq_issue" --repo "$mq_repo" --json title --jq '.title' 2>/dev/null || true)
-          [[ -n "$issue_title_resling" ]] && _resling_existing_issue "$rig" "$mq_issue" "$issue_title_resling" "$mq_repo" "$mq_backend" "$mq_pr" "refinery-conflict" "refinery-conflict:$mqname:#$mq_pr"
+          _refinery_conflict_resling_resume "$rig" "$conflict_evidence_file" || true
         fi
         continue
       fi
