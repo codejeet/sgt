@@ -110,4 +110,7 @@ echo "=== refinery duplicate PR-ready replay dedupe ==="
 echo "=== refinery restart replay merge-attempt dedupe ==="
 "$REPO_ROOT/test_refinery_merge_attempt_restart_replay.sh"
 
+echo "=== refinery replay missing-review-evidence fence ==="
+"$REPO_ROOT/test_refinery_missing_review_evidence_replay.sh"
+
 echo "ALL TESTS PASSED"

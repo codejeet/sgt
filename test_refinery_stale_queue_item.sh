@@ -193,6 +193,10 @@ wait "$pid" || true
         echo "expected queue REVIEWED_HEAD_SHA to persist reviewed111 on stale_race" >&2
         return 1
       fi
+      if ! grep -Eq '^REVIEWED_AT=[0-9]+$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
+        echo "expected queue REVIEWED_AT to be persisted on stale_race" >&2
+        return 1
+      fi
       if [[ "$(cat "$state_head_calls")" != "2" ]]; then
         echo "expected exactly 2 state/head lookups for stale_race" >&2
         return 1
