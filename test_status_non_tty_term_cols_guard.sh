@@ -46,6 +46,7 @@ chmod +x "$TMP_HOME/.local/bin/tmux"
 run_case() {
   local label="$1"
   local columns_mode="$2"
+  local term_mode="$3"
   local out_file err_file cmd_exit
   out_file="$(mktemp)"
   err_file="$(mktemp)"
@@ -54,7 +55,7 @@ run_case() {
   env -i \
     HOME="$TMP_HOME" \
     PATH="$TMP_HOME/.local/bin:/usr/bin:/bin" \
-    TERM=dumb \
+    TERM="$term_mode" \
     COLUMNS="$columns_mode" \
     bash --noprofile --norc -c '
       sgt init >/dev/null
@@ -64,6 +65,9 @@ REPO=acme/roadrunner
 BRANCH=feature/term-cols-guard
 ISSUE=69
 PSTATE
+      if [[ -z "${TERM:-}" ]]; then
+        unset TERM
+      fi
       if [[ -z "${COLUMNS:-}" ]]; then
         unset COLUMNS
       fi
@@ -108,8 +112,8 @@ PSTATE
 }
 
 echo "=== status term-cols guard regression ==="
-run_case "non-tty with COLUMNS unset" ""
-run_case "non-tty with narrow COLUMNS" "1"
-run_case "non-tty with non-numeric COLUMNS" "oops"
+run_case "non-tty with TERM unset and COLUMNS unset" "" ""
+run_case "non-tty with narrow COLUMNS" "1" "dumb"
+run_case "non-tty with non-numeric COLUMNS" "oops" "dumb"
 
 echo "ALL TESTS PASSED"
