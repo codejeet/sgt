@@ -20,13 +20,20 @@ extract_fn() {
 # Load only the helpers needed for this test.
 eval "$(extract_fn _one_line)"
 eval "$(extract_fn _escape_quotes)"
+eval "$(extract_fn _escape_wake_value)"
 eval "$(extract_fn log_event)"
+eval "$(extract_fn _decision_log_alert_cooldown_secs)"
+eval "$(extract_fn _mayor_decision_log_failure_state_read)"
+eval "$(extract_fn _mayor_decision_log_failure_state_write)"
+eval "$(extract_fn _mayor_decision_log_failure_state_clear)"
 eval "$(extract_fn _mayor_decision_log_append)"
 eval "$(extract_fn _mayor_record_decision)"
 
 export SGT_ROOT="$TMP_ROOT/workspace"
 export SGT_CONFIG="$SGT_ROOT/.sgt"
 export SGT_LOG="$SGT_CONFIG/sgt.log"
+export SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
+export SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN=120
 mkdir -p "$SGT_CONFIG"
 
 LOG_FILE="$SGT_CONFIG/mayor-decisions.log"
@@ -76,25 +83,61 @@ if seen != expected:
     raise SystemExit(f"missing/duplicate entries: expected {len(expected)} unique ids, got {len(seen)}")
 PY
 
-# Failure path: force flock failure and ensure explicit error event is emitted.
-MOCK_BIN="$TMP_ROOT/mockbin"
-mkdir -p "$MOCK_BIN"
-cat > "$MOCK_BIN/flock" <<'MOCKFLOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-exit 1
-MOCKFLOCK
-chmod +x "$MOCK_BIN/flock"
+# Failure path: simulate append+fsync write error (read-only log file), ensure
+# explicit warning event is emitted, notify is cooldown deduped, and failure
+# state is visible for status rendering.
+touch "$LOG_FILE"
+chmod 400 "$LOG_FILE"
 
-PATH="$MOCK_BIN:$PATH"
-hash -r
-if _mayor_record_decision "forced failure" "durability-test" "$SGT_ROOT"; then
-  echo "expected _mayor_record_decision to fail when flock fails" >&2
+NOTIFY_LOG="$TMP_ROOT/notify.log"
+_mayor_notify_rigger() {
+  local msg="${1:-}"
+  printf '%s\n' "$msg" >> "$NOTIFY_LOG"
+  return 0
+}
+
+if _mayor_record_decision "forced failure #1" "durability-test" "$SGT_ROOT"; then
+  echo "expected _mayor_record_decision to fail on forced write error" >&2
   exit 1
 fi
 
 if ! grep -q 'MAYOR_DECISION_LOG_WRITE_FAILED context=durability-test' "$SGT_LOG"; then
   echo "expected explicit MAYOR_DECISION_LOG_WRITE_FAILED event in log" >&2
+  exit 1
+fi
+
+if ! grep -q 'notify=sent cooldown=120s' "$SGT_LOG"; then
+  echo "expected first failure to send notify with cooldown metadata" >&2
+  exit 1
+fi
+
+if _mayor_record_decision "forced failure #2" "durability-test" "$SGT_ROOT"; then
+  echo "expected _mayor_record_decision to fail on second forced write failure" >&2
+  exit 1
+fi
+
+if ! grep -q 'notify=suppressed cooldown=120s' "$SGT_LOG"; then
+  echo "expected second failure notify to be suppressed by cooldown" >&2
+  exit 1
+fi
+
+if [[ "$(wc -l < "$NOTIFY_LOG" | tr -d ' ')" != "1" ]]; then
+  echo "expected exactly one notify send within cooldown window" >&2
+  exit 1
+fi
+
+IFS='|' read -r fail_ts fail_context fail_workspace fail_error <<< "$(_mayor_decision_log_failure_state_read)"
+if [[ ! "$fail_ts" =~ ^[0-9]+$ ]]; then
+  echo "expected failure state timestamp to be recorded for status visibility" >&2
+  exit 1
+fi
+if [[ "$fail_context" != "durability-test" ]]; then
+  echo "expected failure state context to match durability-test" >&2
+  exit 1
+fi
+
+if ! grep -q 'decision-log warning:' "$SGT_SCRIPT"; then
+  echo "expected status output path to surface decision-log warning visibility" >&2
   exit 1
 fi
 
