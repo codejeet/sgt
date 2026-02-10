@@ -4,6 +4,10 @@
 
 - Mayor orphan-PR queueing now live-revalidates PR state (`OPEN` required) immediately before queueing; stale open-list snapshots that already became `MERGED`/`CLOSED` are skipped with explicit reason logging (`MAYOR_ORPHAN_SKIP_STALE`).
 - Added regression coverage for stale orphan PR snapshot false-positives in `test_mayor_orphan_stale_snapshot_guard.sh`.
+- Mayor side-effect decisions (`dispatch`, `nuke`, `merge`) now require an immediate post-action live verification receipt before success is declared, with durable structured receipt fields (`action`, `target`, `expected_state`, `observed_state`, `verified_at`) under `~/.sgt/mayor-action-receipts/`.
+- Receipt mismatches now append explicit non-success decision-log entries with retry/no-op hints, and replayed action keys suppress conflicting success receipts (`reason=replayed-action-key-existing-success`).
+- Added `sgt mayor merge <pr#> --repo <repo>` so mayor merge actions run through the same receipt fence and live verification path.
+- Added regression coverage for dispatch post-action drift and replayed merge action-key behavior in `test_mayor_action_receipt_fence.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Mayor dispatch hardening: added a pre-dispatch live revalidation guard to `sgt sling` (mayor context) that atomically checks for open PRs and open `sgt-authorized` issues before issue creation.
 - Mayor decision flow now skips dispatch when revalidation is dirty/stale and logs a clear reason in both terminal output and `~/.sgt/mayor-decisions.log`.
 - Added regression coverage for stale snapshot races and no-duplicate dispatch behavior in `test_mayor_stale_dispatch_race.sh`.

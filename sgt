@@ -142,6 +142,14 @@ _MAYOR_PRE_DISPATCH_REASON=""
 _MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES=""
 _MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY=""
 _MAYOR_PRE_DISPATCH_LIVE_SUMMARY=""
+_MAYOR_ACTION_RECEIPT_FILE=""
+_MAYOR_ACTION_RECEIPT_ACTION=""
+_MAYOR_ACTION_RECEIPT_TARGET=""
+_MAYOR_ACTION_RECEIPT_ACTION_KEY=""
+_MAYOR_ACTION_RECEIPT_EXPECTED_STATE=""
+_MAYOR_ACTION_RECEIPT_OBSERVED_STATE=""
+_MAYOR_ACTION_RECEIPT_VERIFIED_AT=""
+_MAYOR_ACTION_RECEIPT_STATUS=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
@@ -453,6 +461,131 @@ _dedupe_wake_reasons() {
 _wake_requires_dispatch_decision() {
   local reason="${1:-}"
   [[ "$reason" == merged:* || "$reason" == dog-approved:* ]]
+}
+
+_mayor_action_fence_enabled() {
+  [[ "${SGT_MAYOR_ACTION_FENCE:-0}" == "1" ]]
+}
+
+_mayor_action_receipts_dir() {
+  echo "$SGT_CONFIG/mayor-action-receipts"
+}
+
+_mayor_action_receipt_summary() {
+  printf 'action=%s target=%s expected_state=%s observed_state=%s verified_at=%s action_key=%s' \
+    "${_MAYOR_ACTION_RECEIPT_ACTION:-unknown}" \
+    "${_MAYOR_ACTION_RECEIPT_TARGET:-unknown}" \
+    "$(_escape_quotes "${_MAYOR_ACTION_RECEIPT_EXPECTED_STATE:-unknown}")" \
+    "$(_escape_quotes "${_MAYOR_ACTION_RECEIPT_OBSERVED_STATE:-unknown}")" \
+    "${_MAYOR_ACTION_RECEIPT_VERIFIED_AT:-unknown}" \
+    "$(_escape_quotes "${_MAYOR_ACTION_RECEIPT_ACTION_KEY:-unknown}")"
+}
+
+_mayor_action_receipt_load() {
+  local file="${1:-}"
+  [[ -n "$file" && -f "$file" ]] || return 1
+  _MAYOR_ACTION_RECEIPT_FILE="$file"
+  eval "$(grep -E '^(ACTION|TARGET|ACTION_KEY|EXPECTED_STATE|OBSERVED_STATE|VERIFIED_AT|RECEIPT_STATUS)=' "$file" 2>/dev/null || true)"
+  _MAYOR_ACTION_RECEIPT_ACTION="${ACTION:-}"
+  _MAYOR_ACTION_RECEIPT_TARGET="${TARGET:-}"
+  _MAYOR_ACTION_RECEIPT_ACTION_KEY="${ACTION_KEY:-}"
+  _MAYOR_ACTION_RECEIPT_EXPECTED_STATE="${EXPECTED_STATE:-}"
+  _MAYOR_ACTION_RECEIPT_OBSERVED_STATE="${OBSERVED_STATE:-}"
+  _MAYOR_ACTION_RECEIPT_VERIFIED_AT="${VERIFIED_AT:-}"
+  _MAYOR_ACTION_RECEIPT_STATUS="${RECEIPT_STATUS:-}"
+  return 0
+}
+
+_mayor_action_receipt_has_success() {
+  local action_key="${1:-}" key_id dir file
+  _MAYOR_ACTION_RECEIPT_FILE=""
+  _MAYOR_ACTION_RECEIPT_STATUS=""
+  [[ -n "$action_key" ]] || return 1
+  key_id="$(_mayor_dispatch_trigger_key_id "$action_key")"
+  dir="$(_mayor_action_receipts_dir)"
+  file="$dir/$key_id.state"
+  if ! _mayor_action_receipt_load "$file"; then
+    return 1
+  fi
+  [[ "${_MAYOR_ACTION_RECEIPT_STATUS:-}" == "success" ]]
+}
+
+_mayor_action_receipt_record() {
+  local action="${1:-}" action_key="${2:-}" target="${3:-}" expected_state="${4:-}" observed_state="${5:-}" status_override="${6:-}"
+  local key_id dir file now_iso status existing_status receipt_tmp
+  _MAYOR_ACTION_RECEIPT_FILE=""
+  _MAYOR_ACTION_RECEIPT_ACTION=""
+  _MAYOR_ACTION_RECEIPT_TARGET=""
+  _MAYOR_ACTION_RECEIPT_ACTION_KEY=""
+  _MAYOR_ACTION_RECEIPT_EXPECTED_STATE=""
+  _MAYOR_ACTION_RECEIPT_OBSERVED_STATE=""
+  _MAYOR_ACTION_RECEIPT_VERIFIED_AT=""
+  _MAYOR_ACTION_RECEIPT_STATUS=""
+  [[ -n "$action" && -n "$action_key" && -n "$target" ]] || return 1
+  if [[ -n "$status_override" ]]; then
+    status="$status_override"
+  elif [[ "$expected_state" == "$observed_state" ]]; then
+    status="success"
+  else
+    status="mismatch"
+  fi
+  key_id="$(_mayor_dispatch_trigger_key_id "$action_key")"
+  dir="$(_mayor_action_receipts_dir)"
+  file="$dir/$key_id.state"
+  mkdir -p "$dir" || return 1
+
+  existing_status=""
+  if [[ -f "$file" ]]; then
+    existing_status="$(grep -E '^RECEIPT_STATUS=' "$file" 2>/dev/null | cut -d= -f2- || true)"
+  fi
+  if [[ "$status" == "success" && "$existing_status" == "success" ]]; then
+    _mayor_action_receipt_load "$file" || return 1
+    return 2
+  fi
+
+  now_iso="$(date -Iseconds)"
+  receipt_tmp="${file}.tmp.$$"
+  cat > "$receipt_tmp" <<EOF
+ACTION=$(_escape_wake_value "$action")
+TARGET=$(_escape_wake_value "$target")
+ACTION_KEY=$(_escape_wake_value "$action_key")
+EXPECTED_STATE=$(_escape_wake_value "$expected_state")
+OBSERVED_STATE=$(_escape_wake_value "$observed_state")
+VERIFIED_AT=$(_escape_wake_value "$now_iso")
+RECEIPT_STATUS=$(_escape_wake_value "$status")
+EOF
+  mv "$receipt_tmp" "$file"
+  _mayor_action_receipt_load "$file" || return 1
+  return 0
+}
+
+_mayor_action_verify_and_log() {
+  local action="${1:-}" action_key="${2:-}" target="${3:-}" expected_state="${4:-}" observed_state="${5:-}" status="${6:-}" mismatch_reason="${7:-}" mismatch_retry="${8:-}"
+  local receipt_summary context record_rc
+  context="mayor-action-receipt-${action:-unknown}"
+  _mayor_action_receipt_record "$action" "$action_key" "$target" "$expected_state" "$observed_state" "$status"
+  record_rc=$?
+  if [[ "$record_rc" -ne 0 ]]; then
+    if [[ "$record_rc" -eq 2 ]]; then
+      receipt_summary="$(_mayor_action_receipt_summary)"
+      _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=replayed-action-key-existing-success retry=no-op $receipt_summary" "$context" "$SGT_ROOT" || true
+      log_event "MAYOR_ACTION_RECEIPT replay action=$action reason=replayed-action-key-existing-success retry=no-op $receipt_summary"
+      return 0
+    fi
+    _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=receipt-write-failed retry=retry-next-mayor-cycle action=$action target=$target action_key=$action_key" "$context" "$SGT_ROOT" || true
+    log_event "MAYOR_ACTION_RECEIPT non-success reason=receipt-write-failed action=$action target=$target action_key=\"$(_escape_quotes "$action_key")\""
+    return 1
+  fi
+
+  receipt_summary="$(_mayor_action_receipt_summary)"
+  if [[ "${_MAYOR_ACTION_RECEIPT_STATUS:-mismatch}" == "success" ]]; then
+    _mayor_record_decision "MAYOR ACTION RECEIPT success $receipt_summary" "$context" "$SGT_ROOT" || true
+    log_event "MAYOR_ACTION_RECEIPT success $receipt_summary"
+    return 0
+  fi
+  _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=${mismatch_reason:-post-action-live-mismatch} retry=${mismatch_retry:-retry-next-mayor-cycle} $receipt_summary" "$context" "$SGT_ROOT" || true
+  log_event "MAYOR_ACTION_RECEIPT non-success reason=${mismatch_reason:-post-action-live-mismatch} retry=${mismatch_retry:-retry-next-mayor-cycle} $receipt_summary"
+  return 1
 }
 
 _mayor_dispatch_trigger_key() {
@@ -3152,6 +3285,43 @@ PSTATE
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
 
+  if _mayor_action_fence_enabled; then
+    local dispatch_owner_repo dispatch_target dispatch_action_key dispatch_issue_state dispatch_active_polecat dispatch_session_alive dispatch_worker_state
+    local dispatch_expected_state dispatch_observed_state dispatch_status dispatch_reason dispatch_retry
+    dispatch_owner_repo="$(_repo_owner_repo "$repo")"
+    dispatch_target="${dispatch_owner_repo}#${issue_number}"
+    dispatch_action_key="dispatch|${dispatch_owner_repo}|issue=${issue_number}|trigger=${mayor_dispatch_trigger_key:-manual}"
+    dispatch_issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+    dispatch_active_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)"
+    dispatch_session_alive="false"
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+      dispatch_session_alive="true"
+    fi
+    dispatch_worker_state="absent"
+    if [[ -n "$dispatch_active_polecat" || "$dispatch_session_alive" == "true" ]]; then
+      dispatch_worker_state="present"
+    fi
+    dispatch_expected_state="issue_state=OPEN;worker=present"
+    dispatch_observed_state="issue_state=${dispatch_issue_state:-unknown};worker=${dispatch_worker_state};active_polecat=${dispatch_active_polecat:-none};session_alive=${dispatch_session_alive}"
+    dispatch_status="mismatch"
+    dispatch_reason="post-action-live-state-drift"
+    dispatch_retry="retry-next-mayor-cycle"
+    if [[ "$dispatch_issue_state" == "OPEN" && "$dispatch_worker_state" == "present" ]]; then
+      dispatch_status="success"
+      dispatch_reason=""
+      dispatch_retry=""
+    elif [[ "$dispatch_issue_state" != "OPEN" ]]; then
+      dispatch_reason="post-action-drift-issue-state"
+    else
+      dispatch_reason="post-action-no-active-worker"
+      dispatch_retry="retry-dispatch-verify-replay"
+    fi
+    if ! _mayor_action_verify_and_log "dispatch" "$dispatch_action_key" "$dispatch_target" "$dispatch_expected_state" "$dispatch_observed_state" "$dispatch_status" "$dispatch_reason" "$dispatch_retry"; then
+      echo "[mayor] dispatch receipt mismatch action_key=$dispatch_action_key reason=$dispatch_reason retry=$dispatch_retry"
+      return 1
+    fi
+  fi
+
   info ""
   info "polecat $pname dispatched"
   info "  issue:   $issue_url"
@@ -3439,8 +3609,44 @@ cmd_nuke() {
   ensure_init
 
   local pfile="$SGT_POLECATS/$pname"
-  [[ -f "$pfile" ]] || die "polecat '$pname' not found"
+  local nuke_action_key nuke_target
+  nuke_action_key="nuke|polecat=$pname"
+  nuke_target="$pname"
+  if _mayor_action_fence_enabled && _mayor_action_receipt_has_success "$nuke_action_key"; then
+    _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=replayed-action-key-existing-success retry=no-op $(_mayor_action_receipt_summary)" "mayor-action-receipt-nuke" "$SGT_ROOT" || true
+    log_event "MAYOR_ACTION_RECEIPT replay action=nuke reason=replayed-action-key-existing-success retry=no-op $(_mayor_action_receipt_summary)"
+    info "polecat $pname already verified as nuked (no-op replay)"
+    return 0
+  fi
+  if [[ ! -f "$pfile" ]]; then
+    if _mayor_action_fence_enabled; then
+      local missing_session missing_expected missing_observed missing_status missing_reason missing_retry
+      missing_session="absent"
+      if tmux has-session -t "sgt-$pname" 2>/dev/null; then
+        missing_session="present"
+      fi
+      missing_expected="state_file=missing;session=absent"
+      missing_observed="state_file=missing;session=${missing_session};worktree=unknown"
+      missing_status="success"
+      missing_reason=""
+      missing_retry=""
+      if [[ "$missing_session" != "absent" ]]; then
+        missing_status="mismatch"
+        missing_reason="post-action-session-still-active"
+        missing_retry="retry-nuke-manual"
+      fi
+      if ! _mayor_action_verify_and_log "nuke" "$nuke_action_key" "$nuke_target" "$missing_expected" "$missing_observed" "$missing_status" "$missing_reason" "$missing_retry"; then
+        die "nuke receipt mismatch for absent polecat '$pname': reason=${missing_reason:-post-action-live-state-drift}"
+      fi
+      info "polecat $pname already absent"
+      return 0
+    fi
+    die "polecat '$pname' not found"
+  fi
 
+  local nuke_session="" nuke_worktree=""
+  nuke_session="$(grep -E '^SESSION=' "$pfile" 2>/dev/null | cut -d= -f2- || true)"
+  nuke_worktree="$(grep -E '^WORKTREE=' "$pfile" 2>/dev/null | cut -d= -f2- || true)"
   (
     source "$pfile"
     if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -3458,6 +3664,36 @@ cmd_nuke() {
 
   rm -f "$pfile"
   log_event "NUKE $pname"
+
+  if _mayor_action_fence_enabled; then
+    local nuke_session_state nuke_worktree_state nuke_state_file_state nuke_expected_state nuke_observed_state nuke_status nuke_reason nuke_retry
+    nuke_session_state="absent"
+    if [[ -n "$nuke_session" ]] && tmux has-session -t "$nuke_session" 2>/dev/null; then
+      nuke_session_state="present"
+    fi
+    nuke_worktree_state="missing"
+    if [[ -n "$nuke_worktree" && -d "$nuke_worktree" ]]; then
+      nuke_worktree_state="present"
+    fi
+    nuke_state_file_state="missing"
+    if [[ -f "$pfile" ]]; then
+      nuke_state_file_state="present"
+    fi
+    nuke_expected_state="state_file=missing;session=absent;worktree=missing"
+    nuke_observed_state="state_file=${nuke_state_file_state};session=${nuke_session_state};worktree=${nuke_worktree_state}"
+    nuke_status="success"
+    nuke_reason=""
+    nuke_retry=""
+    if [[ "$nuke_state_file_state" != "missing" || "$nuke_session_state" != "absent" || "$nuke_worktree_state" != "missing" ]]; then
+      nuke_status="mismatch"
+      nuke_reason="post-action-residue-detected"
+      nuke_retry="retry-nuke-manual"
+    fi
+    if ! _mayor_action_verify_and_log "nuke" "$nuke_action_key" "$nuke_target" "$nuke_expected_state" "$nuke_observed_state" "$nuke_status" "$nuke_reason" "$nuke_retry"; then
+      die "nuke receipt mismatch for polecat '$pname': reason=${nuke_reason:-post-action-live-state-drift}"
+    fi
+  fi
+
   info "polecat $pname nuked"
 }
 
@@ -5783,7 +6019,7 @@ $(cat "$briefing")
 - \`sgt sling <rig> "<task>"\` — Dispatch work
 - \`sgt nuke <polecat>\` — Kill stuck worker
 - \`sgt sweep\` — Clean finished workers
-- \`gh pr merge <pr#> --repo <repo> --squash --delete-branch\` — Merge PR
+- \`sgt mayor merge <pr#> --repo <repo>\` — Merge PR with post-action live receipt fence
 
 Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
 
@@ -5796,7 +6032,7 @@ MAYORMD
 
       local backend="$(_ai_backend_default)"
 
-      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_DISPATCH_SNAPSHOT_FILE='$dispatch_snapshot_file' SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
+      if timeout 300 bash -c "SGT_MAYOR_DISPATCH_REVALIDATE=1 SGT_MAYOR_ACTION_FENCE=1 SGT_MAYOR_DISPATCH_SNAPSHOT_FILE='$dispatch_snapshot_file' SGT_MAYOR_DISPATCH_TRIGGER_KEY='$ai_dispatch_trigger_key' SGT_MAYOR_DISPATCH_TRIGGER_REASON='$ai_dispatch_trigger_reason' _ai_prompt '$backend' '$mayor_workspace' 'Read CLAUDE.md. Handle the issues described. Be decisive and fast. Log your actions.'" 
         </dev/null 2>&1 | tail -5; then
         log_event "MAYOR_AI_CYCLE completed"
         echo "[mayor] AI decision cycle complete"
@@ -5826,6 +6062,85 @@ _mayor_notify_rigger() {
 cmd_mayor_notify() {
   local message="${1:?usage: sgt mayor notify \"<message>\"}"
   _mayor_notify_rigger "$message"
+}
+
+cmd_mayor_merge() {
+  local pr="${1:-}" repo="" use_auto="false"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        repo="${2:-}"
+        shift 2
+        ;;
+      --auto)
+        use_auto="true"
+        shift
+        ;;
+      *)
+        die "usage: sgt mayor merge <pr#> --repo <repo> [--auto]"
+        ;;
+    esac
+  done
+  [[ -n "$pr" ]] || die "usage: sgt mayor merge <pr#> --repo <repo> [--auto]"
+  [[ -n "$repo" ]] || die "usage: sgt mayor merge <pr#> --repo <repo> [--auto]"
+  pr="${pr#\#}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || die "invalid PR number '$pr'"
+  ensure_init
+
+  local owner_repo action_key target merge_expected_state
+  owner_repo="$(_repo_owner_repo "$repo")"
+  target="${owner_repo}#${pr}"
+  action_key="merge|${owner_repo}|pr=${pr}"
+  merge_expected_state="pr_state=MERGED"
+
+  if _mayor_action_fence_enabled && _mayor_action_receipt_has_success "$action_key"; then
+    _mayor_record_decision "MAYOR ACTION RECEIPT non-success reason=replayed-action-key-existing-success retry=no-op $(_mayor_action_receipt_summary)" "mayor-action-receipt-merge" "$SGT_ROOT" || true
+    log_event "MAYOR_ACTION_RECEIPT replay action=merge reason=replayed-action-key-existing-success retry=no-op $(_mayor_action_receipt_summary)"
+    info "merge no-op for $target (existing success receipt)"
+    return 0
+  fi
+
+  local -a merge_cmd
+  local merge_out merge_rc pr_state merged_at merge_observed_state merge_status merge_reason merge_retry
+  merge_cmd=(gh pr merge "$pr" --repo "$repo" --squash --delete-branch)
+  if [[ "$use_auto" == "true" ]]; then
+    merge_cmd+=(--auto)
+  fi
+  set +e
+  merge_out="$("${merge_cmd[@]}" 2>&1)"
+  merge_rc=$?
+  set -e
+  pr_state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+  merged_at="$(gh pr view "$pr" --repo "$repo" --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
+  merge_observed_state="pr_state=${pr_state:-unknown};merged_at=${merged_at:-none};merge_rc=${merge_rc}"
+  merge_status="success"
+  merge_reason=""
+  merge_retry=""
+  if [[ "$pr_state" != "MERGED" ]]; then
+    merge_status="mismatch"
+    if [[ "$merge_rc" -ne 0 ]]; then
+      merge_reason="merge-command-failed-live-not-merged"
+    else
+      merge_reason="post-action-live-state-drift"
+    fi
+    merge_retry="retry-merge-manual"
+  fi
+
+  if ! _mayor_action_verify_and_log "merge" "$action_key" "$target" "$merge_expected_state" "$merge_observed_state" "$merge_status" "$merge_reason" "$merge_retry"; then
+    warn "merge receipt mismatch for $target (reason=${merge_reason:-post-action-live-state-drift} retry=${merge_retry:-retry-merge-manual})"
+    if [[ -n "$merge_out" ]]; then
+      warn "gh pr merge output: $(_one_line "$merge_out")"
+    fi
+    return 1
+  fi
+
+  if [[ "$merge_rc" -eq 0 ]]; then
+    info "merged PR #$pr on $owner_repo"
+  else
+    info "PR #$pr on $owner_repo already merged (live verification confirmed)"
+  fi
+  return 0
 }
 
 cmd_mayor_start() {
@@ -6684,7 +6999,7 @@ Agent Commands:
   deacon start|stop             Control the health monitor
   witness start|stop <rig>      Control per-rig polecat monitor
   refinery start|stop <rig>     Control per-rig merge queue
-  mayor start|stop|notify       Control the AI coordinator
+  mayor start|stop|notify|merge Control the AI coordinator
   wake-mayor [reason]           Wake the mayor on demand (event-driven)
   nudge <target> <message>      Send message to agent's tmux session
 
@@ -6740,6 +7055,7 @@ Environment:
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
+  SGT_MAYOR_ACTION_FENCE       Enable mayor post-action receipt verification fence for dispatch/nuke/merge (default: 0)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
@@ -6849,7 +7165,8 @@ main() {
         start)   cmd_mayor_start ;;
         stop)    cmd_mayor_stop ;;
         notify)  cmd_mayor_notify "$@" ;;
-        *)       die "unknown mayor command: $sub (try: start, stop, notify)" ;;
+        merge)   cmd_mayor_merge "$@" ;;
+        *)       die "unknown mayor command: $sub (try: start, stop, notify, merge)" ;;
       esac
       ;;
     wake-mayor) cmd_wake_mayor "$@" ;;
