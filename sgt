@@ -5471,10 +5471,12 @@ _refinery_ci_self_heal_maybe_spawn() {
     return 0
   fi
 
-  # If there is already an active polecat for this issue, don't spawn another.
+  # If there is already an *active* polecat for this issue, don't spawn another.
+  # Note: merge-queue may still reference the original polecat even after it finished;
+  # we only suppress when that polecat is currently tracked as running.
   local existing
   existing="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue" 2>/dev/null || true)"
-  if [[ -n "$existing" ]]; then
+  if [[ -n "$existing" && -f "$SGT_POLECATS/$existing" ]]; then
     echo "[refinery/$rig] CI failing on PR #$pr — self-heal suppressed (active polecat=$existing)"
     return 0
   fi
