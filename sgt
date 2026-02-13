@@ -5399,6 +5399,118 @@ Dispatching second iteration." 2>/dev/null || true
   fi
 }
 
+_refinery_ci_self_heal_dir() {
+  echo "$SGT_CONFIG/refinery-ci-selfheal"
+}
+
+_refinery_ci_self_heal_key() {
+  local repo="${1:-}" pr="${2:-}" head_sha="${3:-}" check_sig="${4:-}"
+  local owner_repo
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$repo"
+  printf '%s' "${owner_repo}|pr=${pr}|head=${head_sha:-unknown}|sig=${check_sig:-unknown}"
+}
+
+_refinery_ci_self_heal_key_id() {
+  local key="${1:-}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$key" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$key" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$key" | tr -c '[:alnum:]_.-' '_'
+  fi
+}
+
+_refinery_ci_self_heal_maybe_spawn() {
+  # Spawn a CI-fix polecat *on the same branch* for merge-queue PRs with failing checks.
+  # This is intentionally conservative: one spawn per (repo, pr, head_sha, failure signature).
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}" branch="${4:-}" issue="${5:-0}" polecat="${6:-}" check_status="${7:-}"
+  [[ -n "$rig" && -n "$repo" && -n "$pr" && -n "$branch" ]] || return 1
+  [[ -n "$issue" && "$issue" != "0" ]] || return 0
+
+  local head_sha
+  head_sha="$(_pr_head_sha "$repo" "$pr")"
+  [[ -n "$head_sha" ]] || head_sha="unknown"
+
+  # Signature: first matching failure line (keeps dedupe stable, avoids huge logs)
+  local sig
+  sig=$(printf '%s\n' "$check_status" | grep -iE 'E[0-9]{3,4}|ruff|pytest|FAIL|ERROR' | head -n 1 | tr -d '\r' | head -c 160)
+  [[ -n "$sig" ]] || sig="ci-failure"
+
+  local key key_id dir marker
+  key="$(_refinery_ci_self_heal_key "$repo" "$pr" "$head_sha" "$sig")"
+  key_id="$(_refinery_ci_self_heal_key_id "$key")"
+  dir="$(_refinery_ci_self_heal_dir)"
+  mkdir -p "$dir"
+  marker="$dir/$key_id.state"
+
+  if [[ -f "$marker" ]]; then
+    return 0
+  fi
+
+  # If there is already an active polecat for this issue, don't spawn another.
+  local existing
+  existing="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue" 2>/dev/null || true)"
+  if [[ -n "$existing" ]]; then
+    echo "[refinery/$rig] CI failing on PR #$pr — self-heal suppressed (active polecat=$existing)"
+    return 0
+  fi
+
+  # Claim
+  cat > "$marker" <<STATE
+REPO=$repo
+PR=$pr
+ISSUE=$issue
+BRANCH=$branch
+HEAD_SHA=$head_sha
+SIG=$sig
+CLAIMED_AT=$(date -Iseconds)
+STATE
+
+  local fix_polecat fix_session worktree rpath
+  fix_polecat="${polecat:-${rig}-pr${pr}}-cifix"
+  fix_session="sgt-${rig}-${fix_polecat}"
+  worktree="$SGT_ROOT/polecats/$fix_polecat"
+  rpath="$(rig_path "$rig")"
+
+  echo "[refinery/$rig] CI failing on PR #$pr — spawning self-heal polecat=$fix_polecat (issue #$issue)"
+  log_event "REFINERY_CI_SELF_HEAL_SPAWN rig=$rig repo=$(_repo_owner_repo "$repo") pr=#$pr issue=#$issue head=$head_sha polecat=$fix_polecat sig=\"$(_escape_quotes "$sig")\""
+  _notify_openclaw "[SGT Refinery] CI self-heal: rig=$rig pr=#$pr issue=#$issue spawning polecat=$fix_polecat branch=$branch head=$head_sha sig=\"$(_escape_quotes "$sig")\""
+
+  # Create worktree on the existing branch
+  git -C "$rpath" fetch origin 2>/dev/null || true
+  mkdir -p "$SGT_ROOT/polecats"
+  git -C "$rpath" worktree add -f "$worktree" "$branch" 2>/dev/null || git -C "$rpath" worktree add -f "$worktree" "origin/$branch" 2>/dev/null || true
+
+  # Write CLAUDE.md with strict tasking
+  cat > "$worktree/CLAUDE.md" <<MD
+# CI Self-Heal Task (SGT)
+
+You are fixing CI for an existing PR.
+
+- Repo: $repo
+- Rig: $rig
+- PR: #$pr
+- Issue: #$issue
+- Branch (must push fixes here): $branch
+- Head SHA: $head_sha
+
+Constraints:
+- Do not change product scope.
+- Fix only what is required to get CI green.
+- Commit, push to the same branch ($branch). Do not open a new PR.
+
+Failure signature:
+$sig
+MD
+
+  tmux new-session -d -s "$fix_session" -c "$worktree" \
+    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md in this directory. Fix CI for PR #$pr on branch $branch. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
+
+  return 0
+}
+
 _refinery_loop() {
   local rig="$1"
   local repo
@@ -5525,6 +5637,7 @@ _refinery_loop() {
       local check_status
       check_status=$(gh pr checks "$mq_pr" --repo "$mq_repo" 2>&1 || true)
       if echo "$check_status" | grep -qiE "fail|error"; then
+        _refinery_ci_self_heal_maybe_spawn "$rig" "$mq_repo" "$mq_pr" "$mq_branch" "$mq_issue" "$mq_polecat" "$check_status" || true
         echo "[refinery/$rig] PR #$mq_pr — CI failing, waiting..."
         continue
       fi
