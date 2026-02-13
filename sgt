@@ -5522,6 +5522,27 @@ Failure signature:
 $sig
 MD
 
+  # Save polecat state so `sgt status` shows it.
+  mkdir -p "$SGT_POLECATS"
+  cat > "$SGT_POLECATS/$fix_polecat" <<PSTATE
+RIG=$rig
+REPO=$repo
+ISSUE=$issue
+ISSUE_URL=$(_repo_issue_url "$repo" "$issue")
+BRANCH=$branch
+WORKTREE=$worktree
+SESSION=$fix_session
+DEFAULT_BRANCH=$branch
+AUTO_MERGE=false
+BACKEND=$(_ai_backend_default)
+CREATED=$(date -Iseconds)
+STATUS=running
+TYPE=ci-fix
+PR=$pr
+HEAD_SHA=$head_sha
+SIG=$sig
+PSTATE
+
   tmux new-session -d -s "$fix_session" -c "$worktree" \
     "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md in this directory. Fix CI for PR #$pr on branch $branch. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
 
