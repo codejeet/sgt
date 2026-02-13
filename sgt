@@ -3909,8 +3909,25 @@ PSTATE
 
   # ── 5. Spawn AI agent in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
+
+  # Include project README context in the polecat prompt (truncated).
+  local readme_prompt=""
+  if [[ -f "$rpath/README.md" ]]; then
+    # Keep it bounded to avoid huge prompts.
+    local readme_max_bytes=12000
+    local readme_excerpt
+    readme_excerpt=$(head -c "$readme_max_bytes" "$rpath/README.md" 2>/dev/null || true)
+    if [[ -n "$readme_excerpt" ]]; then
+      readme_prompt=$'\n\n---\nProject README (excerpt)\n\n'"$readme_excerpt"$'\n---\n'
+    fi
+  fi
+
+  local polecat_prompt
+  polecat_prompt="Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
+  polecat_prompt+="$readme_prompt"
+
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
