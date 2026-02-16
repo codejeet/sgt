@@ -2300,16 +2300,18 @@ _pr_head_sha() {
 
 _merge_queue_set_field() {
   local queue_file="${1:-}" field="${2:-}" value="${3:-}"
-  local safe_value
+  local safe_value safe_value_sed
   [[ -n "$queue_file" && -f "$queue_file" && -n "$field" ]] || return 1
 
   # These queue files are `source`d, so values must be shell-safe.
   # Use %q quoting to preserve spaces/newlines without executing anything.
   safe_value=$(printf '%q' "${value}")
+  # sed replacement eats backslashes; escape them so %q output stays intact.
+  safe_value_sed=${safe_value//\\/\\\\}
 
   if grep -q "^${field}=" "$queue_file"; then
     # Avoid sed metachar collisions by using a delimiter unlikely to appear.
-    sed -i -E "s#^${field}=.*#${field}=${safe_value}#" "$queue_file"
+    sed -i -E "s#^${field}=.*#${field}=${safe_value_sed}#" "$queue_file"
   else
     printf '%s=%s\n' "$field" "$safe_value" >> "$queue_file"
   fi
