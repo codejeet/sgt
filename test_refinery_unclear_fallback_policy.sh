@@ -8,7 +8,7 @@ SGT_SCRIPT="$REPO_ROOT/sgt"
 
 run_case() {
   local mode="$1"
-  local tmp_root home_dir mock_bin review_calls merge_calls head_calls
+  local tmp_root home_dir mock_bin review_calls merge_calls head_calls close_calls reopen_calls
   tmp_root="$(mktemp -d)"
   trap 'rm -rf "$tmp_root"' RETURN
 
@@ -17,6 +17,8 @@ run_case() {
   review_calls="$tmp_root/review-calls"
   merge_calls="$tmp_root/merge-calls"
   head_calls="$tmp_root/head-calls"
+  close_calls="$tmp_root/close-calls"
+  reopen_calls="$tmp_root/reopen-calls"
 
   mkdir -p "$home_dir/.local/bin" "$mock_bin"
   cp "$SGT_SCRIPT" "$home_dir/.local/bin/sgt"
@@ -24,6 +26,8 @@ run_case() {
   : > "$review_calls"
   : > "$merge_calls"
   : > "$head_calls"
+  : > "$close_calls"
+  : > "$reopen_calls"
 
   cat > "$mock_bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -32,6 +36,8 @@ set -euo pipefail
 MODE="${SGT_MOCK_MODE:?missing SGT_MOCK_MODE}"
 MERGE_CALLS_FILE="${SGT_MOCK_MERGE_CALLS:?missing SGT_MOCK_MERGE_CALLS}"
 HEAD_CALLS_FILE="${SGT_MOCK_HEAD_CALLS:?missing SGT_MOCK_HEAD_CALLS}"
+CLOSE_CALLS_FILE="${SGT_MOCK_CLOSE_CALLS:?missing SGT_MOCK_CLOSE_CALLS}"
+REOPEN_CALLS_FILE="${SGT_MOCK_REOPEN_CALLS:?missing SGT_MOCK_REOPEN_CALLS}"
 
 inc_file() {
   local path="$1"
@@ -144,6 +150,10 @@ fi
 
 if [[ "${1:-}" == "pr" && "${2:-}" == "merge" ]]; then
   inc_file "$MERGE_CALLS_FILE" >/dev/null
+  if [[ "$MODE" == "fallback_merge_conflict_autoresolve" ]]; then
+    echo "pull request is not mergeable: merge conflict detected" >&2
+    exit 1
+  fi
   echo "merged"
   exit 0
 fi
@@ -152,7 +162,17 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "comment" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "pr" && "${2:-}" == "close" ]]; then
+  inc_file "$CLOSE_CALLS_FILE" >/dev/null
+  exit 0
+fi
+
 if [[ "${1:-}" == "issue" && "${2:-}" == "comment" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "issue" && "${2:-}" == "reopen" ]]; then
+  inc_file "$REOPEN_CALLS_FILE" >/dev/null
   exit 0
 fi
 
@@ -185,7 +205,7 @@ n=$((n + 1))
 printf '%s\n' "$n" > "$REVIEW_CALLS_FILE"
 
   case "$MODE" in
-    empty_green_mergeable|checks_missing_hold|stale_head_resync)
+    empty_green_mergeable|checks_missing_hold|stale_head_resync|fallback_merge_conflict_autoresolve)
     # REVIEW_UNCLEAR missing contract output.
     printf ''
     ;;
@@ -217,6 +237,8 @@ AIPROMPT
     SGT_MOCK_REVIEW_CALLS="$review_calls" \
     SGT_MOCK_MERGE_CALLS="$merge_calls" \
     SGT_MOCK_HEAD_CALLS="$head_calls" \
+    SGT_MOCK_CLOSE_CALLS="$close_calls" \
+    SGT_MOCK_REOPEN_CALLS="$reopen_calls" \
     SGT_REFINERY_REVIEW_UNCLEAR_MAX_RETRIES=1 \
     SGT_REFINERY_REVIEW_UNCLEAR_BACKOFF_BASE_SECS=0 \
     SGT_REFINERY_REVIEW_UNCLEAR_JITTER_SECS=0 \
@@ -382,6 +404,40 @@ run_refinery_pass pass2
         return 1
       fi
       ;;
+    fallback_merge_conflict_autoresolve)
+      if [[ "$(cat "$review_calls")" != "1" ]]; then
+        echo "expected one review attempt before fallback merge conflict auto-resolve" >&2
+        return 1
+      fi
+      if [[ "$(cat "$merge_calls")" != "1" ]]; then
+        echo "expected one merge attempt before fallback conflict auto-resolve" >&2
+        return 1
+      fi
+      if [[ "$(cat "$close_calls")" != "1" ]]; then
+        echo "expected PR close on fallback merge conflict auto-resolve" >&2
+        return 1
+      fi
+      if [[ "$(cat "$reopen_calls")" != "1" ]]; then
+        echo "expected linked issue reopen on fallback merge conflict auto-resolve" >&2
+        return 1
+      fi
+      if [[ -f "$home_dir/sgt/.sgt/merge-queue/test-pr123" ]]; then
+        echo "expected queue cleanup after fallback merge conflict auto-resolve" >&2
+        return 1
+      fi
+      if ! ls "$home_dir/sgt/.sgt/refinery-conflicts"/*.state >/dev/null 2>&1; then
+        echo "expected durable conflict evidence for fallback merge conflict auto-resolve" >&2
+        return 1
+      fi
+      if ! grep -q 'REFINERY_CONFLICT pr=#123 issue=#77 .*reason_code=merge-command-conflict' "$home_dir/sgt/sgt.log"; then
+        echo "expected merge-command conflict reason telemetry" >&2
+        return 1
+      fi
+      if ! grep -q 'PR #123 has merge conflicts — requesting rework' "$home_dir/sgt/refinery-pass2.out"; then
+        echo "expected operator-visible conflict auto-resolve message" >&2
+        return 1
+      fi
+      ;;
     *)
       echo "unsupported mode: $mode" >&2
       return 1
@@ -394,5 +450,6 @@ run_case timeout_green_mergeable
 run_case checks_missing_hold
 run_case explicit_error_gate_hold
 run_case stale_head_resync
+run_case fallback_merge_conflict_autoresolve
 
 echo "ALL TESTS PASSED"

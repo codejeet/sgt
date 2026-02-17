@@ -43,6 +43,8 @@
 - Non-eligible saturated unclear states now emit explicit terminal hold reason codes instead of opaque saturation loops.
 - Pre-merge stale-head and mergeability drift now trigger review resync (`REVIEW_PENDING` + cleared reviewed-head evidence) to avoid stale re-loop deadlocks.
 - Added regression coverage for unclear fallback allow/deny paths plus stale-head resync in `test_refinery_unclear_fallback_policy.sh`, and updated stale-head assertions in `test_refinery_stale_queue_item.sh`.
+- Refinery conflict auto-resolution now also triggers when conflicts appear during pre-merge revalidation or at merge-command time (including REVIEW_UNCLEAR fallback merges), instead of falling through to generic merge-failed/manual paths.
+- Extended `test_refinery_unclear_fallback_policy.sh` to cover merge-conflict auto-resolution before fallback merge failure handling.
 - Witness/refinery stale-close hard-stop: re-sling now enforces a final dispatch-instant gate that aborts spawn when the linked issue is not `OPEN` or when the source PR is not `OPEN`/`MERGEABLE`.
 - Re-sling stale/final-gate skip logging now records structured forensic fields including `source_event_key` and `skip_reason` (`RESLING_SKIP_STALE`, `RESLING_SKIP_FINAL_GATE`).
 - Expanded stale replay regression coverage in `test_refinery_stale_post_merge_redispatch.sh` to reproduce a late `CLOSED`/`MERGED` event replay where stale pre-check passes but dispatch-instant gate blocks spawn.
