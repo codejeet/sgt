@@ -102,7 +102,7 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
     esac
   done
 
-  case "$json_fields" in
+    case "$json_fields" in
     title)
       echo "Fallback regression PR"
       ;;
@@ -114,6 +114,36 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
       ;;
     mergeable)
       echo "MERGEABLE"
+      ;;
+    isDraft)
+      if [[ "$MODE" == "draft_hold" ]]; then
+        echo "true"
+      else
+        echo "false"
+      fi
+      ;;
+    mergeStateStatus)
+      case "$MODE" in
+        explicit_error_gate_hold)
+          echo "BLOCKED"
+          ;;
+        *)
+          echo "CLEAN"
+          ;;
+      esac
+      ;;
+    mergeable,isDraft,mergeStateStatus)
+      case "$MODE" in
+        explicit_error_gate_hold)
+          echo "MERGEABLE|false|BLOCKED"
+          ;;
+        draft_hold)
+          echo "MERGEABLE|true|CLEAN"
+          ;;
+        *)
+          echo "MERGEABLE|false|CLEAN"
+          ;;
+      esac
       ;;
     state,headRefOid)
       call_n="$(inc_file "$HEAD_CALLS_FILE")"
@@ -134,8 +164,12 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
 fi
 
 if [[ "${1:-}" == "pr" && "${2:-}" == "checks" ]]; then
-  if [[ "$MODE" == "checks_missing_hold" ]]; then
+  if [[ "$MODE" == "checks_missing_merge" ]]; then
     echo "no checks reported"
+  elif [[ "$MODE" == "checks_pending_hold" ]]; then
+    echo "checks pending"
+  elif [[ "$MODE" == "ci_failing_hold" ]]; then
+    echo "build failed"
   else
     echo "all checks pass"
   fi
@@ -205,7 +239,7 @@ n=$((n + 1))
 printf '%s\n' "$n" > "$REVIEW_CALLS_FILE"
 
   case "$MODE" in
-    empty_green_mergeable|checks_missing_hold|stale_head_resync|fallback_merge_conflict_autoresolve)
+    empty_green_mergeable|checks_missing_merge|checks_pending_hold|stale_head_resync|fallback_merge_conflict_autoresolve|ci_failing_hold)
     # REVIEW_UNCLEAR missing contract output.
     printf ''
     ;;
@@ -298,74 +332,106 @@ REVIEWED_AT=
 QUEUED=$(date -Iseconds)
 MQ
 
-run_refinery_pass pass1
-force_retry_now
-run_refinery_pass pass2
-'
+    if [[ "$SGT_MOCK_MODE" == "timeout_green_mergeable" ]]; then
+      sed -i -E "s/^REVIEW_STATE=.*/REVIEW_STATE=REVIEW_UNCLEAR/" "$SGT_ROOT/.sgt/merge-queue/test-pr123"
+      sed -i -E "s/^REVIEW_UNCLEAR_RETRY_COUNT=.*/REVIEW_UNCLEAR_RETRY_COUNT=1/" "$SGT_ROOT/.sgt/merge-queue/test-pr123"
+      sed -i -E "s/^REVIEW_UNCLEAR_LAST_CLASS=.*/REVIEW_UNCLEAR_LAST_CLASS=review-timeout/" "$SGT_ROOT/.sgt/merge-queue/test-pr123"
+      sed -i -E "s/^REVIEW_UNCLEAR_LAST_REASON=.*/REVIEW_UNCLEAR_LAST_REASON=review-timeout-carry-over/" "$SGT_ROOT/.sgt/merge-queue/test-pr123"
+      sed -i -E "s/^REVIEW_UNCLEAR_NEXT_RETRY_AT=.*/REVIEW_UNCLEAR_NEXT_RETRY_AT=$(( $(date +%s) + 600 ))/" "$SGT_ROOT/.sgt/merge-queue/test-pr123"
+    fi
+
+    run_refinery_pass pass1
+    force_retry_now
+    run_refinery_pass pass2
+    '
+
+  local review_count merge_count close_count reopen_count
+  review_count="$(cat "$review_calls" 2>/dev/null || true)"
+  merge_count="$(cat "$merge_calls" 2>/dev/null || true)"
+  close_count="$(cat "$close_calls" 2>/dev/null || true)"
+  reopen_count="$(cat "$reopen_calls" 2>/dev/null || true)"
+  [[ "$review_count" =~ ^[0-9]+$ ]] || review_count=0
+  [[ "$merge_count" =~ ^[0-9]+$ ]] || merge_count=0
+  [[ "$close_count" =~ ^[0-9]+$ ]] || close_count=0
+  [[ "$reopen_count" =~ ^[0-9]+$ ]] || reopen_count=0
 
   case "$mode" in
     empty_green_mergeable)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
-        echo "expected one review attempt before fallback merge in empty_green_mergeable" >&2
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected deterministic fallback to skip review in empty_green_mergeable" >&2
         return 1
       fi
-      if [[ "$(cat "$merge_calls")" != "1" ]]; then
-        echo "expected one merge attempt after fallback in empty_green_mergeable" >&2
+      if [[ "$merge_count" != "1" ]]; then
+        echo "expected one merge attempt via deterministic fallback in empty_green_mergeable" >&2
         return 1
       fi
       if [[ -f "$home_dir/sgt/.sgt/merge-queue/test-pr123" ]]; then
-        echo "expected queue cleanup after fallback merge in empty_green_mergeable" >&2
+        echo "expected queue cleanup after deterministic fallback merge in empty_green_mergeable" >&2
         return 1
       fi
-      if ! grep -q 'REFINERY_REVIEW_UNCLEAR_FALLBACK_DECISION pr=#123 issue=#77 attempts=1/1 eligible=1' "$home_dir/sgt/sgt.log"; then
-        echo "expected structured fallback-eligible decision for empty output" >&2
+      if ! grep -q 'REFINERY_DETERMINISTIC_FALLBACK pr=#123 issue=#77 eligible=1 reason_code=deterministic-merge-ready' "$home_dir/sgt/sgt.log"; then
+        echo "expected structured deterministic fallback decision for empty_green_mergeable" >&2
         return 1
       fi
       ;;
     timeout_green_mergeable)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
-        echo "expected one review attempt before fallback merge in timeout_green_mergeable" >&2
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected deterministic fallback to skip review/backoff in timeout_green_mergeable" >&2
         return 1
       fi
-      if [[ "$(cat "$merge_calls")" != "1" ]]; then
-        echo "expected one merge attempt after fallback in timeout_green_mergeable" >&2
+      if [[ "$merge_count" != "1" ]]; then
+        echo "expected one merge attempt after timeout state deterministic fallback" >&2
         return 1
       fi
-      if ! grep -q 'class=review-timeout' "$home_dir/sgt/sgt.log"; then
-        echo "expected timeout classification in structured unclear telemetry" >&2
+      if ! grep -q 'REFINERY_DETERMINISTIC_FALLBACK pr=#123 issue=#77 eligible=1 reason_code=deterministic-merge-ready review_state=REVIEW_UNCLEAR' "$home_dir/sgt/sgt.log"; then
+        echo "expected deterministic fallback telemetry for REVIEW_UNCLEAR timeout carry-over" >&2
+        return 1
+      fi
+      if grep -q 'REVIEW_UNCLEAR backoff active' "$home_dir/sgt/refinery-pass1.out"; then
+        echo "expected deterministic fallback to bypass REVIEW_UNCLEAR backoff in timeout_green_mergeable" >&2
         return 1
       fi
       ;;
-    checks_missing_hold)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
-        echo "expected one review attempt before cap hold in checks_missing_hold" >&2
+    checks_missing_merge)
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected deterministic fallback to skip review when checks are missing/none-required" >&2
         return 1
       fi
-      if [[ -s "$merge_calls" ]]; then
-        if [[ "$(cat "$merge_calls")" != "0" ]]; then
-          echo "expected no merge attempt when checks are missing" >&2
-          return 1
-        fi
+      if [[ "$merge_count" != "1" ]]; then
+        echo "expected deterministic fallback merge when checks are missing/none-required" >&2
+        return 1
+      fi
+      if ! grep -q 'REFINERY_DETERMINISTIC_FALLBACK pr=#123 issue=#77 eligible=1 reason_code=deterministic-merge-ready .*check_class=missing' "$home_dir/sgt/sgt.log"; then
+        echo "expected deterministic fallback telemetry with check_class=missing" >&2
+        return 1
+      fi
+      ;;
+    checks_pending_hold)
+      if [[ "$review_count" != "1" ]]; then
+        echo "expected one review attempt before cap hold in checks_pending_hold" >&2
+        return 1
+      fi
+      if [[ "$merge_count" != "0" ]]; then
+        echo "expected no merge attempt when checks are pending" >&2
+        return 1
       fi
       if ! grep -q 'REVIEW_UNCLEAR saturated — awaiting manual intervention (attempts=1/1 reason_code=checks-not-green)' "$home_dir/sgt/refinery-pass2.out"; then
-        echo "expected clear terminal hold reason when checks are not green" >&2
+        echo "expected clear terminal hold reason when checks are pending" >&2
         return 1
       fi
       if ! grep -q 'REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#123 issue=#77 attempts=1/1 .*reason_code=checks-not-green' "$home_dir/sgt/sgt.log"; then
-        echo "expected structured cap-hold reason_code for checks_missing_hold" >&2
+        echo "expected structured cap-hold reason_code for checks_pending_hold" >&2
         return 1
       fi
       ;;
     explicit_error_gate_hold)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
+      if [[ "$review_count" != "1" ]]; then
         echo "expected one review attempt before explicit error-gate hold" >&2
         return 1
       fi
-      if [[ -s "$merge_calls" ]]; then
-        if [[ "$(cat "$merge_calls")" != "0" ]]; then
-          echo "expected no merge attempt for explicit error-gate class" >&2
-          return 1
-        fi
+      if [[ "$merge_count" != "0" ]]; then
+        echo "expected no merge attempt for explicit error-gate class" >&2
+        return 1
       fi
       if ! grep -q 'REVIEW_UNCLEAR saturated — awaiting manual intervention (attempts=1/1 reason_code=explicit-error-gate)' "$home_dir/sgt/refinery-pass2.out"; then
         echo "expected explicit error-gate hold reason when review contract conflicts" >&2
@@ -377,47 +443,41 @@ run_refinery_pass pass2
       fi
       ;;
     stale_head_resync)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
-        echo "expected one review attempt before stale-head resync" >&2
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected deterministic fallback to skip review before stale-head resync" >&2
         return 1
       fi
-      if [[ -s "$merge_calls" ]]; then
-        if [[ "$(cat "$merge_calls")" != "0" ]]; then
-          echo "expected no merge attempt when stale head is detected" >&2
-          return 1
-        fi
-      fi
-      if ! grep -q '^REVIEW_STATE=REVIEW_PENDING$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
-        echo "expected stale-head case to resync queue to REVIEW_PENDING" >&2
-        return 1
-      fi
-      if ! grep -Eq "^REVIEWED_HEAD_SHA=('')?$" "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
-        echo "expected stale-head case to clear REVIEWED_HEAD_SHA" >&2
-        return 1
-      fi
-      if ! grep -q '^REVIEW_RESYNC_REASON_CODE=stale-reviewed-head$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
-        echo "expected stale-head resync reason marker" >&2
+      if [[ "$merge_count" != "1" ]]; then
+        echo "expected stale-head case to resync first, then merge once on replay" >&2
         return 1
       fi
       if ! grep -q 'REFINERY_PREMERGE_SKIP pr=#123 reason_code=stale-reviewed-head' "$home_dir/sgt/sgt.log"; then
         echo "expected structured stale-head premerge skip telemetry" >&2
         return 1
       fi
-      ;;
-    fallback_merge_conflict_autoresolve)
-      if [[ "$(cat "$review_calls")" != "1" ]]; then
-        echo "expected one review attempt before fallback merge conflict auto-resolve" >&2
+      if ! grep -q 'pre-merge stale-head guard — skipping (reviewed=live111 live=live222)' "$home_dir/sgt/refinery-pass1.out"; then
+        echo "expected operator-visible stale-head skip before replay merge" >&2
         return 1
       fi
-      if [[ "$(cat "$merge_calls")" != "1" ]]; then
+      if [[ -f "$home_dir/sgt/.sgt/merge-queue/test-pr123" ]]; then
+        echo "expected queue cleanup after stale-head replay merge" >&2
+        return 1
+      fi
+      ;;
+    fallback_merge_conflict_autoresolve)
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected deterministic fallback to skip review before conflict auto-resolve" >&2
+        return 1
+      fi
+      if [[ "$merge_count" != "1" ]]; then
         echo "expected one merge attempt before fallback conflict auto-resolve" >&2
         return 1
       fi
-      if [[ "$(cat "$close_calls")" != "1" ]]; then
+      if [[ "$close_count" != "1" ]]; then
         echo "expected PR close on fallback merge conflict auto-resolve" >&2
         return 1
       fi
-      if [[ "$(cat "$reopen_calls")" != "1" ]]; then
+      if [[ "$reopen_count" != "1" ]]; then
         echo "expected linked issue reopen on fallback merge conflict auto-resolve" >&2
         return 1
       fi
@@ -433,8 +493,26 @@ run_refinery_pass pass2
         echo "expected merge-command conflict reason telemetry" >&2
         return 1
       fi
-      if ! grep -q 'PR #123 has merge conflicts — requesting rework' "$home_dir/sgt/refinery-pass2.out"; then
+      if ! grep -q 'PR #123 has merge conflicts — requesting rework' "$home_dir/sgt/refinery-pass1.out"; then
         echo "expected operator-visible conflict auto-resolve message" >&2
+        return 1
+      fi
+      ;;
+    ci_failing_hold)
+      if [[ "$review_count" != "0" ]]; then
+        echo "expected no review attempts when CI is failing" >&2
+        return 1
+      fi
+      if [[ "$merge_count" != "0" ]]; then
+        echo "expected no merge attempts when CI is failing" >&2
+        return 1
+      fi
+      if ! grep -q 'PR #123 — CI failing, waiting...' "$home_dir/sgt/refinery-pass1.out"; then
+        echo "expected operator-visible CI failing guardrail message" >&2
+        return 1
+      fi
+      if grep -q 'REFINERY_DETERMINISTIC_FALLBACK pr=#123 issue=#77 eligible=1' "$home_dir/sgt/sgt.log"; then
+        echo "did not expect deterministic fallback eligibility while CI failing" >&2
         return 1
       fi
       ;;
@@ -447,9 +525,11 @@ run_refinery_pass pass2
 
 run_case empty_green_mergeable
 run_case timeout_green_mergeable
-run_case checks_missing_hold
+run_case checks_missing_merge
+run_case checks_pending_hold
 run_case explicit_error_gate_hold
 run_case stale_head_resync
 run_case fallback_merge_conflict_autoresolve
+run_case ci_failing_hold
 
 echo "ALL TESTS PASSED"

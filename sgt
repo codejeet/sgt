@@ -5845,6 +5845,69 @@ _refinery_loop() {
         continue
       fi
 
+      local pr_mergeable pr_is_draft pr_merge_state pr_merge_snapshot
+      local deterministic_fallback_eligible deterministic_fallback_reason_code deterministic_fallback_reason
+      pr_mergeable=""
+      pr_is_draft=""
+      pr_merge_state=""
+      pr_merge_snapshot="$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable,isDraft,mergeStateStatus --jq '(.mergeable // "") + "|" + ((.isDraft // false)|tostring) + "|" + (.mergeStateStatus // "")' 2>/dev/null || true)"
+      if [[ "$pr_merge_snapshot" == *"|"* ]]; then
+        IFS='|' read -r pr_mergeable pr_is_draft pr_merge_state <<< "$pr_merge_snapshot"
+      fi
+      if [[ -z "$pr_mergeable" ]]; then
+        pr_mergeable="$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable // ""' 2>/dev/null || true)"
+      fi
+      if [[ -z "$pr_is_draft" ]]; then
+        pr_is_draft="$(gh pr view "$mq_pr" --repo "$mq_repo" --json isDraft --jq 'if .isDraft then "true" else "false" end' 2>/dev/null || true)"
+      fi
+      if [[ -z "$pr_merge_state" ]]; then
+        pr_merge_state="$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeStateStatus --jq '.mergeStateStatus // ""' 2>/dev/null || true)"
+      fi
+      deterministic_fallback_eligible=0
+      deterministic_fallback_reason_code="unknown"
+      deterministic_fallback_reason="deterministic fallback eligibility unknown"
+      if [[ "$pr_state" != "OPEN" ]]; then
+        deterministic_fallback_reason_code="pr-not-open"
+        deterministic_fallback_reason="pr state is not OPEN (state=${pr_state:-unknown})"
+      elif [[ "$pr_is_draft" == "true" ]]; then
+        deterministic_fallback_reason_code="draft-pr"
+        deterministic_fallback_reason="pr is draft"
+      elif [[ "$pr_merge_state" != "CLEAN" ]]; then
+        deterministic_fallback_reason_code="merge-state-not-clean"
+        deterministic_fallback_reason="pr merge_state is not CLEAN (state=${pr_merge_state:-unknown})"
+      elif [[ "$check_class" != "green" && "$check_class" != "missing" ]]; then
+        deterministic_fallback_reason_code="checks-not-ready"
+        deterministic_fallback_reason="required checks are not successful/missing (class=${check_class:-unknown})"
+      else
+        deterministic_fallback_eligible=1
+        deterministic_fallback_reason_code="deterministic-merge-ready"
+        deterministic_fallback_reason="open, non-draft, merge_state=CLEAN, checks green-or-missing"
+      fi
+
+      if [[ "$mq_review_state" != "REVIEW_APPROVED" && "$deterministic_fallback_eligible" == "1" ]]; then
+        if [[ -z "$mq_head_sha" ]]; then
+          mq_head_sha="$(_pr_head_sha "$mq_repo" "$mq_pr")"
+          if [[ -n "$mq_head_sha" ]]; then
+            _merge_queue_set_head_sha "$f" "$mq_head_sha" || true
+          fi
+        fi
+        if [[ -z "$mq_head_sha" ]]; then
+          echo "[refinery/$rig] PR #$mq_pr deterministic fallback guard failed — missing head SHA"
+          log_event "REFINERY_DETERMINISTIC_FALLBACK pr=#$mq_pr issue=#$mq_issue eligible=0 reason_code=missing-head-sha review_state=$mq_review_state check_class=${check_class:-unknown} merge_state=${pr_merge_state:-unknown} draft=${pr_is_draft:-unknown}"
+          continue
+        fi
+        echo "[refinery/$rig] PR #$mq_pr deterministic fallback gate passed — skipping AI review (review_state=$mq_review_state checks=${check_class:-unknown} merge_state=${pr_merge_state:-unknown})"
+        log_event "REFINERY_DETERMINISTIC_FALLBACK pr=#$mq_pr issue=#$mq_issue eligible=1 reason_code=$deterministic_fallback_reason_code review_state=$mq_review_state check_class=${check_class:-unknown} merge_state=${pr_merge_state:-unknown} draft=${pr_is_draft:-unknown} reason=\"$(_escape_quotes "$deterministic_fallback_reason")\""
+        if ! _merge_queue_mark_review_ready "$f" "$mq_head_sha"; then
+          echo "[refinery/$rig] PR #$mq_pr deterministic fallback guard failed — unable to persist review-ready evidence"
+          log_event "REFINERY_DETERMINISTIC_FALLBACK pr=#$mq_pr issue=#$mq_issue eligible=0 reason_code=fallback-persist-failed review_state=$mq_review_state check_class=${check_class:-unknown} merge_state=${pr_merge_state:-unknown} draft=${pr_is_draft:-unknown}"
+          continue
+        fi
+        mq_review_state="REVIEW_APPROVED"
+        mq_reviewed_head_sha="$mq_head_sha"
+        mq_reviewed_at="$(date +%s)"
+      fi
+
       if [[ "$mq_review_state" == "REVIEW_UNCLEAR" ]]; then
         local now_epoch_unclear_retry max_unclear_retry_attempts
         now_epoch_unclear_retry="$(date +%s)"
@@ -5925,8 +5988,6 @@ _refinery_loop() {
       claimed_attempt_key="${_REFINERY_MERGE_ATTEMPT_KEY:-}"
 
       # Check mergeability
-      local pr_mergeable
-      pr_mergeable=$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable' 2>/dev/null || true)
       if [[ "$pr_mergeable" == "CONFLICTING" ]]; then
         _refinery_conflict_auto_resolve "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$mq_head_sha" "$claimed_attempt_key" "$mqname" "$mq_backend" "$f" "pre-fallback-mergeable-conflicting"
         continue
@@ -5939,10 +6000,10 @@ _refinery_loop() {
           fallback_eligible=1
           fallback_reason_code="fallback-auto-approved"
           fallback_reason="unclear saturated and default-merge policy allows controlled merge path"
-          if [[ "$check_class" != "green" ]]; then
+          if [[ "$check_class" != "green" && "$check_class" != "missing" ]]; then
             fallback_eligible=0
             fallback_reason_code="checks-not-green"
-            fallback_reason="required checks not green (class=$check_class)"
+            fallback_reason="required checks are not successful/missing (class=$check_class)"
           elif [[ "$pr_mergeable" != "MERGEABLE" ]]; then
             fallback_eligible=0
             fallback_reason_code="mergeable-not-ready"
