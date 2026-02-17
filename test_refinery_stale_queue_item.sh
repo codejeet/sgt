@@ -223,12 +223,20 @@ wait "$pid" || true
         echo "expected queue HEAD_SHA refresh to live222 on stale_race" >&2
         return 1
       fi
-      if ! grep -q '^REVIEWED_HEAD_SHA=reviewed111$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
-        echo "expected queue REVIEWED_HEAD_SHA to persist reviewed111 on stale_race" >&2
+      if ! grep -q '^REVIEW_STATE=REVIEW_PENDING$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
+        echo "expected stale_race to resync queue back to REVIEW_PENDING" >&2
         return 1
       fi
-      if ! grep -Eq '^REVIEWED_AT=[0-9]+$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
-        echo "expected queue REVIEWED_AT to be persisted on stale_race" >&2
+      if ! grep -Eq "^REVIEWED_HEAD_SHA=('')?$" "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
+        echo "expected queue REVIEWED_HEAD_SHA to be cleared on stale_race resync" >&2
+        return 1
+      fi
+      if ! grep -Eq "^REVIEWED_AT=('')?$" "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
+        echo "expected queue REVIEWED_AT to be cleared on stale_race resync" >&2
+        return 1
+      fi
+      if ! grep -q '^REVIEW_RESYNC_REASON_CODE=stale-reviewed-head$' "$home_dir/sgt/.sgt/merge-queue/test-pr123"; then
+        echo "expected stale_race to persist stale-reviewed-head resync reason" >&2
         return 1
       fi
       if [[ "$(cat "$state_head_calls")" != "2" ]]; then

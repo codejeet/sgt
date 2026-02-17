@@ -189,7 +189,7 @@ if ! grep -q '^REVIEW_STATE=REVIEW_PENDING$' "$QUEUE_FILE"; then
   echo "expected replayed candidate to reset to REVIEW_PENDING for fresh revalidation path" >&2
   exit 1
 fi
-if ! grep -q '^REVIEWED_HEAD_SHA=$' "$QUEUE_FILE"; then
+if ! grep -Eq "^REVIEWED_HEAD_SHA=('')?$" "$QUEUE_FILE"; then
   echo "expected replayed candidate to keep reviewed_head_sha empty after block" >&2
   exit 1
 fi

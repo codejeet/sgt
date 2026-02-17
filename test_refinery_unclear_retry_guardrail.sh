@@ -161,15 +161,21 @@ fi
 n=$((n + 1))
 printf '%s\n' "$n" > "$REVIEW_CALLS_FILE"
 
-case "$MODE" in
-  success_reset)
-    if [[ "$n" -eq 1 ]]; then
-      echo "Need more information before final verdict."
-    else
-      echo "VERDICT: APPROVE"
-    fi
+  case "$MODE" in
+    success_reset)
+      if [[ "$n" -eq 1 ]]; then
+        echo "Need more information before final verdict."
+      else
+        echo "VERDICT: APPROVE"
+      fi
+      ;;
+  cap_hit_dedupe)
+    cat <<'OUT'
+VERDICT: APPROVE
+VERDICT: REJECT
+OUT
     ;;
-  cap_hit_dedupe|restart_replay)
+  restart_replay)
     echo "Analysis incomplete without definitive verdict."
     ;;
   *)

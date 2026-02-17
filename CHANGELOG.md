@@ -38,6 +38,11 @@
 - Expanded `test_refinery_stale_queue_item.sh` to cover both stale-head race (skip) and normal flow (merge) with reviewed-head guard call sequencing.
 - Refinery review-ready durability fence now persists `REVIEWED_HEAD_SHA` and `REVIEWED_AT` in merge-queue records before merge attempts, blocks replayed `REVIEW_APPROVED` candidates missing reviewed-head evidence with `REFINERY_MERGE_BLOCKED_MISSING_REVIEW_SHA`, and resets them to `REVIEW_PENDING` for fresh revalidation.
 - Added restart/replay missing-evidence regression coverage in `test_refinery_missing_review_evidence_replay.sh` and wired it into `test_mayor_wake_replay_regression.sh`.
+- Refinery `REVIEW_UNCLEAR` handling now enforces a deterministic cap fallback gate: saturated unclear retries only auto-transition into controlled merge flow when checks are green, mergeable is `MERGEABLE`, and unclear class is fallback-safe.
+- Unclear-review telemetry now includes structured classification (`empty-output`, `review-timeout`, `missing-structured-verdict`, etc.) and fallback decision fields (`eligible`, `reason_code`, `check_class`, `mergeable`, `unclear_class`).
+- Non-eligible saturated unclear states now emit explicit terminal hold reason codes instead of opaque saturation loops.
+- Pre-merge stale-head and mergeability drift now trigger review resync (`REVIEW_PENDING` + cleared reviewed-head evidence) to avoid stale re-loop deadlocks.
+- Added regression coverage for unclear fallback allow/deny paths plus stale-head resync in `test_refinery_unclear_fallback_policy.sh`, and updated stale-head assertions in `test_refinery_stale_queue_item.sh`.
 - Witness/refinery stale-close hard-stop: re-sling now enforces a final dispatch-instant gate that aborts spawn when the linked issue is not `OPEN` or when the source PR is not `OPEN`/`MERGEABLE`.
 - Re-sling stale/final-gate skip logging now records structured forensic fields including `source_event_key` and `skip_reason` (`RESLING_SKIP_STALE`, `RESLING_SKIP_FINAL_GATE`).
 - Expanded stale replay regression coverage in `test_refinery_stale_post_merge_redispatch.sh` to reproduce a late `CLOSED`/`MERGED` event replay where stale pre-check passes but dispatch-instant gate blocks spawn.
