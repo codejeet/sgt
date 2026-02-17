@@ -436,9 +436,14 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 - On refinery restart, pending conflict evidence is replayed and resumed from disk without spawning duplicate polecats; already-dispatched evidence is treated as complete.
 - Final merge failure emits structured activity log metadata and an OpenClaw notification that includes attempts and error class.
 - For repeated `REVIEW_UNCLEAR` review loops, refinery persists per-PR retry state directly on the queue item (`REVIEW_UNCLEAR_RETRY_COUNT`, `REVIEW_UNCLEAR_NEXT_RETRY_AT`, `REVIEW_UNCLEAR_LAST_REASON`, escalation markers).
+- Refinery also persists unclear classification (`REVIEW_UNCLEAR_LAST_CLASS`) so replay/cap decisions can distinguish empty output, timeout, and malformed verdict contracts.
 - Unclear re-review attempts use bounded exponential backoff with jitter; backoff windows survive daemon restarts so replay does not hammer re-review.
-- When the unclear retry cap is reached, refinery emits a single saturation escalation notification (PR, issue, last reason, next-action hint) and then holds the PR until manual intervention.
+- At unclear retry cap, refinery runs a deterministic fallback gate before manual hold:
+  - Auto-transition to controlled merge path only when checks are green, `mergeable=MERGEABLE`, issue authorization is valid, and unclear class is fallback-safe (`empty-output`, `review-timeout`, `missing-structured-verdict`).
+  - Failed/missing checks, non-mergeable state, or non-eligible unclear classes remain a terminal hold with explicit reason code.
+- When manual hold is required at cap, refinery emits a single saturation escalation notification (PR, issue, class, last reason, next-action hint).
 - Saturation escalation dedupe is restart-safe via persisted queue markers (`REVIEW_UNCLEAR_ESCALATED`, `REVIEW_UNCLEAR_ESCALATED_AT`), so refinery restart replay does not re-page.
+- Stale reviewed-head or late mergeability drift now resyncs queue state to `REVIEW_PENDING` with cleared review-ready evidence (`REVIEWED_HEAD_SHA`, `REVIEWED_AT`) instead of looping stale approvals.
 
 Configure retry behavior with:
 
@@ -467,9 +472,10 @@ Observability:
 - `REFINERY_CONFLICT_RESLING_RESUMED issue=#... source_pr=<n> polecat=<name> evidence="..."`
 - `REFINERY_CONFLICT_RESLING_SKIPPED issue=#... status=<SKIPPED_STALE|SKIPPED_UNAUTHORIZED|PENDING> reason="..."`
 - `REFINERY_REVIEW_UNCLEAR_PENDING pr=#... issue=#... attempt=<n>/<max> retry_in=<seconds>s next_retry_at=<epoch> reason="..."`
-- `REFINERY_REVIEW_UNCLEAR_BACKOFF pr=#... issue=#... attempt=<n> wait_s=<seconds> next_retry_at=<epoch>`
-- `REFINERY_REVIEW_UNCLEAR_ESCALATED pr=#... issue=#... attempts=<n>/<max> reason="..." next_action_hint="..."`
-- `REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#... issue=#... attempts=<n>/<max> escalated=<0|1>`
+- `REFINERY_REVIEW_UNCLEAR_BACKOFF pr=#... issue=#... attempt=<n> wait_s=<seconds> next_retry_at=<epoch> class=<class> reason="..."`
+- `REFINERY_REVIEW_UNCLEAR_ESCALATED pr=#... issue=#... attempts=<n>/<max> class=<class> reason="..." next_action_hint="..."`
+- `REFINERY_REVIEW_UNCLEAR_FALLBACK_DECISION pr=#... issue=#... attempts=<n>/<max> eligible=<0|1> reason_code=<...> check_class=<...> mergeable=<...> unclear_class=<...> ...`
+- `REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#... issue=#... attempts=<n>/<max> escalated=<0|1> reason_code=<...> check_class=<...> mergeable=<...> unclear_class=<...> ...`
 
 When duplicate queue events are ignored, refinery emits both:
 - an operator-visible status line: `duplicate merge skipped — reason_code=duplicate-merge-attempt-key ... key=...`
