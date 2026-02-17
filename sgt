@@ -2823,6 +2823,33 @@ EOF
   echo "$evidence_file"
 }
 
+_refinery_conflict_auto_resolve() {
+  local rig="${1:-}" repo="${2:-}" issue="${3:-}" pr="${4:-}" head_sha="${5:-}" attempt_key="${6:-}" queue_name="${7:-}" backend="${8:-}" queue_file="${9:-}" reason_code="${10:-merge-conflict}"
+  local conflict_evidence_file conflict_event_key
+  conflict_event_key="refinery-conflict:${queue_name}:#${pr}"
+  conflict_evidence_file="$(_refinery_conflict_record "$rig" "$repo" "$issue" "$pr" "$head_sha" "$attempt_key" "$queue_name" "$backend" "$conflict_event_key" || true)"
+  echo "[refinery/$rig] PR #$pr has merge conflicts — requesting rework"
+  if [[ -n "$conflict_evidence_file" ]]; then
+    echo "[refinery/$rig] conflict evidence recorded for issue #$issue (pr=$pr head=${head_sha:-unknown} attempt_key=${attempt_key:-unknown})"
+  fi
+  log_event "REFINERY_CONFLICT pr=#$pr issue=#$issue head=${head_sha:-unknown} attempt_key=\"$(_escape_quotes "${attempt_key:-unknown}")\" reason_code=$reason_code evidence=\"$(_escape_quotes "${conflict_evidence_file:-none}")\""
+  if [[ -n "$conflict_evidence_file" ]]; then
+    log_event "REFINERY_CONFLICT_EVIDENCE_WRITTEN pr=#$pr issue=#$issue head=${head_sha:-unknown} attempt_key=\"$(_escape_quotes "${attempt_key:-unknown}")\" evidence=\"$(_escape_quotes "$conflict_evidence_file")\""
+  fi
+  gh pr comment "$pr" --repo "$repo" \
+    --body "[sgt-refinery] Merge conflict detected. Closing and re-dispatching." 2>/dev/null || true
+  gh pr close "$pr" --repo "$repo" 2>/dev/null || true
+  if [[ -n "$queue_file" ]]; then
+    rm -f "$queue_file"
+  fi
+  if [[ "$issue" != "0" && -n "$issue" && -n "$conflict_evidence_file" ]]; then
+    gh issue reopen "$issue" --repo "$repo" 2>/dev/null || true
+    gh issue comment "$issue" --repo "$repo" \
+      --body "[sgt-refinery] Merge conflict on PR #$pr. Re-dispatching." 2>/dev/null || true
+    _refinery_conflict_resling_resume "$rig" "$conflict_evidence_file" || true
+  fi
+}
+
 _resling_find_existing_issue_polecat() {
   local rig="${1:-}" repo="${2:-}" issue="${3:-}"
   local owner_repo f p_owner_repo p_issue p_rig
@@ -3162,9 +3189,17 @@ _refinery_merge_error_class() {
     echo "http-5xx"
   elif [[ "$lc" =~ connection[[:space:]]+reset|connection[[:space:]]+refused|network[[:space:]]+is[[:space:]]+unreachable|temporary[[:space:]]+failure|no[[:space:]]+such[[:space:]]+host|tls|eof|i/o[[:space:]]+timeout|context[[:space:]]+canceled ]]; then
     echo "network"
+  elif [[ "$lc" =~ merge[[:space:]-]*conflict|not[[:space:]]+mergeable|conflicting[[:space:]]+files|cannot[[:space:]]+be[[:space:]]+merged ]]; then
+    echo "merge-conflict"
   else
     echo "non-transient"
   fi
+}
+
+_refinery_merge_error_is_conflict() {
+  local raw="${1:-}" klass
+  klass="$(_refinery_merge_error_class "$raw")"
+  [[ "$klass" == "merge-conflict" ]]
 }
 
 _refinery_merge_error_is_transient() {
@@ -5893,27 +5928,7 @@ _refinery_loop() {
       local pr_mergeable
       pr_mergeable=$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable' 2>/dev/null || true)
       if [[ "$pr_mergeable" == "CONFLICTING" ]]; then
-        local conflict_evidence_file conflict_event_key
-        conflict_event_key="refinery-conflict:${mqname}:#${mq_pr}"
-        conflict_evidence_file="$(_refinery_conflict_record "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$mq_head_sha" "$claimed_attempt_key" "$mqname" "$mq_backend" "$conflict_event_key" || true)"
-        echo "[refinery/$rig] PR #$mq_pr has merge conflicts — requesting rework"
-        if [[ -n "$conflict_evidence_file" ]]; then
-          echo "[refinery/$rig] conflict evidence recorded for issue #$mq_issue (pr=$mq_pr head=${mq_head_sha:-unknown} attempt_key=${claimed_attempt_key:-unknown})"
-        fi
-        log_event "REFINERY_CONFLICT pr=#$mq_pr issue=#$mq_issue head=${mq_head_sha:-unknown} attempt_key=\"$(_escape_quotes "${claimed_attempt_key:-unknown}")\" evidence=\"$(_escape_quotes "${conflict_evidence_file:-none}")\""
-        if [[ -n "$conflict_evidence_file" ]]; then
-          log_event "REFINERY_CONFLICT_EVIDENCE_WRITTEN pr=#$mq_pr issue=#$mq_issue head=${mq_head_sha:-unknown} attempt_key=\"$(_escape_quotes "${claimed_attempt_key:-unknown}")\" evidence=\"$(_escape_quotes "$conflict_evidence_file")\""
-        fi
-        gh pr comment "$mq_pr" --repo "$mq_repo" \
-          --body "[sgt-refinery] Merge conflict detected. Closing and re-dispatching." 2>/dev/null || true
-        gh pr close "$mq_pr" --repo "$mq_repo" 2>/dev/null || true
-        rm -f "$f"
-        if [[ "$mq_issue" != "0" && -n "$mq_issue" && -n "$conflict_evidence_file" ]]; then
-          gh issue reopen "$mq_issue" --repo "$mq_repo" 2>/dev/null || true
-          gh issue comment "$mq_issue" --repo "$mq_repo" \
-            --body "[sgt-refinery] Merge conflict on PR #$mq_pr. Re-dispatching." 2>/dev/null || true
-          _refinery_conflict_resling_resume "$rig" "$conflict_evidence_file" || true
-        fi
+        _refinery_conflict_auto_resolve "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$mq_head_sha" "$claimed_attempt_key" "$mqname" "$mq_backend" "$f" "pre-fallback-mergeable-conflicting"
         continue
       fi
 
@@ -6024,6 +6039,10 @@ _refinery_loop() {
 
         local premerge_mergeable
         premerge_mergeable=$(gh pr view "$mq_pr" --repo "$mq_repo" --json mergeable --jq '.mergeable' 2>/dev/null || true)
+        if [[ "$premerge_mergeable" == "CONFLICTING" ]]; then
+          _refinery_conflict_auto_resolve "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$premerge_live_head" "$claimed_attempt_key" "$mqname" "$mq_backend" "$f" "premerge-mergeable-conflicting"
+          continue
+        fi
         if [[ "$premerge_mergeable" != "MERGEABLE" ]]; then
           echo "[refinery/$rig] PR #$mq_pr pre-merge mergeability guard — resyncing (state=${premerge_mergeable:-unknown})"
           log_event "REFINERY_PREMERGE_SKIP pr=#$mq_pr reason_code=mergeable-not-ready mergeable=${premerge_mergeable:-unknown} action=resync-review-pending"
@@ -6118,6 +6137,10 @@ _refinery_loop() {
             echo "[refinery/$rig] PR #$mq_pr post-merge verification mismatch — retry=${_REFINERY_MERGE_RECEIPT_RETRY_DECISION:-retry-post-merge-revalidate}"
           fi
         else
+          if _refinery_merge_error_is_conflict "$merge_result"; then
+            _refinery_conflict_auto_resolve "$rig" "$mq_repo" "$mq_issue" "$mq_pr" "$merge_expected_head_sha" "$claimed_attempt_key" "$mqname" "$mq_backend" "$f" "merge-command-conflict"
+            continue
+          fi
           echo "[refinery/$rig] merge failed: $merge_result"
           log_event "REFINERY_MERGE_FAILED pr=#$mq_pr attempt=$merge_attempt/$max_attempts class=$merge_error_class transient=$merge_error_transient error=\"$(_escape_quotes "$merge_result")\""
           _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url"
