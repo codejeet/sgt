@@ -184,14 +184,20 @@ fi
 n=$((n + 1))
 printf '%s\n' "$n" > "$REVIEW_CALLS_FILE"
 
-case "$MODE" in
-  empty_green_mergeable|checks_missing_hold|stale_head_resync)
+  case "$MODE" in
+    empty_green_mergeable|checks_missing_hold|stale_head_resync)
     # REVIEW_UNCLEAR missing contract output.
     printf ''
     ;;
   timeout_green_mergeable)
     # Simulate timeout classification.
     exit 124
+    ;;
+  explicit_error_gate_hold)
+    cat <<'OUT'
+VERDICT: APPROVE
+VERDICT: REJECT
+OUT
     ;;
   *)
     echo "unsupported mode: $MODE" >&2
@@ -328,6 +334,26 @@ run_refinery_pass pass2
         return 1
       fi
       ;;
+    explicit_error_gate_hold)
+      if [[ "$(cat "$review_calls")" != "1" ]]; then
+        echo "expected one review attempt before explicit error-gate hold" >&2
+        return 1
+      fi
+      if [[ -s "$merge_calls" ]]; then
+        if [[ "$(cat "$merge_calls")" != "0" ]]; then
+          echo "expected no merge attempt for explicit error-gate class" >&2
+          return 1
+        fi
+      fi
+      if ! grep -q 'REVIEW_UNCLEAR saturated — awaiting manual intervention (attempts=1/1 reason_code=explicit-error-gate)' "$home_dir/sgt/refinery-pass2.out"; then
+        echo "expected explicit error-gate hold reason when review contract conflicts" >&2
+        return 1
+      fi
+      if ! grep -q 'REFINERY_REVIEW_UNCLEAR_CAP_HOLD pr=#123 issue=#77 attempts=1/1 .*reason_code=explicit-error-gate' "$home_dir/sgt/sgt.log"; then
+        echo "expected structured explicit error-gate cap-hold telemetry" >&2
+        return 1
+      fi
+      ;;
     stale_head_resync)
       if [[ "$(cat "$review_calls")" != "1" ]]; then
         echo "expected one review attempt before stale-head resync" >&2
@@ -366,6 +392,7 @@ run_refinery_pass pass2
 run_case empty_green_mergeable
 run_case timeout_green_mergeable
 run_case checks_missing_hold
+run_case explicit_error_gate_hold
 run_case stale_head_resync
 
 echo "ALL TESTS PASSED"

@@ -439,8 +439,8 @@ Refinery merge attempts now use bounded retry with jitter for transient `gh pr m
 - Refinery also persists unclear classification (`REVIEW_UNCLEAR_LAST_CLASS`) so replay/cap decisions can distinguish empty output, timeout, and malformed verdict contracts.
 - Unclear re-review attempts use bounded exponential backoff with jitter; backoff windows survive daemon restarts so replay does not hammer re-review.
 - At unclear retry cap, refinery runs a deterministic fallback gate before manual hold:
-  - Auto-transition to controlled merge path only when checks are green, `mergeable=MERGEABLE`, issue authorization is valid, and unclear class is fallback-safe (`empty-output`, `review-timeout`, `missing-structured-verdict`).
-  - Failed/missing checks, non-mergeable state, or non-eligible unclear classes remain a terminal hold with explicit reason code.
+  - Default merge policy is allow: auto-transition to controlled merge path when checks are green, `mergeable=MERGEABLE`, and issue authorization is valid.
+  - Terminal hold is now an explicit error gate only: failed/missing checks, non-mergeable state, or unclear classes marked as explicit error gates (currently `invalid-multiple-verdicts`).
 - When manual hold is required at cap, refinery emits a single saturation escalation notification (PR, issue, class, last reason, next-action hint).
 - Saturation escalation dedupe is restart-safe via persisted queue markers (`REVIEW_UNCLEAR_ESCALATED`, `REVIEW_UNCLEAR_ESCALATED_AT`), so refinery restart replay does not re-page.
 - Stale reviewed-head or late mergeability drift now resyncs queue state to `REVIEW_PENDING` with cleared review-ready evidence (`REVIEWED_HEAD_SHA`, `REVIEWED_AT`) instead of looping stale approvals.
