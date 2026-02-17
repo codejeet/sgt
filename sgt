@@ -3110,10 +3110,10 @@ _refinery_checks_class() {
   echo "unknown"
 }
 
-_refinery_unclear_class_safe_for_fallback() {
+_refinery_unclear_class_explicit_error_gate() {
   local klass="${1:-}"
   case "$klass" in
-    empty-output|review-timeout|missing-structured-verdict)
+    invalid-multiple-verdicts)
       return 0
       ;;
     *)
@@ -5921,22 +5921,21 @@ _refinery_loop() {
         local max_unclear_retry_attempts fallback_eligible fallback_reason_code fallback_reason
         max_unclear_retry_attempts="$(_refinery_unclear_retry_max_attempts)"
         if (( mq_unclear_retry_count >= max_unclear_retry_attempts )); then
-          fallback_eligible=0
-          fallback_reason_code="manual-intervention-required"
-          fallback_reason="unclear fallback denied: guardrails not satisfied"
+          fallback_eligible=1
+          fallback_reason_code="fallback-auto-approved"
+          fallback_reason="unclear saturated and default-merge policy allows controlled merge path"
           if [[ "$check_class" != "green" ]]; then
+            fallback_eligible=0
             fallback_reason_code="checks-not-green"
             fallback_reason="required checks not green (class=$check_class)"
           elif [[ "$pr_mergeable" != "MERGEABLE" ]]; then
+            fallback_eligible=0
             fallback_reason_code="mergeable-not-ready"
             fallback_reason="pr mergeable state not MERGEABLE (state=${pr_mergeable:-unknown})"
-          elif ! _refinery_unclear_class_safe_for_fallback "${mq_unclear_last_class:-}"; then
-            fallback_reason_code="unclear-class-not-eligible"
-            fallback_reason="unclear class not eligible for deterministic fallback (class=${mq_unclear_last_class:-unknown})"
-          else
-            fallback_eligible=1
-            fallback_reason_code="fallback-auto-approved"
-            fallback_reason="unclear saturated but checks green + mergeable + safe unclear class; proceeding with controlled merge path"
+          elif _refinery_unclear_class_explicit_error_gate "${mq_unclear_last_class:-}"; then
+            fallback_eligible=0
+            fallback_reason_code="explicit-error-gate"
+            fallback_reason="unclear class requires manual intervention (class=${mq_unclear_last_class:-unknown})"
           fi
 
           if [[ "$fallback_eligible" == "1" ]]; then
