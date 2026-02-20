@@ -5333,6 +5333,19 @@ Closing PR and dispatching rework." 2>/dev/null || true
     if [[ -z "$review_output" ]]; then
       unclear_reason="review output empty or timed out"
     fi
+
+    # Policy option: if the AI review is inconclusive (missing verdict), merge anyway.
+    # AJ preference: after the first inconclusive review, do not block the pipeline.
+    local merge_on_unclear="${SGT_REFINERY_MERGE_ON_UNCLEAR:-1}"
+    if [[ "$merge_on_unclear" == "1" ]]; then
+      echo "[refinery/$rig] PR #$pr — review inconclusive, but policy allows merge (SGT_REFINERY_MERGE_ON_UNCLEAR=1)"
+      log_event "REFINERY_REVIEW_UNCLEAR_BYPASS pr=#$pr reason=\"$(_escape_quotes "$unclear_reason")\""
+      _notify_openclaw "[SGT Refinery] review unclear bypass (auto-merge) rig=$rig repo=$owner_repo pr=#$pr title=\"$pr_title_field\" issue=#$issue pr_url=$pr_url issue_url=$issue_url"
+      gh pr comment "$pr" --repo "$repo" \
+        --body "[sgt-refinery] Review output was inconclusive (missing explicit verdict). Proceeding to merge due to policy: SGT_REFINERY_MERGE_ON_UNCLEAR=1." 2>/dev/null || true
+      return 0
+    fi
+
     _REFINERY_REVIEW_UNCLEAR_REASON="$unclear_reason"
     echo "[refinery/$rig] PR #$pr — review inconclusive, marking REVIEW_UNCLEAR"
     log_event "REFINERY_REVIEW_UNCLEAR pr=#$pr reason=\"$(_escape_quotes "$unclear_reason")\""
