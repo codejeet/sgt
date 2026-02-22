@@ -2112,7 +2112,13 @@ _mayor_review_watchdog_collect_stale() {
     mq_head_sha=""
     mq_review_state=""
     mq_review_unclear_since=""
-    eval "$(grep -E '^(RIG|PR|REPO|ISSUE|HEAD_SHA|REVIEW_STATE|REVIEW_UNCLEAR_SINCE)=' "$f")"
+    while IFS='=' read -r k v; do
+      case "$k" in
+        RIG|PR|REPO|ISSUE|HEAD_SHA|REVIEW_STATE|REVIEW_UNCLEAR_SINCE)
+          printf -v "$k" '%s' "$v"
+          ;;
+      esac
+    done < <(grep -E '^(RIG|PR|REPO|ISSUE|HEAD_SHA|REVIEW_STATE|REVIEW_UNCLEAR_SINCE)=' "$f")
     mq_rig="${RIG:-}"
     mq_pr="${PR:-}"
     mq_repo="${REPO:-}"
@@ -5733,7 +5739,13 @@ _refinery_loop() {
       local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since="" mq_reviewed_head_sha="" mq_reviewed_at=""
       local mq_unclear_retry_count="" mq_unclear_next_retry_at="" mq_unclear_escalated="" mq_unclear_escalated_at=""
       local mq_unclear_last_reason="" mq_unclear_last_class=""
-      eval "$(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")"
+      while IFS='=' read -r k v; do
+        case "$k" in
+          PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)
+            printf -v "$k" '%s' "$v"
+            ;;
+        esac
+      done < <(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
