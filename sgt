@@ -4240,7 +4240,11 @@ cmd_status_json() {
       local PR RIG
       PR=""
       RIG=""
-      source "$mqf" 2>/dev/null || true
+      while IFS='=' read -r k v; do
+        case "$k" in
+          PR|RIG) printf -v "$k" '%s' "$v" ;;
+        esac
+      done < <(grep -E '^(PR|RIG)=' "$mqf" 2>/dev/null)
       merge_queue+=("{\"name\":$(_json_quote "$(basename "$mqf")"),\"pr\":$(_json_quote "$PR"),\"rig\":$(_json_quote "$RIG")}")
     done
   fi
@@ -4457,7 +4461,14 @@ _cmd_status_human() {
       [[ -f "$mqf" ]] || continue
       mq_count=$((mq_count + 1))
       (
-        source "$mqf"
+        local PR RIG
+        PR=""
+        RIG=""
+        while IFS='=' read -r k v; do
+          case "$k" in
+            PR|RIG) printf -v "$k" '%s' "$v" ;;
+          esac
+        done < <(grep -E '^(PR|RIG)=' "$mqf" 2>/dev/null)
         printf "  %-16s %sPR#%s%s  %s%s%s\n" "$(basename "$mqf")" "$(_fg_gray)" "${PR:-?}" "$(_reset)" "$(_dim)" "${RIG:-?}" "$(_reset)"
       )
     done
