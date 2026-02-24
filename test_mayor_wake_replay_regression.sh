@@ -122,6 +122,9 @@ echo "=== mayor merge-queue alias dedupe ==="
 echo "=== refinery stale queue item guard ==="
 "$REPO_ROOT/test_refinery_stale_queue_item.sh"
 
+echo "=== refinery rig-specific queue routing regression ==="
+"$REPO_ROOT/test_refinery_rig_queue_routing_regression.sh"
+
 echo "=== refinery unclear fallback policy ==="
 "$REPO_ROOT/test_refinery_unclear_fallback_policy.sh"
 
