@@ -2396,11 +2396,11 @@ _merge_queue_mark_review_pending_resync() {
 }
 
 _merge_queue_repo_pr_key() {
-  local repo="${1:-}" pr="${2:-}"
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}"
   local owner_repo
   owner_repo="$(_repo_owner_repo "$repo")"
   [[ -n "$owner_repo" ]] || owner_repo="$repo"
-  echo "${owner_repo}|pr=${pr}"
+  echo "rig=${rig}|${owner_repo}|pr=${pr}"
 }
 
 _merge_queue_canonical_name() {
@@ -2409,20 +2409,28 @@ _merge_queue_canonical_name() {
 }
 
 _merge_queue_find_by_repo_pr() {
-  local repo="${1:-}" pr="${2:-}"
-  local key merge_dir f q_repo q_pr q_key
-  key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  local rig="${1:-}" repo="${2:-}" pr="${3:-}"
+  local key merge_dir f q_repo q_pr q_rig q_key q_name
+  key="$(_merge_queue_repo_pr_key "$rig" "$repo" "$pr")"
   merge_dir="$SGT_CONFIG/merge-queue"
   [[ -d "$merge_dir" ]] || return 1
   for f in "$merge_dir"/*; do
     [[ -f "$f" ]] || continue
+    q_rig=""
     q_repo=""
     q_pr=""
-    eval "$(grep -E '^(REPO|PR)=' "$f" 2>/dev/null || true)"
+    eval "$(grep -E '^(RIG|REPO|PR)=' "$f" 2>/dev/null || true)"
+    q_rig="${RIG:-}"
     q_repo="${REPO:-}"
     q_pr="${PR:-}"
+    if [[ -z "$q_rig" ]]; then
+      q_name="$(basename "$f")"
+      if [[ "$q_name" =~ ^(.+)-pr[0-9]+$ ]]; then
+        q_rig="${BASH_REMATCH[1]}"
+      fi
+    fi
     [[ -n "$q_repo" && -n "$q_pr" ]] || continue
-    q_key="$(_merge_queue_repo_pr_key "$q_repo" "$q_pr")"
+    q_key="$(_merge_queue_repo_pr_key "$q_rig" "$q_repo" "$q_pr")"
     if [[ "$q_key" == "$key" ]]; then
       echo "$f"
       return 0
@@ -2440,13 +2448,13 @@ _merge_queue_enqueue_polecat() {
   merge_dir="$SGT_CONFIG/merge-queue"
   mkdir -p "$merge_dir"
 
-  queue_key="$(_merge_queue_repo_pr_key "$repo" "$pr")"
+  queue_key="$(_merge_queue_repo_pr_key "$rig" "$repo" "$pr")"
   owner_repo="$(_repo_owner_repo "$repo")"
   [[ -n "$owner_repo" ]] || owner_repo="$repo"
   queue_name="$(_merge_queue_canonical_name "$rig" "$pr")"
   queue_file="$merge_dir/$queue_name"
 
-  existing_file="$(_merge_queue_find_by_repo_pr "$repo" "$pr" || true)"
+  existing_file="$(_merge_queue_find_by_repo_pr "$rig" "$repo" "$pr" || true)"
   if [[ -n "$existing_file" ]]; then
     existing_name="$(basename "$existing_file")"
     reason_code="duplicate-queue-key"
@@ -2481,6 +2489,23 @@ REVIEWED_AT=
 QUEUED=$(date -Iseconds)
 MQSTATE
   return 0
+}
+
+_merge_queue_cleanup_terminal_for_mismatch() {
+  local rig="${1:-}" queue_file="${2:-}" queue_name="${3:-}" mq_rig="${4:-}" mq_repo="${5:-}" mq_pr="${6:-}"
+  local reason_code="${7:-repo-mismatch}" reason="${8:-repo mismatch}"
+  local owner_repo pr_state
+  [[ -n "$queue_file" && -f "$queue_file" && -n "$mq_repo" && -n "$mq_pr" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$mq_repo")"
+  [[ -n "$owner_repo" ]] || owner_repo="$mq_repo"
+  pr_state="$(gh pr view "$mq_pr" --repo "$mq_repo" --json state --jq '.state' 2>/dev/null || true)"
+  if [[ "$pr_state" == "MERGED" || "$pr_state" == "CLOSED" ]]; then
+    rm -f "$queue_file"
+    echo "[refinery/$rig] queue item $queue_name stale terminal PR (#$mq_pr state=$pr_state) with rig mismatch — cleaned"
+    log_event "REFINERY_QUEUE_CLEAN_STALE_TERMINAL queue=$queue_name rig=$rig queue_rig=${mq_rig:-unknown} repo=$owner_repo pr=#$mq_pr pr_state=$pr_state reason_code=$reason_code reason=\"$(_escape_quotes "$reason")\""
+    return 0
+  fi
+  return 1
 }
 
 _refinery_merge_attempt_key() {
@@ -5198,9 +5223,18 @@ _witness_loop() {
 
         # Check if already in merge queue
         if [[ "$tracked" == "false" ]]; then
-          for mqf in "$SGT_CONFIG/merge-queue"/${rig}-*; do
+          for mqf in "$SGT_CONFIG/merge-queue"/*; do
             [[ -f "$mqf" ]] || continue
-            if grep -q "BRANCH=$pr_branch" "$mqf" 2>/dev/null; then
+            local mqf_rig="" mqf_name=""
+            mqf_rig=$(grep -E '^RIG=' "$mqf" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+            if [[ -n "$mqf_rig" && "$mqf_rig" != "$rig" ]]; then
+              continue
+            fi
+            if [[ -z "$mqf_rig" ]]; then
+              mqf_name="$(basename "$mqf")"
+              [[ "$mqf_name" == "${rig}-"* ]] || continue
+            fi
+            if grep -Fq "BRANCH=$pr_branch" "$mqf" 2>/dev/null; then
               tracked=true
               break
             fi
@@ -5741,22 +5775,29 @@ _refinery_loop() {
     _refinery_conflict_replay_pending "$rig" || true
 
     # ── Process PR queue (polecats) ──
-    for f in "$merge_dir"/${rig}-*; do
+    for f in "$merge_dir"/*; do
       [[ -f "$f" ]] || continue
       local mqname
       mqname="$(basename "$f")"
 
-      local mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
+      local mq_rig="" mq_pr="" mq_repo="" mq_branch="" mq_issue="" mq_polecat="" mq_auto_merge="" mq_type="" mq_backend="" mq_head_sha=""
       local mq_review_state="" mq_review_updated_at="" mq_review_unclear_since="" mq_reviewed_head_sha="" mq_reviewed_at=""
       local mq_unclear_retry_count="" mq_unclear_next_retry_at="" mq_unclear_escalated="" mq_unclear_escalated_at=""
       local mq_unclear_last_reason="" mq_unclear_last_class=""
       while IFS='=' read -r k v; do
         case "$k" in
-          PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)
+          RIG|PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)
             printf -v "$k" '%s' "$v"
             ;;
         esac
-      done < <(grep -E '^(PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")
+      done < <(grep -E '^(RIG|PR|REPO|BRANCH|ISSUE|POLECAT|AUTO_MERGE|TYPE|BACKEND|HEAD_SHA|REVIEW_STATE|REVIEW_UPDATED_AT|REVIEW_UNCLEAR_SINCE|REVIEW_UNCLEAR_RETRY_COUNT|REVIEW_UNCLEAR_NEXT_RETRY_AT|REVIEW_UNCLEAR_LAST_REASON|REVIEW_UNCLEAR_LAST_CLASS|REVIEW_UNCLEAR_ESCALATED|REVIEW_UNCLEAR_ESCALATED_AT|REVIEWED_HEAD_SHA|REVIEWED_AT)=' "$f")
+      mq_rig="${RIG:-}"
+      if [[ -n "$mq_rig" && "$mq_rig" != "$rig" ]]; then
+        if [[ "$mqname" == "${rig}-"* ]]; then
+          _merge_queue_cleanup_terminal_for_mismatch "$rig" "$f" "$mqname" "$mq_rig" "${REPO:-}" "${PR:-}" "rig-mismatch" "queue file belongs to different rig" || true
+        fi
+        continue
+      fi
       mq_pr="${PR:-}"
       mq_repo="${REPO:-$repo}"
       mq_branch="${BRANCH:-}"
@@ -5786,6 +5827,9 @@ _refinery_loop() {
       if ! canonical_mq_repo="$(_resolve_rig_repo_canonical "refinery-queue-open-pr-open-issue-checks" "$rig" "$mq_repo" "1")"; then
         resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_mq_repo")"
         IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+        if [[ "${resolve_code:-}" == "repo-mismatch" ]]; then
+          _merge_queue_cleanup_terminal_for_mismatch "$rig" "$f" "$mqname" "$mq_rig" "$mq_repo" "$mq_pr" "$resolve_code" "${resolve_reason:-repo mismatch}" || true
+        fi
         echo "[refinery/$rig] queue item $mqname skipped — ${resolve_reason:-unable to resolve rig repo} (reason_code=${resolve_code:-unknown})"
         log_event "REFINERY_QUEUE_SKIP_REPO_RESOLVE queue=$mqname rig=$rig reason_code=${resolve_code:-unknown} reason=\"$(_escape_quotes "${resolve_reason:-unable to resolve rig repo}")\""
         continue
