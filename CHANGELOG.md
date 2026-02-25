@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Triage follow-up for blocker PR `#161`: confirmed both deltas are superseded on `master` (queue-field quoting now handled by the temp-file `%q` writer path plus parse hardening in `#170`; inconclusive-review behavior superseded by refinery fallback flow from `#167/#169` with follow-up in `#172`), and closed `#161` as superseded to unblock `#173`.
 - Mayor orphan-PR queueing now live-revalidates PR state (`OPEN` required) immediately before queueing; stale open-list snapshots that already became `MERGED`/`CLOSED` are skipped with explicit reason logging (`MAYOR_ORPHAN_SKIP_STALE`).
 - Added regression coverage for stale orphan PR snapshot false-positives in `test_mayor_orphan_stale_snapshot_guard.sh`.
 - Mayor side-effect decisions (`dispatch`, `nuke`, `merge`) now require an immediate post-action live verification receipt before success is declared, with durable structured receipt fields (`action`, `target`, `expected_state`, `observed_state`, `verified_at`) under `~/.sgt/mayor-action-receipts/`.
