@@ -4955,8 +4955,7 @@ PSTATE
   fi
 
   local polecat_prompt
-  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
-  polecat_prompt+="$readme_prompt"
+  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."  polecat_prompt+="$readme_prompt"
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
     "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
@@ -6296,8 +6295,7 @@ STATUS=running
 PSTATE
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
-
+    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
   _RESLING_LAST_POLECAT="$pname"
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -6681,8 +6679,7 @@ SIG=$sig
 PSTATE
 
   tmux new-session -d -s "$fix_session" -c "$worktree" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
-
+    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
   return 0
 }
 
@@ -7435,8 +7432,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
-
+              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
           fi
@@ -8793,7 +8789,8 @@ $briefing_content
 Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
 
 For each pending plan request, turn the request into a repo-local \`SGT_PLAN.json\` inside the rig repo when the request is clear enough.
-If you need clarification, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\` instead of guessing.
+For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
+If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
 After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
 
 If an issue/PR just merged, you should proactively:
@@ -9139,8 +9136,7 @@ DSTATE
   # Spawn in tmux
   info "spawning dog $dname..."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "$( _ai_cmd "$backend" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. Complete the research task described there. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
-
+    "$( _ai_cmd "$backend" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Complete the research task described there. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
 
@@ -9339,8 +9335,7 @@ cmd_crew_wake() {
   fi
 
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md and $c_workspace/repo/SGT_CONTEXT.md before you start. Use 'sgt context search $c_rig \"<query>\"' if prior project memory would help. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. Before you finish, add any durable project context you learned with 'sgt context add $c_rig \"<note>\"'. When done, update your notes." ); echo '[SGT] crew exited'"
-
+    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md and $c_workspace/repo/SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search $c_rig \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. Before you finish, add any durable project context you learned with 'sgt context add $c_rig \"<note>\"'. When done, update your notes." ); echo '[SGT] crew exited'"
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
 }
