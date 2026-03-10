@@ -5466,6 +5466,13 @@ cmd_mail_check() {
 # - Respawns stalled polecats (re-slings the issue)
 # - Runs as a bash loop in tmux, no AI needed
 
+_witness_pr_meta() {
+  local repo="${1:-}" branch="${2:-}"
+  [[ -n "$repo" && -n "$branch" ]] || return 0
+  gh pr list --repo "$repo" --head "$branch" --state all --json number,state \
+    --jq 'if length == 0 then "" else "\(.[0].number // "")\t\(.[0].state // "")" end' 2>/dev/null || true
+}
+
 _witness_loop() {
   local rig="$1"
   local repo
@@ -5511,8 +5518,9 @@ _witness_loop() {
           is_idle=true
         elif echo "$pane_output" | grep -qP '\x{276f}'; then
           # Check if a PR was already opened (work is done)
-          local has_pr
-          has_pr=$(gh pr list --repo "$p_repo" --head "$p_branch" --json number --jq '.[0].number' 2>/dev/null || true)
+          local pr_meta has_pr
+          pr_meta="$(_witness_pr_meta "$p_repo" "$p_branch")"
+          IFS=$'\t' read -r has_pr _ <<< "$pr_meta"
           if [[ -n "$has_pr" ]]; then
             is_idle=true
           fi
@@ -5539,9 +5547,9 @@ _witness_loop() {
 
       if ! $alive; then
         # Polecat session is dead — check what happened
-        local pr_state pr_number
-        pr_state=$(gh pr list --repo "$p_repo" --head "$p_branch" --json state,number --jq '.[0].state' 2>/dev/null || true)
-        pr_number=$(gh pr list --repo "$p_repo" --head "$p_branch" --json number --jq '.[0].number' 2>/dev/null || true)
+        local pr_meta pr_state pr_number
+        pr_meta="$(_witness_pr_meta "$p_repo" "$p_branch")"
+        IFS=$'\t' read -r pr_number pr_state <<< "$pr_meta"
 
         if [[ "$pr_state" == "OPEN" ]]; then
           # PR is open — send to merge queue for refinery (refinery reviews + merges)
