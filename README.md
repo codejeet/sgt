@@ -50,6 +50,28 @@ Implementation details:
 
 SGT supports **repo-local work plans** so the system can keep itself fed without relying on LLM planning.
 
+### Create a plan request from a natural-language spec
+
+Use `sgt create plan` when you have a large whitepaper/spec or even a short natural-language prompt and want the Mayor to turn it into a repo-local `SGT_PLAN.json`.
+
+```bash
+sgt create plan <rig> "<prompt>"
+sgt create plan <rig> --file /path/to/spec.md
+cat whitepaper.md | sgt create plan <rig> -
+```
+
+What happens:
+- the prompt/spec is appended to the rig’s shared `SGT_CONTEXT.md`
+- a durable request record is created under `~/sgt/.sgt/plan-requests/`
+- the Mayor is woken immediately to review it
+- if the Mayor needs clarification, he can ask the requesting OpenClaw agent via `sgt mayor request ask <request-id> "<question>"`
+
+If you want clarification routed back to a specific OpenClaw agent, pass:
+
+```bash
+sgt create plan <rig> --agent <openclaw-id> "<prompt>"
+```
+
 - **File**: `SGT_PLAN.json` at the repo root of any rig you want on autopilot.
 - **What it does**: defines a DAG of tasks with explicit dependencies via `depends_on`.
 - **How it runs**:
@@ -574,6 +596,12 @@ Test:
 
 ```bash
 sgt mayor notify "OpenClaw notification test"
+```
+
+Plan-request clarification uses the same OpenClaw delivery path. The Mayor can ask the dispatching agent:
+
+```bash
+sgt mayor request ask <request-id> "What is the preferred rollout order?"
 ```
 
 If `openclaw` is missing or the config is absent, notifications are skipped.
