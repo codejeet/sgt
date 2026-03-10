@@ -3466,6 +3466,303 @@ _find_recent_duplicate_issue() {
   [[ -n "$best_match" ]] && echo "$best_match"
 }
 
+_context_store_dir() {
+  local rig="${1:-}"
+  echo "$SGT_CONFIG/context/$rig"
+}
+
+_context_file_path() {
+  local rig="${1:-}"
+  echo "$(rig_path "$rig")/SGT_CONTEXT.md"
+}
+
+_context_index_path() {
+  local rig="${1:-}"
+  echo "$(_context_store_dir "$rig")/index.json"
+}
+
+_context_embedding_model() {
+  local model="${SGT_CONTEXT_EMBED_MODEL:-text-embedding-3-small}"
+  echo "$model"
+}
+
+_context_python_bin() {
+  command -v python3 2>/dev/null || command -v python 2>/dev/null || true
+}
+
+_require_context_python() {
+  local py_bin
+  py_bin="$(_context_python_bin)"
+  [[ -n "$py_bin" ]] || die "python is required for 'sgt context' embeddings/indexing"
+  echo "$py_bin"
+}
+
+_require_context_api_key() {
+  [[ -n "${OPENAI_API_KEY:-}" ]] || die "OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'"
+}
+
+_ensure_context_file() {
+  local rig="${1:-}" context_file today
+  context_file="$(_context_file_path "$rig")"
+  [[ -n "$context_file" ]] || return 1
+  mkdir -p "$(dirname "$context_file")"
+  if [[ -f "$context_file" ]]; then
+    echo "$context_file"
+    return 0
+  fi
+  today="$(date +%F)"
+  cat > "$context_file" <<EOF
+# SGT Project Context — $rig
+
+Shared durable context for agents working on this rig.
+
+Use this file for project-wide memory that should survive across polecats, dogs, and crew.
+
+Useful commands:
+- sgt context add $rig "<note>" — append a durable note
+- sgt context search $rig "<query>" — semantic search over prior context
+- sgt context index $rig — rebuild the embedding index
+
+## Notes
+
+## $today
+EOF
+  echo "$context_file"
+}
+
+_context_write_note() {
+  local rig="${1:-}" note="${2:-}" context_file today now_iso
+  context_file="$(_ensure_context_file "$rig")"
+  note="${note//$'\r'/ }"
+  note="${note//$'\n'/ }"
+  note="$(printf '%s' "$note" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+  [[ -n "$note" ]] || die "usage: sgt context add <rig> <note>"
+  today="$(date +%F)"
+  now_iso="$(date -Iseconds)"
+  if ! grep -qx "## $today" "$context_file"; then
+    printf '\n## %s\n' "$today" >> "$context_file"
+  fi
+  printf -- '- %s — %s\n' "$now_iso" "$note" >> "$context_file"
+  echo "$context_file"
+}
+
+_context_index_build() {
+  local rig="${1:-}" context_file index_path py_bin model api_key
+  context_file="$(_ensure_context_file "$rig")"
+  index_path="$(_context_index_path "$rig")"
+  py_bin="$(_require_context_python)"
+  _require_context_api_key
+  mkdir -p "$(dirname "$index_path")"
+  model="$(_context_embedding_model)"
+  api_key="${OPENAI_API_KEY:-}"
+  "$py_bin" - "$rig" "$context_file" "$index_path" "$model" "$api_key" <<'PY'
+import json
+import math
+import os
+import sys
+import urllib.request
+
+rig, context_path, index_path, model, api_key = sys.argv[1:6]
+
+def embed(texts):
+    payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/embeddings",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    data = body.get("data")
+    if not isinstance(data, list) or len(data) != len(texts):
+        raise SystemExit("unexpected embeddings response shape")
+    return [item.get("embedding") for item in data]
+
+entries = []
+current_date = ""
+with open(context_path, "r", encoding="utf-8") as fh:
+    for lineno, raw in enumerate(fh, start=1):
+        line = raw.rstrip("\n")
+        if line.startswith("## "):
+            current_date = line[3:].strip()
+            continue
+        if not line.startswith("- "):
+            continue
+        text = line[2:].strip()
+        if not text:
+            continue
+        entries.append(
+            {
+                "id": f"line-{lineno}",
+                "line": lineno,
+                "date": current_date,
+                "text": text,
+            }
+        )
+
+texts = [entry["text"] for entry in entries]
+embeddings = embed(texts) if texts else []
+for entry, embedding in zip(entries, embeddings):
+    entry["embedding"] = embedding
+
+doc = {
+    "version": 1,
+    "rig": rig,
+    "model": model,
+    "source_path": context_path,
+    "source_mtime": int(os.path.getmtime(context_path)),
+    "indexed_at": __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    "entries": entries,
+}
+
+tmp_path = index_path + ".tmp"
+with open(tmp_path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=True)
+os.replace(tmp_path, index_path)
+print(index_path)
+PY
+}
+
+_context_index_is_fresh() {
+  local rig="${1:-}" context_file index_path
+  context_file="$(_ensure_context_file "$rig")"
+  index_path="$(_context_index_path "$rig")"
+  [[ -f "$index_path" ]] || return 1
+  [[ "$index_path" -nt "$context_file" ]]
+}
+
+_context_search_run() {
+  local rig="${1:-}" query="${2:-}" index_path py_bin model api_key context_file
+  [[ -n "$query" ]] || die "usage: sgt context search <rig> <query>"
+  context_file="$(_ensure_context_file "$rig")"
+  if ! _context_index_is_fresh "$rig"; then
+    _context_index_build "$rig" >/dev/null
+  fi
+  index_path="$(_context_index_path "$rig")"
+  py_bin="$(_require_context_python)"
+  _require_context_api_key
+  model="$(_context_embedding_model)"
+  api_key="${OPENAI_API_KEY:-}"
+  "$py_bin" - "$rig" "$index_path" "$model" "$api_key" "$query" <<'PY'
+import json
+import math
+import sys
+import urllib.request
+
+rig, index_path, model, api_key, query = sys.argv[1:6]
+
+with open(index_path, "r", encoding="utf-8") as fh:
+    index = json.load(fh)
+
+entries = index.get("entries") or []
+if not entries:
+    print(f"no indexed context entries for rig '{rig}'")
+    raise SystemExit(0)
+
+payload = json.dumps({"model": model, "input": query}).encode("utf-8")
+req = urllib.request.Request(
+    "https://api.openai.com/v1/embeddings",
+    data=payload,
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    },
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout=60) as resp:
+    body = json.loads(resp.read().decode("utf-8"))
+query_embedding = (body.get("data") or [{}])[0].get("embedding")
+if not query_embedding:
+    raise SystemExit("unexpected embeddings response shape")
+
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return -1.0
+    return dot / (na * nb)
+
+ranked = []
+for entry in entries:
+    emb = entry.get("embedding")
+    if not emb:
+      continue
+    ranked.append((cosine(query_embedding, emb), entry))
+
+ranked.sort(key=lambda item: item[0], reverse=True)
+top = ranked[:5]
+if not top:
+    print(f"no indexed context entries for rig '{rig}'")
+    raise SystemExit(0)
+
+for score, entry in top:
+    date = entry.get("date") or "undated"
+    line = entry.get("line") or "?"
+    text = entry.get("text") or ""
+    print(f"{score:.3f}\t{date}\tline {line}\t{text}")
+PY
+}
+
+cmd_context() {
+  local sub="${1:-}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    ""|help|--help|-h)
+      cat <<EOF
+Usage: sgt context <command> [args]
+
+Commands:
+  path <rig>             Print the repo-local shared memory path
+  add <rig> <note>       Append a durable note to SGT_CONTEXT.md
+  index <rig>            Rebuild the embedding index for SGT_CONTEXT.md
+  search <rig> <query>   Semantic search over shared memory
+EOF
+      ;;
+    path)
+      local rig="${1:-}"
+      [[ -n "$rig" ]] || die "usage: sgt context path <rig>"
+      ensure_init
+      ensure_rig "$rig"
+      _ensure_context_file "$rig"
+      ;;
+    add)
+      local rig="${1:-}" note="${2:-}"
+      [[ -n "$rig" ]] || die "usage: sgt context add <rig> <note>"
+      [[ -n "$note" ]] || die "usage: sgt context add <rig> <note>"
+      ensure_init
+      ensure_rig "$rig"
+      _context_write_note "$rig" "$note" >/dev/null
+      if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+        _context_index_build "$rig" >/dev/null 2>&1 || true
+      fi
+      info "added shared context note to $(_context_file_path "$rig")"
+      ;;
+    index)
+      local rig="${1:-}"
+      [[ -n "$rig" ]] || die "usage: sgt context index <rig>"
+      ensure_init
+      ensure_rig "$rig"
+      _context_index_build "$rig"
+      ;;
+    search)
+      local rig="${1:-}" query="${2:-}"
+      [[ -n "$rig" ]] || die "usage: sgt context search <rig> <query>"
+      [[ -n "$query" ]] || die "usage: sgt context search <rig> <query>"
+      ensure_init
+      ensure_rig "$rig"
+      _context_search_run "$rig" "$query"
+      ;;
+    *)
+      die "unknown context command: $sub (try: help, path, add, index, search)"
+      ;;
+  esac
+}
+
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
 _openclaw_notify_config_read() {
   local notify_out="" py_bin="" py_parse_notify='import json, sys
@@ -3484,6 +3781,7 @@ def get(keys):
         if v:
             return v
     return ""
+print(get(["agent"]))
 print(get(["channel"]))
 print(get(["to"]))
 print(get(["reply_to", "reply-to", "replyTo"]))'
@@ -3505,29 +3803,31 @@ print(get(["reply_to", "reply-to", "replyTo"]))'
 _notify_openclaw() {
   local message="${1:-}"
   [[ -n "$message" ]] || return 0
-  local channel="" to="" reply_to="" notify_out=""
+  local agent="" channel="" to="" reply_to="" notify_out=""
   notify_out="$(_openclaw_notify_config_read || true)"
   [[ -n "$notify_out" ]] || return 0
   local fields=()
   while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
-  channel="${fields[0]:-}"
-  to="${fields[1]:-}"
-  reply_to="${fields[2]:-}"
+  agent="${fields[0]:-}"
+  channel="${fields[1]:-}"
+  to="${fields[2]:-}"
+  reply_to="${fields[3]:-}"
+  [[ -n "$agent" ]] || agent="gastown"
   [[ -n "$channel" ]] || channel="last"
 
-  local cmd=(openclaw agent --agent gastown --deliver --message "$message" --channel "$channel")
+  local cmd=(openclaw agent --agent "$agent" --deliver --message "$message" --channel "$channel")
   [[ -n "$to" ]] && cmd+=(--to "$to")
   [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
 
   "${cmd[@]}" &>/dev/null &
   disown 2>/dev/null
-  log_event "OPENCLAW_NOTIFY channel=$channel to=$to reply_to=$reply_to message=$message"
+  log_event "OPENCLAW_NOTIFY agent=$agent channel=$channel to=$to reply_to=$reply_to message=$message"
 }
 
 _mayor_notify_rigger() {
   local message="${1:-}"
   local suppress_decision_log="${2:-0}"
-  local channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
+  local agent="" channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
   local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" last_matcher="unknown" escalated=0
   local verify_outcome="" verify_reason="" verify_matcher="" verify_details="" decision_outcome="" attempt=0 should_retry=0
   local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
@@ -3554,9 +3854,11 @@ _mayor_notify_rigger() {
 
   local fields=()
   while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
-  channel="${fields[0]:-}"
-  to="${fields[1]:-}"
-  reply_to="${fields[2]:-}"
+  agent="${fields[0]:-}"
+  channel="${fields[1]:-}"
+  to="${fields[2]:-}"
+  reply_to="${fields[3]:-}"
+  [[ -n "$agent" ]] || agent="gastown"
   [[ -n "$channel" ]] || channel="last"
   if [[ -n "$to" ]]; then
     target="${to}|channel=${channel}"
@@ -3626,7 +3928,7 @@ _mayor_notify_rigger() {
     verify_reason="transport-command-failed"
     verify_details=""
 
-    local -a cmd=(openclaw agent --agent gastown --deliver --message "[SGT Mayor] $message" --channel "$channel")
+    local -a cmd=(openclaw agent --agent "$agent" --deliver --message "[SGT Mayor] $message" --channel "$channel")
     [[ -n "$to" ]] && cmd+=(--to "$to")
     [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
     set +e
@@ -3894,6 +4196,7 @@ cmd_rig_add() {
   fi
 
   _write_claude_md "$rpath"
+  _ensure_context_file "$name" >/dev/null
   _ensure_sgt_authorized_label "$repo"
   log_event "RIG_ADD $name $repo"
   info "rig '$name' added ($repo)"
@@ -4082,10 +4385,14 @@ cmd_sling() {
   git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
     || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
 
+  _ensure_context_file "$rig" >/dev/null
   if [[ -f "$rpath/CLAUDE.md" ]]; then
     cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
   fi
-  _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "$auto_merge"
+  if [[ -f "$rpath/SGT_CONTEXT.md" ]]; then
+    cp "$rpath/SGT_CONTEXT.md" "$worktree/SGT_CONTEXT.md"
+  fi
+  _write_polecat_claude_md "$worktree" "$rig" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "$auto_merge"
 
   # ── 4. Save polecat state ──
   cat > "$SGT_POLECATS/$pname" <<PSTATE
@@ -4134,7 +4441,7 @@ PSTATE
   fi
 
   local polecat_prompt
-  polecat_prompt="Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
+  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
   polecat_prompt+="$readme_prompt"
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
@@ -5432,10 +5739,14 @@ _resling_existing_issue() {
   git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
     || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
 
+  _ensure_context_file "$rig" >/dev/null
   if [[ -f "$rpath/CLAUDE.md" ]]; then
     cp "$rpath/CLAUDE.md" "$worktree/CLAUDE.md"
   fi
-  _write_polecat_claude_md "$worktree" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
+  if [[ -f "$rpath/SGT_CONTEXT.md" ]]; then
+    cp "$rpath/SGT_CONTEXT.md" "$worktree/SGT_CONTEXT.md"
+  fi
+  _write_polecat_claude_md "$worktree" "$rig" "$issue_number" "$task" "$repo" "$pname" "$branch" "$default_branch" "false"
 
   local final_gate_reason=""
   if ! final_gate_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue_number" "$source_pr"); then
@@ -5462,7 +5773,7 @@ STATUS=running
 PSTATE
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "Read the CLAUDE.md in this directory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   _RESLING_LAST_POLECAT="$pname"
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
@@ -5794,11 +6105,16 @@ STATE
   mkdir -p "$SGT_ROOT/polecats"
   git -C "$rpath" worktree add -f "$worktree" "$branch" 2>/dev/null || git -C "$rpath" worktree add -f "$worktree" "origin/$branch" 2>/dev/null || true
 
+  _ensure_context_file "$rig" >/dev/null
   # Write CLAUDE.md with strict tasking
   cat > "$worktree/CLAUDE.md" <<MD
 # CI Self-Heal Task (SGT)
 
 You are fixing CI for an existing PR.
+
+Read `SGT_CONTEXT.md` before you start. If you need prior rig memory, use:
+- `sgt context search $rig "<query>"`
+- `sgt context add $rig "<note>"`
 
 - Repo: $repo
 - Rig: $rig
@@ -5810,11 +6126,15 @@ You are fixing CI for an existing PR.
 Constraints:
 - Do not change product scope.
 - Fix only what is required to get CI green.
+- Before exit, add a durable context note if you learned something future agents should keep.
 - Commit, push to the same branch ($branch). Do not open a new PR.
 
 Failure signature:
 $sig
 MD
+  if [[ -f "$rpath/SGT_CONTEXT.md" ]]; then
+    cp "$rpath/SGT_CONTEXT.md" "$worktree/SGT_CONTEXT.md"
+  fi
 
   # Save polecat state so `sgt status` shows it.
   mkdir -p "$SGT_POLECATS"
@@ -5838,7 +6158,7 @@ SIG=$sig
 PSTATE
 
   tmux new-session -d -s "$fix_session" -c "$worktree" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md in this directory. Fix CI for PR #$pr on branch $branch. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
+    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
 
   return 0
 }
@@ -6552,6 +6872,7 @@ Please address the feedback in the next iteration." 2>/dev/null || true
             local new_session="sgt-${new_dname}"
             local dog_workspace="$SGT_ROOT/dogs/$new_dname"
             mkdir -p "$dog_workspace"
+            _ensure_context_file "$rig" >/dev/null
 
             cat > "$dog_workspace/CLAUDE.md" <<DOGMD
 # Dog Task — $new_dname (REWORK)
@@ -6565,13 +6886,18 @@ $issue_title_dog
 $REFINERY_REJECT_REASON
 
 ## Instructions
-1. Read the previous comments on issue #$d_issue for context
-2. Address the feedback above
-3. Post improved findings as a comment on issue #$d_issue:
+1. Read `SGT_CONTEXT.md` and the previous comments on issue #$d_issue for context
+2. Use `sgt context search $rig "<query>"` if prior rig memory would help
+3. Address the feedback above
+4. Post improved findings as a comment on issue #$d_issue:
    \`gh issue comment $d_issue --repo $d_repo --body "<your findings>"\`
-4. Do NOT close the issue — the refinery will review again
-5. Exit
+5. If you learned durable project context, append it with `sgt context add $rig "<note>"`
+6. Do NOT close the issue — the refinery will review again
+7. Exit
 DOGMD
+            if [[ -f "$(rig_path "$rig")/SGT_CONTEXT.md" ]]; then
+              cp "$(rig_path "$rig")/SGT_CONTEXT.md" "$dog_workspace/SGT_CONTEXT.md"
+            fi
 
             mkdir -p "$SGT_CONFIG/dogs"
             cat > "$SGT_CONFIG/dogs/$new_dname" <<DSTATE
@@ -6586,7 +6912,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
+              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
 
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
@@ -8113,6 +8439,7 @@ cmd_dog() {
   # Create temp workspace
   local dog_workspace="$SGT_ROOT/dogs/$dname"
   mkdir -p "$dog_workspace"
+  _ensure_context_file "$rig" >/dev/null
 
   # Write instructions
   cat > "$dog_workspace/CLAUDE.md" <<DOGMD
@@ -8127,12 +8454,14 @@ $task
 
 ## Instructions
 
-1. Research the topic thoroughly using available tools
-2. Compile your findings into a clear, well-structured report
-3. Post your findings as a comment on issue #$issue_number:
+1. Read `SGT_CONTEXT.md` before you start. Use `sgt context search $rig "<query>"` if prior rig memory would help.
+2. Research the topic thoroughly using available tools
+3. Compile your findings into a clear, well-structured report
+4. Post your findings as a comment on issue #$issue_number:
    \`gh issue comment $issue_number --repo $repo --body "<your findings>"\`
-4. Do NOT close the issue — the refinery will review your work first
-5. Exit
+5. If you learned durable project context, append it with `sgt context add $rig "<note>"`
+6. Do NOT close the issue — the refinery will review your work first
+7. Exit
 
 ## Rules
 
@@ -8141,6 +8470,9 @@ $task
 - Include sources when possible
 - If you can't find good information, say so honestly
 DOGMD
+  if [[ -f "$(rig_path "$rig")/SGT_CONTEXT.md" ]]; then
+    cp "$(rig_path "$rig")/SGT_CONTEXT.md" "$dog_workspace/SGT_CONTEXT.md"
+  fi
 
   # Save dog state
   mkdir -p "$SGT_CONFIG/dogs"
@@ -8159,7 +8491,7 @@ DSTATE
   # Spawn in tmux
   info "spawning dog $dname..."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "$( _ai_cmd "$backend" "Read CLAUDE.md. Complete the research task described there. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. Complete the research task described there. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
 
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
@@ -8266,6 +8598,7 @@ cmd_crew_add() {
       die "failed to clone $repo"
     fi
   }
+  _ensure_context_file "$rig" >/dev/null
 
   # Write crew member identity
   cat > "$crew_dir/CLAUDE.md" <<CREWMD
@@ -8279,6 +8612,7 @@ You are a persistent crew member for the $rig project.
 
 Your working directory is $crew_dir/repo — a full clone of the project.
 You have your own notes directory at $crew_dir/notes/ — use it to persist context.
+The rig also has shared memory at `SGT_CONTEXT.md`; read it before work, search it with `sgt context search $rig "<query>"`, and append durable notes with `sgt context add $rig "<note>"`.
 
 ## Responsibilities
 
@@ -8316,6 +8650,9 @@ Your notes/ directory persists between sessions. Save important context there:
 
 When you have nothing to do, update your notes and exit. You'll be woken up again.
 CREWMD
+  if [[ -f "$(rig_path "$rig")/SGT_CONTEXT.md" ]]; then
+    cp "$(rig_path "$rig")/SGT_CONTEXT.md" "$crew_dir/repo/SGT_CONTEXT.md"
+  fi
 
   mkdir -p "$crew_dir/notes" "$SGT_CONFIG/crew"
 
@@ -8342,10 +8679,11 @@ cmd_crew_wake() {
   local cfile="$SGT_CONFIG/crew/$name"
   [[ -f "$cfile" ]] || die "crew member '$name' not found"
 
-  local c_session c_workspace
-  eval "$(grep -E '^(SESSION|WORKSPACE)=' "$cfile")"
+  local c_session c_workspace c_rig
+  eval "$(grep -E '^(SESSION|WORKSPACE|RIG)=' "$cfile")"
   c_session="$SESSION"
   c_workspace="$WORKSPACE"
+  c_rig="${RIG:-}"
 
   if tmux has-session -t "$c_session" 2>/dev/null; then
     info "crew member '$name' is already awake"
@@ -8353,7 +8691,7 @@ cmd_crew_wake() {
   fi
 
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. When done, update your notes." ); echo '[SGT] crew exited'"
+    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md and $c_workspace/repo/SGT_CONTEXT.md before you start. Use 'sgt context search $c_rig \"<query>\"' if prior project memory would help. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. Before you finish, add any durable project context you learned with 'sgt context add $c_rig \"<note>\"'. When done, update your notes." ); echo '[SGT] crew exited'"
 
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
@@ -8776,19 +9114,31 @@ _write_claude_md() {
 This repository is managed by sgt (Simple GitHub Gastown).
 Workers (polecats) operate on feature branches and submit PRs.
 
+## Shared Project Memory
+
+This rig also has a local shared memory file: `SGT_CONTEXT.md`.
+Read it before you start work and again before you finish.
+
+Useful commands:
+- `sgt context search <rig> "<query>"` — semantic search over prior shared context
+- `sgt context add <rig> "<note>"` — append a durable project note
+- `sgt context index <rig>` — rebuild the embedding index manually
+
 ## Workflow
 
 1. Read your assigned GitHub issue for the task description
-2. Work on your feature branch
-3. Commit frequently with clear messages
-4. Push your branch
-5. Open a PR that references the issue (use "Closes #N")
-6. Exit when done
+2. Read `SGT_CONTEXT.md` for durable project context
+3. Work on your feature branch
+4. Commit frequently with clear messages
+5. Push your branch
+6. Open a PR that references the issue (use "Closes #N")
+7. Before exit, add any durable new context with `sgt context add <rig> "<note>"`
+8. Exit when done
 CLMD
 }
 
 _write_polecat_claude_md() {
-  local worktree="$1" issue="$2" task="$3" repo="$4" pname="$5" branch="$6" default_branch="$7" auto_merge="$8"
+  local worktree="$1" rig="$2" issue="$3" task="$4" repo="$5" pname="$6" branch="$7" default_branch="$8" auto_merge="$9"
 
   cat >> "$worktree/CLAUDE.md" <<CLMD
 
@@ -8803,15 +9153,24 @@ You are polecat \`$pname\`, an ephemeral coding agent.
 - **Branch**: \`$branch\`
 - **Target**: \`$default_branch\`
 
+## Shared Project Memory
+
+- Read `SGT_CONTEXT.md` before you start
+- Search prior context with `sgt context search $rig "<query>"`
+- Append durable shared notes with `sgt context add $rig "<note>"`
+- Before task completion, make sure any durable project context worth keeping has been added
+
 ## Protocol
 
 1. Read the issue description for full context
-2. Implement the requested changes
-3. Write tests if appropriate
-4. Commit your work with clear commit messages referencing #$issue
-5. Push your branch: \`git push -u origin $branch\`
-6. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
-7. Exit the session
+2. Read `SGT_CONTEXT.md` for durable project context
+3. Implement the requested changes
+4. Write tests if appropriate
+5. If you learn something future agents should know, append it with `sgt context add $rig "<note>"`
+6. Commit your work with clear commit messages referencing #$issue
+7. Push your branch: \`git push -u origin $branch\`
+8. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
+9. Exit the session
 
 ## Rules
 
@@ -8835,6 +9194,7 @@ Core Commands:
   rig add <name> <repo>         Add a repository as a rig
   rig list                      List registered rigs
   rig remove <name>             Remove a rig
+  context <subcommand>          Shared per-rig memory (path, add, index, search)
   sling <rig> <task> [opts]     Dispatch coding work (issue + branch + polecat)
     --convoy <name>               Add to milestone
     --label <label>               Add label (repeatable)
@@ -8916,10 +9276,15 @@ Environment:
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
+  OPENAI_API_KEY        Required for 'sgt context index/search' embeddings
+  SGT_CONTEXT_EMBED_MODEL  OpenAI embedding model for shared memory (default: text-embedding-3-small)
 
 Examples:
   sgt init
   sgt rig add myapp owner/repo
+  sgt context path myapp
+  sgt context add myapp "Remember to keep deploy scripts idempotent"
+  sgt context search myapp "deploy scripts"
   sgt up                                        # Start full system
   sgt sling myapp "Add user authentication"
   sgt sling myapp "Fix login bug" --label critical --convoy v1.0
@@ -8960,6 +9325,7 @@ main() {
         *)      die "unknown rig command: $sub (try: add, list, remove)" ;;
       esac
       ;;
+    context)        cmd_context "$@" ;;
     sling)          cmd_sling "$@" ;;
     status|st)      cmd_status "$@" ;;
     peek)           cmd_peek "$@" ;;

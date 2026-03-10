@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# test_context_cli.sh — Validate context help/syntax and missing OPENAI_API_KEY failures.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+SGT_SCRIPT="$REPO_ROOT/sgt"
+FAIL=0
+
+TMP_HOME="$(mktemp -d)"
+trap 'rm -rf "$TMP_HOME"' EXIT
+mkdir -p "$TMP_HOME/.local/bin"
+cp "$SGT_SCRIPT" "$TMP_HOME/.local/bin/sgt"
+chmod +x "$TMP_HOME/.local/bin/sgt"
+
+run_cmd() {
+  local command="$1"
+  local out_file="$2"
+  local err_file="$3"
+  local rc_file="$4"
+  local rc
+
+  set +e
+  env -i \
+    HOME="$TMP_HOME" \
+    PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    TERM="${TERM:-xterm}" \
+    bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+  echo "$rc" >"$rc_file"
+}
+
+check_equals() {
+  local name="$1"
+  local got="$2"
+  local want="$3"
+  if [[ "$got" == "$want" ]]; then
+    echo "PASS: $name"
+  else
+    echo "FAIL: $name (expected '$want', got '$got')"
+    FAIL=1
+  fi
+}
+
+check_file_contains() {
+  local name="$1"
+  local file="$2"
+  local pattern="$3"
+  if grep -qE "$pattern" "$file"; then
+    echo "PASS: $name"
+  else
+    echo "FAIL: $name"
+    cat "$file"
+    FAIL=1
+  fi
+}
+
+BASE_OUT="$(mktemp)"
+BASE_ERR="$(mktemp)"
+BASE_RC="$(mktemp)"
+HELPFLAG_OUT="$(mktemp)"
+HELPFLAG_ERR="$(mktemp)"
+HELPFLAG_RC="$(mktemp)"
+HELPWORD_OUT="$(mktemp)"
+HELPWORD_ERR="$(mktemp)"
+HELPWORD_RC="$(mktemp)"
+BAD_OUT="$(mktemp)"
+BAD_ERR="$(mktemp)"
+BAD_RC="$(mktemp)"
+PATH_OUT="$(mktemp)"
+PATH_ERR="$(mktemp)"
+PATH_RC="$(mktemp)"
+INDEX_OUT="$(mktemp)"
+INDEX_ERR="$(mktemp)"
+INDEX_RC="$(mktemp)"
+SEARCH_OUT="$(mktemp)"
+SEARCH_ERR="$(mktemp)"
+SEARCH_RC="$(mktemp)"
+
+trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC"' EXIT
+
+run_cmd "sgt context" "$BASE_OUT" "$BASE_ERR" "$BASE_RC"
+run_cmd "sgt context --help" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC"
+run_cmd "sgt context help" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC"
+run_cmd "sgt context nope" "$BAD_OUT" "$BAD_ERR" "$BAD_RC"
+
+check_equals "sgt context exits 0" "$(cat "$BASE_RC")" "0"
+check_equals "sgt context --help exits 0" "$(cat "$HELPFLAG_RC")" "0"
+check_equals "sgt context help exits 0" "$(cat "$HELPWORD_RC")" "0"
+check_equals "sgt context writes no stderr" "$(wc -c <"$BASE_ERR" | tr -d ' ')" "0"
+check_equals "sgt context --help writes no stderr" "$(wc -c <"$HELPFLAG_ERR" | tr -d ' ')" "0"
+check_equals "sgt context help writes no stderr" "$(wc -c <"$HELPWORD_ERR" | tr -d ' ')" "0"
+
+if diff -u "$BASE_OUT" "$HELPFLAG_OUT" >/dev/null; then
+  echo "PASS: sgt context and sgt context --help output match"
+else
+  echo "FAIL: sgt context and sgt context --help output differ"
+  diff -u "$BASE_OUT" "$HELPFLAG_OUT" || true
+  FAIL=1
+fi
+
+if diff -u "$BASE_OUT" "$HELPWORD_OUT" >/dev/null; then
+  echo "PASS: sgt context and sgt context help output match"
+else
+  echo "FAIL: sgt context and sgt context help output differ"
+  diff -u "$BASE_OUT" "$HELPWORD_OUT" || true
+  FAIL=1
+fi
+
+check_file_contains "context usage includes synopsis" "$BASE_OUT" '^Usage: sgt context <command> \[args\]$'
+check_file_contains "context help includes path command" "$BASE_OUT" '^  path <rig>[[:space:]]+Print the repo-local shared memory path$'
+check_file_contains "unknown context subcommand exits 1" "$BAD_RC" '^1$'
+check_equals "unknown context subcommand writes no stdout" "$(wc -c <"$BAD_OUT" | tr -d ' ')" "0"
+check_file_contains "unknown context subcommand error is explicit" "$BAD_ERR" '^sgt: unknown context command: nope \(try: help, path, add, index, search\)$'
+
+run_cmd "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context path demo" "$PATH_OUT" "$PATH_ERR" "$PATH_RC"
+
+check_equals "sgt context path exits 0" "$(cat "$PATH_RC")" "0"
+check_equals "sgt context path writes no stderr" "$(wc -c <"$PATH_ERR" | tr -d ' ')" "0"
+check_file_contains "context path points at repo-local file" "$PATH_OUT" '/sgt/rigs/demo/SGT_CONTEXT\.md$'
+
+run_cmd "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown'" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC"
+check_equals "sgt context add exits 0 without OPENAI_API_KEY" "$(cat "$INDEX_RC")" "0"
+
+run_cmd "sgt context index demo" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC"
+run_cmd "sgt context search demo 'watchdog cooldown'" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC"
+
+check_file_contains "context index without OPENAI_API_KEY exits 1" "$INDEX_RC" '^1$'
+check_file_contains "context search without OPENAI_API_KEY exits 1" "$SEARCH_RC" '^1$'
+check_equals "context index without key writes no stdout" "$(wc -c <"$INDEX_OUT" | tr -d ' ')" "0"
+check_equals "context search without key writes no stdout" "$(wc -c <"$SEARCH_OUT" | tr -d ' ')" "0"
+check_file_contains "context index missing key error is explicit" "$INDEX_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+check_file_contains "context search missing key error is explicit" "$SEARCH_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+
+if [[ "$FAIL" -ne 0 ]]; then
+  exit 1
+fi
+
+echo "ALL TESTS PASSED"

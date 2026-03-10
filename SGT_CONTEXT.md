@@ -1,0 +1,1 @@
+/root/sgt/rigs/sgt/SGT_CONTEXT.md
