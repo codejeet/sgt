@@ -25,6 +25,27 @@ SGT replaces that with a simpler mental model: GitHub Issues/PRs + tmux + `gh`.
 - Exit `0`: successful run, including when nothing needs cleanup, benign closed-stream conditions, or empty sweep actions.
 - Exit non-zero: real failures only (for example, invalid polecat state files or unrecoverable cleanup errors), with actionable stderr text that includes the polecat name and recommended recovery (`sgt nuke <polecat>`).
 
+## Shared rig memory (`SGT_CONTEXT.md`)
+
+Each rig can keep durable shared memory in a repo-local `SGT_CONTEXT.md` file. Polecats, dogs, CI-fix workers, and crew prompts now instruct agents to read that file before work, use semantic lookup when useful, and append durable notes before exit.
+
+Commands:
+
+```bash
+sgt context path <rig>
+sgt context add <rig> "Remember the deploy script expects staging secrets"
+sgt context index <rig>
+sgt context search <rig> "deploy script secrets"
+```
+
+Implementation details:
+- `sgt context path` prints the shared memory file path and creates a starter `SGT_CONTEXT.md` if missing.
+- `sgt context add` appends a timestamped durable note and opportunistically refreshes the local embedding index when Python and `OPENAI_API_KEY` are available.
+- `sgt context index` rebuilds embeddings with the OpenAI Embeddings API (default model: `text-embedding-3-small`) and persists them under `~/.sgt/context/<rig>/index.json`.
+- `sgt context search` uses that local index plus a fresh query embedding to return the closest shared notes.
+- `OPENAI_API_KEY` is required for `sgt context index` and `sgt context search`; missing-key failures are explicit and non-destructive.
+- If Python is unavailable, `add` still appends the note, while embedding-backed indexing/search fail explicitly.
+
 ## Repo Plans (SGT_PLAN.json) — deterministic parallel + sequential
 
 SGT supports **repo-local work plans** so the system can keep itself fed without relying on LLM planning.
@@ -536,12 +557,13 @@ Witness/refinery re-dispatches also apply live stale-event guards immediately be
 SGT can send delivered OpenClaw alerts when refinery reviews/merges a PR. The mayor also emits minimal event summaries when woken by non-periodic events (dog-approved, merged, orphan-pr queued), and escalated watchdog alerts for stalled `REVIEW_UNCLEAR` refinery items; periodic all-clear checks stay quiet.
 
 1. Create a notification config at `$SGT_ROOT/.sgt/notify.json` (default `~/sgt/.sgt/notify.json`).
-2. Set routing options: `channel` (default `last`), optional `to`, optional `reply_to` (or `reply-to`).
+2. Set routing options: optional `agent` (maps to `openclaw agent --agent ...`, default `gastown`), `channel` (default `last`), optional `to`, optional `reply_to` (or `reply-to`).
 
 Example:
 
 ```json
 {
+  "agent": "gastown",
   "channel": "last",
   "to": "rigger",
   "reply_to": "sgt"

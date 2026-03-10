@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added shared per-rig memory commands: `sgt context path/add/index/search`, backed by repo-local `SGT_CONTEXT.md` files and local embedding indexes under `~/.sgt/context/<rig>/index.json`.
+- `sgt context index/search` now use the OpenAI Embeddings API (default model `text-embedding-3-small`) and fail explicitly when `OPENAI_API_KEY` is missing; `sgt context add` still appends notes even when indexing prerequisites are unavailable.
+- Spawned worker instructions now tell polecats, dogs, CI-fix workers, and crew to read `SGT_CONTEXT.md` before work, use `sgt context search` when useful, and append durable notes with `sgt context add` before wrapping up.
+- OpenClaw notification config now documents per-task routing via optional `agent` in `notify.json`, which maps to `openclaw agent --agent <agent> ...`.
+- Added pragmatic CLI regression coverage for `sgt context` help/syntax and missing-`OPENAI_API_KEY` behavior in `test_context_cli.sh`.
 - Triage follow-up for blocker PR `#161`: confirmed both deltas are superseded on `master` (queue-field quoting now handled by the temp-file `%q` writer path plus parse hardening in `#170`; inconclusive-review behavior superseded by refinery fallback flow from `#167/#169` with follow-up in `#172`), and closed `#161` as superseded to unblock `#173`.
 - Mayor orphan-PR queueing now live-revalidates PR state (`OPEN` required) immediately before queueing; stale open-list snapshots that already became `MERGED`/`CLOSED` are skipped with explicit reason logging (`MAYOR_ORPHAN_SKIP_STALE`).
 - Added regression coverage for stale orphan PR snapshot false-positives in `test_mayor_orphan_stale_snapshot_guard.sh`.
