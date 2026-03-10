@@ -39,6 +39,8 @@ SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-
 SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
 SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
+SGT_PLAN_REQUESTS="$SGT_CONFIG/plan-requests"
+SGT_PLAN_STATE_DIR="$SGT_CONFIG/plan-state"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
 # AI backend (claude|codex)
@@ -179,6 +181,9 @@ _REFINERY_MERGE_RECEIPT_OUTCOME=""
 _REFINERY_MERGE_RECEIPT_RETRY_DECISION=""
 _RESLING_LAST_POLECAT=""
 _RESLING_ISSUE_CLAIM_FILE=""
+_SGT_LAST_SLING_ISSUE_NUMBER=""
+_SGT_LAST_SLING_ISSUE_URL=""
+_SGT_LAST_SLING_POLECAT=""
 
 _decision_log_alert_cooldown_secs() {
   local raw="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}"
@@ -3763,6 +3768,510 @@ EOF
   esac
 }
 
+_openclaw_sender_route() {
+  local notify_out="" agent="" channel="" to="" reply_to=""
+  notify_out="$(_openclaw_notify_config_read || true)"
+  if [[ -n "$notify_out" ]]; then
+    local fields=()
+    while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
+    agent="${fields[0]:-}"
+    channel="${fields[1]:-}"
+    to="${fields[2]:-}"
+    reply_to="${fields[3]:-}"
+  fi
+  [[ -n "$agent" ]] || agent="gastown"
+  [[ -n "$channel" ]] || channel="last"
+  echo "${agent}|${channel}|${to}|${reply_to}"
+}
+
+_resolve_requesting_openclaw_agent_id() {
+  local explicit="${1:-}" env_agent="" notify_to=""
+  if [[ -n "$explicit" ]]; then
+    echo "$explicit"
+    return 0
+  fi
+  env_agent="${SGT_OPENCLAW_AGENT_ID:-${OPENCLAW_AGENT_ID:-}}"
+  if [[ -n "$env_agent" ]]; then
+    echo "$env_agent"
+    return 0
+  fi
+  IFS='|' read -r _ _ notify_to _ <<< "$(_openclaw_sender_route)"
+  if [[ -n "$notify_to" ]]; then
+    echo "$notify_to"
+    return 0
+  fi
+  echo "rigger"
+}
+
+_openclaw_notify_target() {
+  local target="${1:-}" message="${2:-}" prefix="${3:-[SGT]}"
+  local sender_agent channel reply_to configured_to
+  [[ -n "$target" && -n "$message" ]] || return 1
+  command -v openclaw &>/dev/null || return 1
+  IFS='|' read -r sender_agent channel configured_to reply_to <<< "$(_openclaw_sender_route)"
+  local -a cmd=(openclaw agent --agent "$sender_agent" --deliver --message "$prefix $message" --channel "$channel" --to "$target")
+  [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
+  "${cmd[@]}" &>/dev/null &
+  disown 2>/dev/null
+  log_event "OPENCLAW_NOTIFY_TARGET agent=$sender_agent channel=$channel to=$target reply_to=$reply_to message=$message"
+}
+
+_plan_requests_dir() {
+  echo "$SGT_PLAN_REQUESTS"
+}
+
+_plan_request_dir() {
+  local request_id="${1:-}"
+  echo "$(_plan_requests_dir)/$request_id"
+}
+
+_plan_request_meta_path() {
+  local request_id="${1:-}"
+  echo "$(_plan_request_dir "$request_id")/request.env"
+}
+
+_plan_request_prompt_path() {
+  local request_id="${1:-}"
+  echo "$(_plan_request_dir "$request_id")/prompt.md"
+}
+
+_plan_state_path() {
+  local rig="${1:-}"
+  echo "$SGT_PLAN_STATE_DIR/${rig}.json"
+}
+
+_plan_file_path() {
+  local rig="${1:-}"
+  echo "$(rig_path "$rig")/SGT_PLAN.json"
+}
+
+_plan_request_id() {
+  local rig="${1:-}"
+  echo "${rig}-$(date +%s)-$(head -c4 /dev/urandom | xxd -p)"
+}
+
+_read_prompt_input() {
+  local file_path="${1:-}"
+  shift || true
+  if [[ -n "$file_path" ]]; then
+    [[ -f "$file_path" ]] || die "plan prompt file not found: $file_path"
+    cat "$file_path"
+    return 0
+  fi
+  if [[ "${1:-}" == "-" ]] && [[ "$#" -eq 1 ]]; then
+    cat
+    return 0
+  fi
+  printf '%s' "$*"
+}
+
+_context_append_plan_request() {
+  local rig="${1:-}" request_id="${2:-}" requester="${3:-unknown}" prompt="${4:-}" context_file today now_iso
+  context_file="$(_ensure_context_file "$rig")"
+  today="$(date +%F)"
+  now_iso="$(date -Iseconds)"
+  if ! grep -qx "## $today" "$context_file"; then
+    printf '\n## %s\n' "$today" >> "$context_file"
+  fi
+  printf -- '- %s — Plan request %s submitted by OpenClaw agent %s. Full spec appended below.\n' "$now_iso" "$request_id" "$requester" >> "$context_file"
+  cat >> "$context_file" <<EOF
+
+### Plan Request $request_id
+
+- Requested at: $now_iso
+- Requesting OpenClaw agent: $requester
+
+\`\`\`markdown
+$prompt
+\`\`\`
+EOF
+}
+
+_plan_request_write() {
+  local rig="${1:-}" prompt="${2:-}" requester="${3:-}" source="${4:-argv}"
+  local request_id request_dir meta_path prompt_path requested_at
+  request_id="$(_plan_request_id "$rig")"
+  request_dir="$(_plan_request_dir "$request_id")"
+  meta_path="$(_plan_request_meta_path "$request_id")"
+  prompt_path="$(_plan_request_prompt_path "$request_id")"
+  requested_at="$(date -Iseconds)"
+  mkdir -p "$request_dir"
+  printf '%s\n' "$prompt" > "$prompt_path"
+  cat > "$meta_path" <<EOF
+REQUEST_ID=$request_id
+RIG=$rig
+STATUS=pending
+REQUESTED_AT=$requested_at
+REQUESTING_AGENT_ID=$requester
+SOURCE=$source
+PROMPT_FILE=$prompt_path
+PLAN_FILE=$(_plan_file_path "$rig")
+LAST_UPDATED_AT=$requested_at
+QUESTION_COUNT=0
+EOF
+  echo "$request_id"
+}
+
+_plan_request_update_field() {
+  local request_id="${1:-}" field="${2:-}" value="${3:-}"
+  local meta_path
+  meta_path="$(_plan_request_meta_path "$request_id")"
+  [[ -f "$meta_path" ]] || return 1
+  _merge_queue_set_field "$meta_path" "$field" "$value"
+}
+
+_plan_request_ids() {
+  local dir
+  dir="$(_plan_requests_dir)"
+  [[ -d "$dir" ]] || return 0
+  local request_dir
+  for request_dir in "$dir"/*; do
+    [[ -d "$request_dir" ]] || continue
+    [[ -f "$request_dir/request.env" ]] || continue
+    basename "$request_dir"
+  done
+}
+
+_plan_request_list_pending() {
+  local request_id meta_path
+  for request_id in $(_plan_request_ids); do
+    meta_path="$(_plan_request_meta_path "$request_id")"
+    (
+      source "$meta_path"
+      case "${STATUS:-pending}" in
+        pending|needs-clarification)
+          printf '%s|%s|%s|%s|%s|%s\n' \
+            "${REQUEST_ID:-$request_id}" \
+            "${RIG:-}" \
+            "${STATUS:-pending}" \
+            "${REQUESTED_AT:-}" \
+            "${REQUESTING_AGENT_ID:-unknown}" \
+            "${PROMPT_FILE:-}"
+          ;;
+      esac
+    )
+  done
+}
+
+_plan_request_latest_for_rig() {
+  local rig="${1:-}" best_id="" best_ts=0 request_id meta_path ts
+  while IFS='|' read -r found_id found_at found_agent; do
+    ts="$(date -d "${found_at:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)"
+    if (( ts >= best_ts )); then
+      best_ts="$ts"
+      best_id="$found_id|$found_agent"
+    fi
+  done < <(
+    for request_id in $(_plan_request_ids); do
+      meta_path="$(_plan_request_meta_path "$request_id")"
+      (
+        source "$meta_path"
+        [[ "${RIG:-}" == "$rig" ]] || exit 0
+        printf '%s|%s|%s\n' "${REQUEST_ID:-$request_id}" "${REQUESTED_AT:-}" "${REQUESTING_AGENT_ID:-}"
+      )
+    done
+  )
+  [[ -n "$best_id" ]] && echo "$best_id"
+}
+
+_plan_notify_requester() {
+  local rig="${1:-}" message="${2:-}"
+  local latest target request_id
+  latest="$(_plan_request_latest_for_rig "$rig" || true)"
+  [[ -n "$latest" ]] || return 0
+  IFS='|' read -r request_id target <<< "$latest"
+  [[ -n "$target" ]] || return 0
+  _openclaw_notify_target "$target" "$message" "[SGT Plan]" || true
+}
+
+_plan_state_snapshot() {
+  local rig="${1:-}" plan_file="${2:-}" state_file
+  state_file="$(_plan_state_path "$rig")"
+  mkdir -p "$(dirname "$state_file")"
+  python3 - "$rig" "$plan_file" "$state_file" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+rig, plan_file, state_file = sys.argv[1:4]
+DELIM = "\x1f"
+with open(plan_file, "r", encoding="utf-8") as fh:
+    plan = json.load(fh)
+
+state = {}
+if os.path.exists(state_file):
+    try:
+        with open(state_file, "r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except Exception:
+        state = {}
+
+tasks_state = state.get("tasks")
+if not isinstance(tasks_state, dict):
+    tasks_state = {}
+
+max_in_flight = 1
+policy = plan.get("policy")
+if isinstance(policy, dict):
+    value = policy.get("max_in_flight", 1)
+    if isinstance(value, int) and value > 0:
+        max_in_flight = value
+
+tasks = plan.get("tasks")
+if not isinstance(tasks, list):
+    raise SystemExit("plan tasks must be a list")
+
+normalized = {}
+for task in tasks:
+    if not isinstance(task, dict):
+        continue
+    task_id = str(task.get("id", "")).strip()
+    if not task_id:
+        continue
+    current = tasks_state.get(task_id)
+    if not isinstance(current, dict):
+        current = {}
+    current.setdefault("status", "pending")
+    normalized[task_id] = current
+
+doc = {
+    "version": 1,
+    "rig": rig,
+    "plan_file": plan_file,
+    "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "policy": {"max_in_flight": max_in_flight},
+    "tasks": normalized,
+}
+
+tmp = state_file + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
+os.replace(tmp, state_file)
+
+print(f"CONFIG{DELIM}{max_in_flight}")
+for task in tasks:
+    if not isinstance(task, dict):
+        continue
+    task_id = str(task.get("id", "")).strip()
+    if not task_id:
+        continue
+    title = str(task.get("title") or task.get("task") or task_id).replace("\t", " ").replace("\n", " ").strip()
+    task_text = str(task.get("task") or task.get("title") or task_id).replace("\t", " ").replace("\n", " ").strip()
+    deps = task.get("depends_on") or []
+    if not isinstance(deps, list):
+        deps = []
+    deps = [str(dep).strip() for dep in deps if str(dep).strip()]
+    labels = task.get("labels") or []
+    if not isinstance(labels, list):
+      labels = []
+    backend = str(task.get("backend") or "").strip()
+    state_entry = normalized.get(task_id, {})
+    status = str(state_entry.get("status") or "pending").strip()
+    issue_number = str(state_entry.get("issue_number") or "").strip()
+    issue_url = str(state_entry.get("issue_url") or "").strip()
+    print(
+        DELIM.join([
+            "TASK",
+            task_id,
+            title,
+            task_text,
+            ",".join(deps),
+            status,
+            issue_number,
+            issue_url,
+            ",".join(str(label).strip() for label in labels if str(label).strip()),
+            backend,
+        ])
+    )
+PY
+}
+
+_plan_state_update_task() {
+  local rig="${1:-}" task_id="${2:-}" status="${3:-}" issue_number="${4:-}" issue_url="${5:-}"
+  local state_file
+  state_file="$(_plan_state_path "$rig")"
+  mkdir -p "$(dirname "$state_file")"
+  python3 - "$state_file" "$task_id" "$status" "$issue_number" "$issue_url" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+state_file, task_id, status, issue_number, issue_url = sys.argv[1:6]
+doc = {}
+if os.path.exists(state_file):
+    with open(state_file, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+tasks = doc.setdefault("tasks", {})
+entry = tasks.setdefault(task_id, {})
+entry["status"] = status
+if issue_number:
+    entry["issue_number"] = issue_number
+if issue_url:
+    entry["issue_url"] = issue_url
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+entry["updated_at"] = now
+if status in ("dispatched", "in_progress") and "dispatched_at" not in entry:
+    entry["dispatched_at"] = now
+if status == "completed":
+    entry["completed_at"] = now
+doc["updated_at"] = now
+tmp = state_file + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
+os.replace(tmp, state_file)
+PY
+}
+
+_plan_tick_run() {
+  local rig="${1:-}" tick_source="${2:-manual}"
+  local plan_file repo snapshot_line
+  plan_file="$(_plan_file_path "$rig")"
+  [[ -f "$plan_file" ]] || die "plan file not found for rig '$rig': $plan_file"
+  repo="$(rig_repo "$rig")"
+
+  local max_in_flight=1
+  local -a task_ids=()
+  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=()
+  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9; do
+    [[ -n "$record_type" ]] || continue
+    case "$record_type" in
+      CONFIG)
+        max_in_flight="$c1"
+        ;;
+      TASK)
+        task_ids+=("$c1")
+        task_title["$c1"]="$c2"
+        task_text["$c1"]="$c3"
+        task_deps["$c1"]="$c4"
+        task_status["$c1"]="$c5"
+        task_issue["$c1"]="$c6"
+        task_issue_url["$c1"]="$c7"
+        task_labels["$c1"]="$c8"
+        task_backend["$c1"]="$c9"
+        ;;
+    esac
+  done < <(_plan_state_snapshot "$rig" "$plan_file")
+
+  local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0
+  local task_id issue_number issue_state active_polecat
+  for task_id in "${task_ids[@]}"; do
+    issue_number="${task_issue[$task_id]}"
+    if [[ -n "$issue_number" ]]; then
+      issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+      if [[ "$issue_state" == "CLOSED" && "${task_status[$task_id]}" != "completed" ]]; then
+        _plan_state_update_task "$rig" "$task_id" "completed" "$issue_number" "${task_issue_url[$task_id]}"
+        task_status["$task_id"]="completed"
+      elif [[ "$issue_state" == "OPEN" ]]; then
+        active_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)"
+        if [[ -n "$active_polecat" && "${task_status[$task_id]}" != "in_progress" ]]; then
+          _plan_state_update_task "$rig" "$task_id" "in_progress" "$issue_number" "${task_issue_url[$task_id]}"
+          task_status["$task_id"]="in_progress"
+        elif [[ -z "$active_polecat" && "${task_status[$task_id]}" == "pending" ]]; then
+          _plan_state_update_task "$rig" "$task_id" "dispatched" "$issue_number" "${task_issue_url[$task_id]}"
+          task_status["$task_id"]="dispatched"
+        fi
+      fi
+    fi
+    case "${task_status[$task_id]}" in
+      completed) completed=$((completed + 1)) ;;
+      dispatched|in_progress) inflight=$((inflight + 1)) ;;
+    esac
+  done
+
+  local dispatch_budget=$((max_in_flight - inflight))
+  (( dispatch_budget < 0 )) && dispatch_budget=0
+  local deps_ok dep_id label
+  for task_id in "${task_ids[@]}"; do
+    [[ "$dispatch_budget" -gt 0 ]] || break
+    [[ "${task_status[$task_id]}" == "pending" ]] || continue
+    deps_ok="true"
+    IFS=',' read -r -a dep_ids <<< "${task_deps[$task_id]}"
+    for dep_id in "${dep_ids[@]}"; do
+      [[ -n "$dep_id" ]] || continue
+      if [[ "${task_status[$dep_id]:-pending}" != "completed" ]]; then
+        deps_ok="false"
+        break
+      fi
+    done
+    [[ "$deps_ok" == "true" ]] || continue
+
+    _SGT_LAST_SLING_ISSUE_NUMBER=""
+    _SGT_LAST_SLING_ISSUE_URL=""
+    _SGT_LAST_SLING_POLECAT=""
+    local -a sling_args=("$rig" "${task_text[$task_id]}" --label plan --label "plan-$task_id")
+    IFS=',' read -r -a task_label_list <<< "${task_labels[$task_id]}"
+    for label in "${task_label_list[@]}"; do
+      [[ -n "$label" ]] || continue
+      sling_args+=(--label "$label")
+    done
+    if [[ -n "${task_backend[$task_id]}" ]]; then
+      sling_args+=(--backend "${task_backend[$task_id]}")
+    fi
+    cmd_sling "${sling_args[@]}"
+    if [[ -n "${_SGT_LAST_SLING_ISSUE_NUMBER:-}" ]]; then
+      _plan_state_update_task "$rig" "$task_id" "dispatched" "${_SGT_LAST_SLING_ISSUE_NUMBER:-}" "${_SGT_LAST_SLING_ISSUE_URL:-}"
+      task_status["$task_id"]="dispatched"
+      task_issue["$task_id"]="${_SGT_LAST_SLING_ISSUE_NUMBER:-}"
+      dispatched_count=$((dispatched_count + 1))
+      dispatch_budget=$((dispatch_budget - 1))
+      _plan_notify_requester "$rig" "rig=$rig task=$task_id dispatched issue=#${_SGT_LAST_SLING_ISSUE_NUMBER:-unknown} title=\"${task_title[$task_id]}\""
+    fi
+  done
+
+  printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s\n' "$rig" "$total" "$completed" "$inflight" "$dispatched_count" "$tick_source"
+}
+
+cmd_create_plan() {
+  local rig="${1:-}" explicit_agent="" prompt_file="" prompt="" prompt_source="argv"
+  [[ -n "$rig" ]] || die "usage: sgt create plan <rig> <prompt...> [--file <path>] [--agent <openclaw-id>]"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --file) prompt_file="${2:-}"; prompt_source="file"; shift 2 ;;
+      --agent) explicit_agent="${2:-}"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  ensure_init
+  ensure_rig "$rig"
+  if [[ -n "$prompt_file" && "$#" -gt 0 ]]; then
+    die "use either prompt args or --file <path>, not both"
+  fi
+  if [[ "$#" -eq 1 && "${1:-}" == "-" ]]; then
+    prompt_source="stdin"
+  fi
+  prompt="$(_read_prompt_input "$prompt_file" "$@")"
+  prompt="$(printf '%s' "$prompt" | sed 's/[[:space:]]*$//')"
+  [[ -n "$prompt" ]] || die "no plan prompt provided"
+
+  local requester request_id
+  requester="$(_resolve_requesting_openclaw_agent_id "$explicit_agent")"
+  _ensure_context_file "$rig" >/dev/null
+  request_id="$(_plan_request_write "$rig" "$prompt" "$requester" "$prompt_source")"
+  _context_append_plan_request "$rig" "$request_id" "$requester" "$prompt"
+  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    _context_index_build "$rig" >/dev/null 2>&1 || true
+  fi
+  _wake_mayor "create-plan:${rig}:${request_id}"
+  log_event "CREATE_PLAN rig=$rig request_id=$request_id requester=$requester source=$prompt_source"
+  info "plan request recorded: $request_id"
+  info "context updated: $(_context_file_path "$rig")"
+  info "mayor notified: create-plan:${rig}:${request_id}"
+}
+
+cmd_plan_tick() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || die "usage: sgt plan tick <rig>"
+  ensure_init
+  ensure_rig "$rig"
+  local summary total completed inflight dispatched source
+  summary="$(_plan_tick_run "$rig" "manual")"
+  IFS='|' read -r _ _ total completed inflight dispatched source <<< "$summary"
+  info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched)"
+}
+
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
 _openclaw_notify_config_read() {
   local notify_out="" py_bin="" py_parse_notify='import json, sys
@@ -4154,7 +4663,7 @@ list_rigs() {
 # ─── Init ─────────────────────────────────────────────────────────────
 
 cmd_init() {
-  mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs"
+  mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs" "$SGT_PLAN_REQUESTS" "$SGT_PLAN_STATE_DIR"
   touch "$SGT_LOG"
   if [[ ! -f "$SGT_SETTINGS_ENV" ]]; then
     cat > "$SGT_SETTINGS_ENV" <<EOF
@@ -4243,6 +4752,9 @@ cmd_rig_remove() {
 # ─── Sling (Dispatch Work) ────────────────────────────────────────────
 
 cmd_sling() {
+  _SGT_LAST_SLING_ISSUE_NUMBER=""
+  _SGT_LAST_SLING_ISSUE_URL=""
+  _SGT_LAST_SLING_POLECAT=""
   local rig="${1:-}"
   [[ -n "$rig" ]] || die "usage: sgt sling <rig> <task description> [--convoy <milestone>] [--label <label>]"
   shift
@@ -4352,6 +4864,8 @@ cmd_sling() {
     $label_args 2>&1) || die "failed to create issue: $issue_url"
 
   issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
+  _SGT_LAST_SLING_ISSUE_NUMBER="$issue_number"
+  _SGT_LAST_SLING_ISSUE_URL="$issue_url"
   info "issue #$issue_number created: $issue_url"
 
   local mayor_dispatch_trigger_key mayor_dispatch_trigger_reason
@@ -4441,13 +4955,13 @@ PSTATE
   fi
 
   local polecat_prompt
-  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."
-  polecat_prompt+="$readme_prompt"
+  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."  polecat_prompt+="$readme_prompt"
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
     "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
 
   log_event "SLING $pname rig=$rig issue=#$issue_number branch=$branch"
+  _SGT_LAST_SLING_POLECAT="$pname"
   _wake_refinery "$rig" "sling:$pname:#$issue_number"
 
   if _mayor_action_fence_enabled; then
@@ -5781,8 +6295,7 @@ STATUS=running
 PSTATE
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
-
+    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
   _RESLING_LAST_POLECAT="$pname"
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -6166,8 +6679,7 @@ SIG=$sig
 PSTATE
 
   tmux new-session -d -s "$fix_session" -c "$worktree" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Use 'sgt context search ${rig} \"<query>\"' if you need prior project memory. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
-
+    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
   return 0
 }
 
@@ -6920,8 +7432,7 @@ REWORK=true
 DSTATE
 
             tmux new-session -d -s "$new_session" -c "$dog_workspace" \
-              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
-
+              "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. This is a REWORK — previous attempt was rejected. Address the feedback and post improved findings. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${new_dname}:#${d_issue}' 2>/dev/null"
             echo "[refinery/$rig] re-dispatched dog $new_dname for issue #$d_issue"
             log_event "REFINERY_DOG_REWORK_DISPATCHED dog=$new_dname issue=#$d_issue"
           fi
@@ -7289,6 +7800,38 @@ HEADER
       2>/dev/null >> "$briefing_tmp" || echo "  (couldn't fetch)" >> "$briefing_tmp"
     echo "" >> "$briefing_tmp"
   done
+
+  echo "## Pending Plan Requests" >> "$briefing_tmp"
+  local pending_plan_count=0 request_line request_id request_rig request_status request_requested_at request_requester request_prompt_file
+  while IFS='|' read -r request_id request_rig request_status request_requested_at request_requester request_prompt_file; do
+    [[ -n "$request_id" ]] || continue
+    pending_plan_count=$((pending_plan_count + 1))
+    echo "### $request_id ($request_rig)" >> "$briefing_tmp"
+    echo "- status: $request_status" >> "$briefing_tmp"
+    echo "- requested_at: $request_requested_at" >> "$briefing_tmp"
+    echo "- requesting_agent: $request_requester" >> "$briefing_tmp"
+    echo "- plan_path: $(_plan_file_path "$request_rig")" >> "$briefing_tmp"
+    echo "- prompt_excerpt:" >> "$briefing_tmp"
+    head -n 12 "$request_prompt_file" 2>/dev/null | sed 's/^/    /' >> "$briefing_tmp" || true
+    echo "" >> "$briefing_tmp"
+  done < <(_plan_request_list_pending)
+  [[ "$pending_plan_count" -eq 0 ]] && echo "None" >> "$briefing_tmp"
+  echo "" >> "$briefing_tmp"
+
+  echo "## Repo Plans" >> "$briefing_tmp"
+  local plan_count=0 rig_file rname repo plan_path
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    rname="$(basename "$rig_file")"
+    repo="$(cat "$rig_file")"
+    plan_path="$(_plan_file_path "$rname")"
+    if [[ -f "$plan_path" ]]; then
+      plan_count=$((plan_count + 1))
+      echo "- $rname: $plan_path" >> "$briefing_tmp"
+    fi
+  done
+  [[ "$plan_count" -eq 0 ]] && echo "None" >> "$briefing_tmp"
+  echo "" >> "$briefing_tmp"
 
   # Escalation config
   if [[ -f "$SGT_ESCALATION" ]]; then
@@ -8065,6 +8608,34 @@ _mayor_loop() {
       fi
     done
 
+    # === 5b. Auto-tick repo-local plans ===
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched
+      rname="$(basename "$rig_file")"
+      plan_path="$(_plan_file_path "$rname")"
+      [[ -f "$plan_path" ]] || continue
+      if plan_tick_summary="$(_plan_tick_run "$rname" "mayor" 2>/dev/null)"; then
+        IFS='|' read -r _ _ plan_total plan_completed plan_inflight plan_dispatched _ <<< "$plan_tick_summary"
+        if [[ "${plan_dispatched:-0}" =~ ^[0-9]+$ ]] && (( plan_dispatched > 0 )); then
+          actions_taken+="  - auto-ticked plan for $rname (dispatched_now=${plan_dispatched} completed=${plan_completed}/${plan_total})\n"
+        fi
+      else
+        issues_found+="  - repo plan tick failed for $rname\n"
+      fi
+    done
+
+    # === 5c. Pending AI-authored plan requests ===
+    local pending_plan_line pending_plan_count=0
+    while IFS='|' read -r request_id request_rig request_status request_requested_at request_requester request_prompt_file; do
+      [[ -n "$request_id" ]] || continue
+      pending_plan_count=$((pending_plan_count + 1))
+      issues_found+="  - pending plan request $request_id for $request_rig (status=$request_status requester=$request_requester requested_at=$request_requested_at)\n"
+    done < <(_plan_request_list_pending)
+    if (( pending_plan_count > 0 )); then
+      needs_ai=true
+    fi
+
     # === 5. Check for orphaned PRs (open PRs on sgt/* branches with no polecat) ===
     for rig_file in "$SGT_RIGS"/*; do
       [[ -f "$rig_file" ]] || continue
@@ -8207,11 +8778,20 @@ $briefing_content
 
 ## Commands
 - \`sgt sling <rig> "<task>"\` — Dispatch work
+- \`sgt plan tick <rig>\` — Deterministically dispatch ready plan tasks from repo-local \`SGT_PLAN.json\`
 - \`sgt nuke <polecat>\` — Kill stuck worker
 - \`sgt sweep\` — Clean finished workers
 - \`sgt mayor merge <pr#> --repo <repo>\` — Merge PR with post-action live receipt fence
+- \`sgt mayor request list\` — Show pending plan requests
+- \`sgt mayor request ask <request-id> "<question>"\` — Ask the requesting OpenClaw agent for clarification
+- \`sgt mayor request complete <request-id>\` — Mark a plan request complete after writing \`SGT_PLAN.json\`
 
 Decide what to do. Log decisions to $SGT_CONFIG/mayor-decisions.log. Be fast.
+
+For each pending plan request, turn the request into a repo-local \`SGT_PLAN.json\` inside the rig repo when the request is clear enough.
+For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
+If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
+After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
 
 If an issue/PR just merged, you should proactively:
 - queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
@@ -8236,6 +8816,59 @@ MAYORMD
 cmd_mayor_notify() {
   local message="${1:?usage: sgt mayor notify \"<message>\"}"
   _mayor_notify_rigger "$message"
+}
+
+cmd_mayor_request_list() {
+  ensure_init
+  local line request_id rig status requested_at requester prompt_file prompt_preview
+  local count=0
+  while IFS='|' read -r request_id rig status requested_at requester prompt_file; do
+    [[ -n "$request_id" ]] || continue
+    count=$((count + 1))
+    prompt_preview="$(head -n 3 "$prompt_file" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+    echo "$request_id [$status] rig=$rig requester=$requester requested_at=$requested_at"
+    [[ -n "$prompt_preview" ]] && echo "  prompt: ${prompt_preview:0:160}"
+  done < <(_plan_request_list_pending)
+  if [[ "$count" -eq 0 ]]; then
+    info "no pending plan requests"
+  fi
+}
+
+cmd_mayor_request_ask() {
+  local request_id="${1:-}" question="${2:-}"
+  [[ -n "$request_id" ]] || die "usage: sgt mayor request ask <request-id> <question>"
+  [[ -n "$question" ]] || die "usage: sgt mayor request ask <request-id> <question>"
+  ensure_init
+  local meta_path="$(_plan_request_meta_path "$request_id")"
+  [[ -f "$meta_path" ]] || die "plan request '$request_id' not found"
+  local rig requester prompt_file question_count
+  eval "$(grep -E '^(RIG|REQUESTING_AGENT_ID|PROMPT_FILE|QUESTION_COUNT)=' "$meta_path" 2>/dev/null || true)"
+  rig="${RIG:-}"
+  requester="${REQUESTING_AGENT_ID:-}"
+  prompt_file="${PROMPT_FILE:-}"
+  question_count="${QUESTION_COUNT:-0}"
+  [[ -n "$requester" ]] || die "plan request '$request_id' has no requesting OpenClaw agent id"
+  _openclaw_notify_target "$requester" "plan_request=$request_id rig=$rig clarification_needed: $question" "[SGT Mayor]" || die "failed to send OpenClaw clarification"
+  question_count=$((question_count + 1))
+  _plan_request_update_field "$request_id" "STATUS" "needs-clarification"
+  _plan_request_update_field "$request_id" "QUESTION_COUNT" "$question_count"
+  _plan_request_update_field "$request_id" "LAST_QUESTION_AT" "$(date -Iseconds)"
+  _plan_request_update_field "$request_id" "LAST_UPDATED_AT" "$(date -Iseconds)"
+  log_event "MAYOR_PLAN_REQUEST_ASK request_id=$request_id rig=$rig requester=$requester question=\"$(_escape_quotes "$question")\""
+  info "asked $requester about plan request $request_id"
+}
+
+cmd_mayor_request_complete() {
+  local request_id="${1:-}"
+  [[ -n "$request_id" ]] || die "usage: sgt mayor request complete <request-id>"
+  ensure_init
+  local meta_path="$(_plan_request_meta_path "$request_id")"
+  [[ -f "$meta_path" ]] || die "plan request '$request_id' not found"
+  _plan_request_update_field "$request_id" "STATUS" "planned"
+  _plan_request_update_field "$request_id" "COMPLETED_AT" "$(date -Iseconds)"
+  _plan_request_update_field "$request_id" "LAST_UPDATED_AT" "$(date -Iseconds)"
+  log_event "MAYOR_PLAN_REQUEST_COMPLETE request_id=$request_id"
+  info "plan request completed: $request_id"
 }
 
 cmd_mayor_merge() {
@@ -8325,6 +8958,10 @@ Commands:
   start                   Start mayor (AI coordinator)
   stop                    Stop mayor
   notify "<message>"      Send mayor notification to configured channels
+  request list            List pending plan requests
+  request ask <id> "<question>"
+                          Ask the requesting OpenClaw agent for clarification
+  request complete <id>   Mark a plan request complete after writing SGT_PLAN.json
   merge <pr#> --repo <repo> [--auto]
                            Merge PR with post-action receipt verification
   help, --help, -h        Show this help
@@ -8499,8 +9136,7 @@ DSTATE
   # Spawn in tmux
   info "spawning dog $dname..."
   tmux new-session -d -s "$session_name" -c "$dog_workspace" \
-    "$( _ai_cmd "$backend" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Use 'sgt context search ${rig} \"<query>\"' if prior project memory would help. Complete the research task described there. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
-
+    "$( _ai_cmd "$backend" "Read CLAUDE.md and SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Complete the research task described there. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. Post findings to the GitHub issue. Do NOT close the issue." ); echo '[SGT] dog exited'; sgt _wake-refinery '${rig}' 'dog-done:${dname}:#${issue_number}' 2>/dev/null"
   log_event "DOG_SPAWN $dname rig=$rig issue=#$issue_number"
   _wake_refinery "$rig" "dog:$dname:#$issue_number"
 
@@ -8699,8 +9335,7 @@ cmd_crew_wake() {
   fi
 
   tmux new-session -d -s "$c_session" -c "$c_workspace/repo" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md and $c_workspace/repo/SGT_CONTEXT.md before you start. Use 'sgt context search $c_rig \"<query>\"' if prior project memory would help. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. Before you finish, add any durable project context you learned with 'sgt context add $c_rig \"<note>\"'. When done, update your notes." ); echo '[SGT] crew exited'"
-
+    "$( _ai_cmd "$(_ai_backend_default)" "Read $c_workspace/CLAUDE.md and $c_workspace/repo/SGT_CONTEXT.md before you start. Search shared rig context first with 'sgt context search $c_rig \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Read your notes in $c_workspace/notes/ if they exist. Your task: $task. Before you finish, add any durable project context you learned with 'sgt context add $c_rig \"<note>\"'. When done, update your notes." ); echo '[SGT] crew exited'"
   log_event "CREW_WAKE $name task=\"$task\""
   info "crew member '$name' is awake (session: $c_session)"
 }
@@ -9163,18 +9798,18 @@ You are polecat \`$pname\`, an ephemeral coding agent.
 
 ## Shared Project Memory
 
-- Read `SGT_CONTEXT.md` before you start
-- Search prior context with `sgt context search $rig "<query>"`
-- Append durable shared notes with `sgt context add $rig "<note>"`
+- Read \`SGT_CONTEXT.md\` before you start
+- Search prior context with \`sgt context search $rig "<query>"\`
+- Append durable shared notes with \`sgt context add $rig "<note>"\`
 - Before task completion, make sure any durable project context worth keeping has been added
 
 ## Protocol
 
 1. Read the issue description for full context
-2. Read `SGT_CONTEXT.md` for durable project context
+2. Read \`SGT_CONTEXT.md\` for durable project context
 3. Implement the requested changes
 4. Write tests if appropriate
-5. If you learn something future agents should know, append it with `sgt context add $rig "<note>"`
+5. If you learn something future agents should know, append it with \`sgt context add $rig "<note>"\`
 6. Commit your work with clear commit messages referencing #$issue
 7. Push your branch: \`git push -u origin $branch\`
 8. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
@@ -9203,6 +9838,9 @@ Core Commands:
   rig list                      List registered rigs
   rig remove <name>             Remove a rig
   context <subcommand>          Shared per-rig memory (path, add, index, search)
+  create plan <rig> <prompt>    Store a durable planning request and wake the mayor
+    --file <path>                 Read the planning prompt/spec from a file
+    --agent <openclaw-id>         Requester id for mayor clarification routing
   sling <rig> <task> [opts]     Dispatch coding work (issue + branch + polecat)
     --convoy <name>               Add to milestone
     --label <label>               Add label (repeatable)
@@ -9221,7 +9859,7 @@ Agent Commands:
   deacon start|stop             Control the health monitor
   witness start|stop <rig>      Control per-rig polecat monitor
   refinery start|stop <rig>     Control per-rig merge queue
-  mayor [help|start|stop|notify|merge]  Control the AI coordinator
+  mayor [help|start|stop|notify|request|merge]  Control the AI coordinator
   wake-mayor [reason]           Wake the mayor on demand (event-driven)
   nudge <target> <message>      Send message to agent's tmux session
 
@@ -9240,6 +9878,9 @@ Molecules (workflow templates):
   molecule init                 Create default molecule templates
   molecule list                 List available molecules
   molecule run <mol> <rig> <desc>  Execute a multi-step workflow
+
+Plans:
+  plan tick <rig>               Read SGT_PLAN.json and dispatch ready tasks
 
 Security:
   label init [rig]              Create sgt-authorized label (on rig or all rigs)
@@ -9293,6 +9934,10 @@ Examples:
   sgt context path myapp
   sgt context add myapp "Remember to keep deploy scripts idempotent"
   sgt context search myapp "deploy scripts"
+  sgt create plan myapp "Implement multi-tenant billing and rollout safely"
+  sgt create plan myapp --file /tmp/spec.md
+  cat whitepaper.md | sgt create plan myapp -
+  sgt plan tick myapp
   sgt up                                        # Start full system
   sgt sling myapp "Add user authentication"
   sgt sling myapp "Fix login bug" --label critical --convoy v1.0
@@ -9334,6 +9979,14 @@ main() {
       esac
       ;;
     context)        cmd_context "$@" ;;
+    create)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        plan) cmd_create_plan "$@" ;;
+        *)    die "unknown create command: $sub (try: plan)" ;;
+      esac
+      ;;
     sling)          cmd_sling "$@" ;;
     status|st)      cmd_status "$@" ;;
     peek)           cmd_peek "$@" ;;
@@ -9395,8 +10048,26 @@ main() {
         start)   cmd_mayor_start ;;
         stop)    cmd_mayor_stop ;;
         notify)  cmd_mayor_notify "$@" ;;
+        request)
+          local request_sub="${1:-}"
+          shift 2>/dev/null || true
+          case "$request_sub" in
+            list|ls)    cmd_mayor_request_list ;;
+            ask)        cmd_mayor_request_ask "$@" ;;
+            complete)   cmd_mayor_request_complete "$@" ;;
+            *)          die "unknown mayor request command: $request_sub (try: list, ask, complete)" ;;
+          esac
+          ;;
         merge)   cmd_mayor_merge "$@" ;;
-        *)       die "unknown mayor command: $sub (try: help, start, stop, notify, merge)" ;;
+        *)       die "unknown mayor command: $sub (try: help, start, stop, notify, request, merge)" ;;
+      esac
+      ;;
+    plan)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        tick) cmd_plan_tick "$@" ;;
+        *)    die "unknown plan command: $sub (try: tick)" ;;
       esac
       ;;
     wake-mayor) cmd_wake_mayor "$@" ;;
