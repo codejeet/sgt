@@ -41,6 +41,7 @@ SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 mi
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 SGT_PLAN_REQUESTS="$SGT_CONFIG/plan-requests"
 SGT_PLAN_STATE_DIR="$SGT_CONFIG/plan-state"
+SGT_ACCEPTANCE_BLOCKERS="$SGT_CONFIG/acceptance-blockers"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
 # AI backend (claude|codex)
@@ -3820,6 +3821,40 @@ _plan_requests_dir() {
   echo "$SGT_PLAN_REQUESTS"
 }
 
+_acceptance_blockers_dir() {
+  echo "$SGT_ACCEPTANCE_BLOCKERS"
+}
+
+_acceptance_blocker_dir() {
+  local blocker_id="${1:-}"
+  echo "$(_acceptance_blockers_dir)/$blocker_id"
+}
+
+_acceptance_blocker_meta_path() {
+  local blocker_id="${1:-}"
+  echo "$(_acceptance_blocker_dir "$blocker_id")/blocker.env"
+}
+
+_acceptance_blocker_evidence_path() {
+  local blocker_id="${1:-}"
+  echo "$(_acceptance_blocker_dir "$blocker_id")/evidence.md"
+}
+
+_acceptance_blocker_id() {
+  local rig="${1:-}"
+  echo "${rig}-acceptance-$(date +%s)-$(head -c4 /dev/urandom | xxd -p)"
+}
+
+_acceptance_blocker_title() {
+  local evidence="${1:-}" title
+  title="$(printf '%s\n' "$evidence" | awk 'NF {print; exit}')"
+  title="$(printf '%s' "$title" | tr '\t' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [[ -z "$title" ]]; then
+    title="Verified acceptance blocker"
+  fi
+  printf '%.120s' "$title"
+}
+
 _plan_request_dir() {
   local request_id="${1:-}"
   echo "$(_plan_requests_dir)/$request_id"
@@ -3887,6 +3922,44 @@ $prompt
 EOF
 }
 
+_context_append_acceptance_blocker() {
+  local rig="${1:-}" blocker_id="${2:-}" requester="${3:-unknown}" title="${4:-}" evidence="${5:-}" context_file today now_iso
+  context_file="$(_ensure_context_file "$rig")"
+  today="$(date +%F)"
+  now_iso="$(date -Iseconds)"
+  if ! grep -qx "## $today" "$context_file"; then
+    printf '\n## %s\n' "$today" >> "$context_file"
+  fi
+  printf -- '- %s — Acceptance blocker %s reported by %s: %s\n' "$now_iso" "$blocker_id" "$requester" "$title" >> "$context_file"
+  cat >> "$context_file" <<EOF
+
+### Acceptance Blocker $blocker_id
+
+- Reported at: $now_iso
+- Reported by: $requester
+- Title: $title
+
+\`\`\`markdown
+$evidence
+\`\`\`
+EOF
+}
+
+_context_append_acceptance_blocker_resolution() {
+  local blocker_id="${1:-}" rig="${2:-}" note="${3:-}" context_file today now_iso
+  context_file="$(_ensure_context_file "$rig")"
+  today="$(date +%F)"
+  now_iso="$(date -Iseconds)"
+  if ! grep -qx "## $today" "$context_file"; then
+    printf '\n## %s\n' "$today" >> "$context_file"
+  fi
+  if [[ -n "$note" ]]; then
+    printf -- '- %s — Acceptance blocker %s resolved. Note: %s\n' "$now_iso" "$blocker_id" "$note" >> "$context_file"
+  else
+    printf -- '- %s — Acceptance blocker %s resolved.\n' "$now_iso" "$blocker_id" >> "$context_file"
+  fi
+}
+
 _plan_request_write() {
   local rig="${1:-}" prompt="${2:-}" requester="${3:-}" source="${4:-argv}"
   local request_id request_dir meta_path prompt_path requested_at
@@ -3912,10 +3985,43 @@ EOF
   echo "$request_id"
 }
 
+_acceptance_blocker_write() {
+  local rig="${1:-}" evidence="${2:-}" requester="${3:-}" source="${4:-argv}"
+  local blocker_id blocker_dir meta_path evidence_path created_at title
+  blocker_id="$(_acceptance_blocker_id "$rig")"
+  blocker_dir="$(_acceptance_blocker_dir "$blocker_id")"
+  meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
+  evidence_path="$(_acceptance_blocker_evidence_path "$blocker_id")"
+  created_at="$(date -Iseconds)"
+  title="$(_acceptance_blocker_title "$evidence")"
+  mkdir -p "$blocker_dir"
+  printf '%s\n' "$evidence" > "$evidence_path"
+  {
+    printf 'BLOCKER_ID=%q\n' "$blocker_id"
+    printf 'RIG=%q\n' "$rig"
+    printf 'STATUS=%q\n' "open"
+    printf 'CREATED_AT=%q\n' "$created_at"
+    printf 'REQUESTING_AGENT_ID=%q\n' "$requester"
+    printf 'SOURCE=%q\n' "$source"
+    printf 'TITLE=%q\n' "$title"
+    printf 'EVIDENCE_FILE=%q\n' "$evidence_path"
+    printf 'LAST_UPDATED_AT=%q\n' "$created_at"
+  } > "$meta_path"
+  echo "$blocker_id"
+}
+
 _plan_request_update_field() {
   local request_id="${1:-}" field="${2:-}" value="${3:-}"
   local meta_path
   meta_path="$(_plan_request_meta_path "$request_id")"
+  [[ -f "$meta_path" ]] || return 1
+  _merge_queue_set_field "$meta_path" "$field" "$value"
+}
+
+_acceptance_blocker_update_field() {
+  local blocker_id="${1:-}" field="${2:-}" value="${3:-}"
+  local meta_path
+  meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
   [[ -f "$meta_path" ]] || return 1
   _merge_queue_set_field "$meta_path" "$field" "$value"
 }
@@ -3929,6 +4035,41 @@ _plan_request_ids() {
     [[ -d "$request_dir" ]] || continue
     [[ -f "$request_dir/request.env" ]] || continue
     basename "$request_dir"
+  done
+}
+
+_acceptance_blocker_ids() {
+  local dir
+  dir="$(_acceptance_blockers_dir)"
+  [[ -d "$dir" ]] || return 0
+  local blocker_dir
+  for blocker_dir in "$dir"/*; do
+    [[ -d "$blocker_dir" ]] || continue
+    [[ -f "$blocker_dir/blocker.env" ]] || continue
+    basename "$blocker_dir"
+  done
+}
+
+_acceptance_blocker_list_active() {
+  local rig_filter="${1:-}" blocker_id meta_path
+  for blocker_id in $(_acceptance_blocker_ids); do
+    meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
+    (
+      source "$meta_path"
+      [[ -z "$rig_filter" || "${RIG:-}" == "$rig_filter" ]] || exit 0
+      case "${STATUS:-open}" in
+        open|needs-followup)
+          printf '%s|%s|%s|%s|%s|%s|%s\n' \
+            "${BLOCKER_ID:-$blocker_id}" \
+            "${RIG:-}" \
+            "${STATUS:-open}" \
+            "${CREATED_AT:-}" \
+            "${REQUESTING_AGENT_ID:-unknown}" \
+            "${TITLE:-Verified acceptance blocker}" \
+            "${EVIDENCE_FILE:-}"
+          ;;
+      esac
+    )
   done
 }
 
@@ -3982,6 +4123,43 @@ _plan_notify_requester() {
   IFS='|' read -r request_id target <<< "$latest"
   [[ -n "$target" ]] || return 0
   _openclaw_notify_target "$target" "$message" "[SGT Plan]" || true
+}
+
+_mayor_rig_actionable_work_counts() {
+  local rig="${1:-}" repo="${2:-}"
+  local open_prs open_authorized open_polecats pending_plan_requests
+  open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || true)"
+  open_authorized="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number --jq 'length' 2>/dev/null || true)"
+  open_polecats="$(_active_polecat_count "$rig")"
+  pending_plan_requests=0
+  while IFS='|' read -r request_id request_rig _; do
+    [[ -n "$request_id" ]] || continue
+    [[ "$request_rig" == "$rig" ]] || continue
+    pending_plan_requests=$((pending_plan_requests + 1))
+  done < <(_plan_request_list_pending)
+  [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=0
+  [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=0
+  [[ "$open_polecats" =~ ^[0-9]+$ ]] || open_polecats=0
+  printf '%s|%s|%s|%s\n' "$open_prs" "$open_authorized" "$open_polecats" "$pending_plan_requests"
+}
+
+_mayor_acceptance_blocker_scan() {
+  local blocker_line blocker_id rig _status created_at requester title evidence_file repo counts
+  local open_prs open_authorized open_polecats pending_plan_requests disposition
+  while IFS='|' read -r blocker_id rig _status created_at requester title evidence_file; do
+    [[ -n "$blocker_id" && -n "$rig" ]] || continue
+    repo="$(rig_repo "$rig" 2>/dev/null || true)"
+    [[ -n "$repo" ]] || continue
+    counts="$(_mayor_rig_actionable_work_counts "$rig" "$repo")"
+    IFS='|' read -r open_prs open_authorized open_polecats pending_plan_requests <<< "$counts"
+    disposition="tracking-existing-work"
+    if (( open_prs == 0 && open_authorized == 0 && open_polecats == 0 && pending_plan_requests == 0 )); then
+      disposition="needs-ai-followup"
+    fi
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$blocker_id" "$rig" "$title" "$requester" "$created_at" "$disposition" "$evidence_file" \
+      "$open_prs" "$open_authorized" "$open_polecats" "$pending_plan_requests"
+  done < <(_acceptance_blocker_list_active)
 }
 
 _plan_state_snapshot() {
@@ -4259,6 +4437,98 @@ cmd_create_plan() {
   info "plan request recorded: $request_id"
   info "context updated: $(_context_file_path "$rig")"
   info "mayor notified: create-plan:${rig}:${request_id}"
+}
+
+cmd_create_blocker() {
+  local rig="${1:-}" explicit_agent="" evidence_file="" evidence="" evidence_source="argv"
+  [[ -n "$rig" ]] || die "usage: sgt create blocker <rig> <evidence...> [--file <path>] [--agent <openclaw-id>]"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --file) evidence_file="${2:-}"; evidence_source="file"; shift 2 ;;
+      --agent) explicit_agent="${2:-}"; shift 2 ;;
+      *) break ;;
+    esac
+  done
+  ensure_init
+  ensure_rig "$rig"
+  if [[ -n "$evidence_file" && "$#" -gt 0 ]]; then
+    die "use either blocker evidence args or --file <path>, not both"
+  fi
+  if [[ "$#" -eq 1 && "${1:-}" == "-" ]]; then
+    evidence_source="stdin"
+  fi
+  evidence="$(_read_prompt_input "$evidence_file" "$@")"
+  evidence="$(printf '%s' "$evidence" | sed 's/[[:space:]]*$//')"
+  [[ -n "$evidence" ]] || die "no blocker evidence provided"
+
+  local requester blocker_id title
+  requester="$(_resolve_requesting_openclaw_agent_id "$explicit_agent")"
+  title="$(_acceptance_blocker_title "$evidence")"
+  _ensure_context_file "$rig" >/dev/null
+  blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$evidence_source")"
+  _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence"
+  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    _context_index_build "$rig" >/dev/null 2>&1 || true
+  fi
+  _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
+  log_event "ACCEPTANCE_BLOCKER_CREATE rig=$rig blocker_id=$blocker_id requester=$requester source=$evidence_source title=\"$(_escape_quotes "$title")\""
+  info "acceptance blocker recorded: $blocker_id"
+  info "title: $title"
+  info "context updated: $(_context_file_path "$rig")"
+  info "mayor notified: acceptance-blocker:${rig}:${blocker_id}"
+}
+
+cmd_blocker_list() {
+  local rig="${1:-}" blocker_count=0 blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title
+  ensure_init
+  while IFS='|' read -r blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title _; do
+    [[ -n "$blocker_id" ]] || continue
+    blocker_count=$((blocker_count + 1))
+    echo "$blocker_id [$blocker_status]"
+    echo "  rig:       $blocker_rig"
+    echo "  title:     $blocker_title"
+    echo "  reporter:  $blocker_requester"
+    echo "  created:   $blocker_created"
+  done < <(_acceptance_blocker_list_active "$rig")
+  if [[ "$blocker_count" -eq 0 ]]; then
+    if [[ -n "$rig" ]]; then
+      info "no active acceptance blockers for $rig"
+    else
+      info "no active acceptance blockers"
+    fi
+  fi
+}
+
+cmd_blocker_resolve() {
+  local blocker_id="${1:-}" note=""
+  [[ -n "$blocker_id" ]] || die "usage: sgt blocker resolve <blocker-id> [--note <text>]"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --note) note="${2:-}"; shift 2 ;;
+      *) die "usage: sgt blocker resolve <blocker-id> [--note <text>]" ;;
+    esac
+  done
+  ensure_init
+  local meta_path rig title
+  meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
+  [[ -f "$meta_path" ]] || die "acceptance blocker '$blocker_id' not found"
+  source "$meta_path"
+  rig="${RIG:-}"
+  title="${TITLE:-Verified acceptance blocker}"
+  _acceptance_blocker_update_field "$blocker_id" "STATUS" "resolved"
+  _acceptance_blocker_update_field "$blocker_id" "RESOLVED_AT" "$(date -Iseconds)"
+  _acceptance_blocker_update_field "$blocker_id" "LAST_UPDATED_AT" "$(date -Iseconds)"
+  if [[ -n "$note" ]]; then
+    _acceptance_blocker_update_field "$blocker_id" "RESOLUTION_NOTE" "$note"
+  fi
+  _context_append_acceptance_blocker_resolution "$blocker_id" "$rig" "$note"
+  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    _context_index_build "$rig" >/dev/null 2>&1 || true
+  fi
+  log_event "ACCEPTANCE_BLOCKER_RESOLVE rig=$rig blocker_id=$blocker_id title=\"$(_escape_quotes "$title")\""
+  info "acceptance blocker resolved: $blocker_id"
 }
 
 cmd_plan_tick() {
@@ -4663,7 +4933,7 @@ list_rigs() {
 # ─── Init ─────────────────────────────────────────────────────────────
 
 cmd_init() {
-  mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs" "$SGT_PLAN_REQUESTS" "$SGT_PLAN_STATE_DIR"
+  mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS" "$SGT_ROOT/rigs" "$SGT_ROOT/polecats" "$SGT_CONFIG/merge-queue" "$SGT_CONFIG/dogs" "$SGT_PLAN_REQUESTS" "$SGT_PLAN_STATE_DIR" "$SGT_ACCEPTANCE_BLOCKERS"
   touch "$SGT_LOG"
   if [[ ! -f "$SGT_SETTINGS_ENV" ]]; then
     cat > "$SGT_SETTINGS_ENV" <<EOF
@@ -8636,6 +8906,30 @@ _mayor_loop() {
       needs_ai=true
     fi
 
+    # === 5d. Unresolved acceptance blockers ===
+    local acceptance_blocker_line acceptance_blocker_count=0 acceptance_blockers_prompt=""
+    local blocker_id blocker_rig blocker_title blocker_requester blocker_created blocker_disposition blocker_evidence_file
+    local blocker_open_prs blocker_open_authorized blocker_open_polecats blocker_pending_plan_requests
+    while IFS='|' read -r blocker_id blocker_rig blocker_title blocker_requester blocker_created blocker_disposition blocker_evidence_file blocker_open_prs blocker_open_authorized blocker_open_polecats blocker_pending_plan_requests; do
+      [[ -n "$blocker_id" ]] || continue
+      acceptance_blocker_count=$((acceptance_blocker_count + 1))
+      issues_found+="  - acceptance blocker $blocker_id on $blocker_rig: $blocker_title (reporter=$blocker_requester created_at=$blocker_created"
+      if [[ "$blocker_disposition" == "needs-ai-followup" ]]; then
+        issues_found+="; no actionable work remains, recreate follow-up work)\n"
+        needs_ai=true
+      else
+        issues_found+="; active_work open_issues=${blocker_open_authorized} open_prs=${blocker_open_prs} open_polecats=${blocker_open_polecats} pending_plan_requests=${blocker_pending_plan_requests})\n"
+      fi
+      if [[ -f "$blocker_evidence_file" ]]; then
+        acceptance_blockers_prompt+="### Acceptance Blocker $blocker_id ($blocker_rig)\n"
+        acceptance_blockers_prompt+="- Title: $blocker_title\n"
+        acceptance_blockers_prompt+="- Reported by: $blocker_requester\n"
+        acceptance_blockers_prompt+="- Created at: $blocker_created\n"
+        acceptance_blockers_prompt+="- Rig state: open_prs=${blocker_open_prs} open_authorized_issues=${blocker_open_authorized} open_polecats=${blocker_open_polecats} pending_plan_requests=${blocker_pending_plan_requests} disposition=${blocker_disposition}\n\n"
+        acceptance_blockers_prompt+="$(cat "$blocker_evidence_file" 2>/dev/null)\n\n"
+      fi
+    done < <(_mayor_acceptance_blocker_scan)
+
     # === 5. Check for orphaned PRs (open PRs on sgt/* branches with no polecat) ===
     for rig_file in "$SGT_RIGS"/*; do
       [[ -f "$rig_file" ]] || continue
@@ -8773,6 +9067,9 @@ $(echo -e "$actions_taken")
 Snapshot freshness notes:
 $(echo -e "${snapshot_freshness:-  - none}")
 
+Known unresolved acceptance blockers:
+$(echo -e "${acceptance_blockers_prompt:-  - none}")
+
 ## System State
 $briefing_content
 
@@ -8796,6 +9093,10 @@ After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete 
 If an issue/PR just merged, you should proactively:
 - queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
 - prefer keeping each issue small enough for an overnight polecat
+
+An unresolved acceptance blocker means verified user-facing acceptance is still red.
+Do not treat an empty board as success while any blocker remains open.
+If a blocker has no active work left, recreate actionable follow-up work or a plan before standing down.
 
 After deciding, report your actions: sgt mayor notify "<summary of what you did>"
 MAYORMD
@@ -9841,6 +10142,9 @@ Core Commands:
   create plan <rig> <prompt>    Store a durable planning request and wake the mayor
     --file <path>                 Read the planning prompt/spec from a file
     --agent <openclaw-id>         Requester id for mayor clarification routing
+  create blocker <rig> <evidence> Store a durable verified acceptance blocker and wake the mayor
+    --file <path>                 Read blocker evidence from a file
+    --agent <openclaw-id>         Reporter id for follow-up routing
   sling <rig> <task> [opts]     Dispatch coding work (issue + branch + polecat)
     --convoy <name>               Add to milestone
     --label <label>               Add label (repeatable)
@@ -9881,6 +10185,8 @@ Molecules (workflow templates):
 
 Plans:
   plan tick <rig>               Read SGT_PLAN.json and dispatch ready tasks
+  blocker list [rig]            List active acceptance blockers
+  blocker resolve <id>          Mark an acceptance blocker resolved
 
 Security:
   label init [rig]              Create sgt-authorized label (on rig or all rigs)
@@ -9937,6 +10243,8 @@ Examples:
   sgt create plan myapp "Implement multi-tenant billing and rollout safely"
   sgt create plan myapp --file /tmp/spec.md
   cat whitepaper.md | sgt create plan myapp -
+  sgt create blocker myapp "Verified acceptance still fails after merge: checkout is red"
+  sgt blocker list myapp
   sgt plan tick myapp
   sgt up                                        # Start full system
   sgt sling myapp "Add user authentication"
@@ -9984,7 +10292,8 @@ main() {
       shift 2>/dev/null || true
       case "$sub" in
         plan) cmd_create_plan "$@" ;;
-        *)    die "unknown create command: $sub (try: plan)" ;;
+        blocker) cmd_create_blocker "$@" ;;
+        *)    die "unknown create command: $sub (try: plan, blocker)" ;;
       esac
       ;;
     sling)          cmd_sling "$@" ;;
@@ -10068,6 +10377,15 @@ main() {
       case "$sub" in
         tick) cmd_plan_tick "$@" ;;
         *)    die "unknown plan command: $sub (try: tick)" ;;
+      esac
+      ;;
+    blocker)
+      local sub="${1:-list}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        list|ls)  cmd_blocker_list "$@" ;;
+        resolve)  cmd_blocker_resolve "$@" ;;
+        *)        die "unknown blocker command: $sub (try: list, resolve)" ;;
       esac
       ;;
     wake-mayor) cmd_wake_mayor "$@" ;;
