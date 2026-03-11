@@ -119,6 +119,9 @@ echo "=== mayor stable spawn exec resolution ==="
 echo "=== mayor startup validation and spawn failure logging ==="
 "$REPO_ROOT/test_mayor_startup_validation.sh"
 
+echo "=== mayor durable startup receipt ==="
+"$REPO_ROOT/test_mayor_durable_start_receipt.sh"
+
 echo "=== mayor stale required CI check watchdog ==="
 "$REPO_ROOT/test_mayor_ci_check_watchdog.sh"
 
@@ -127,6 +130,9 @@ echo "=== mayor decision log durability ==="
 
 echo "=== mayor merge-queue alias dedupe ==="
 "$REPO_ROOT/test_mayor_merge_queue_alias_dedupe.sh"
+
+echo "=== witness stalled worker follow-up guard ==="
+"$REPO_ROOT/test_witness_stalled_followup_guard.sh"
 
 echo "=== refinery stale queue item guard ==="
 "$REPO_ROOT/test_refinery_stale_queue_item.sh"
