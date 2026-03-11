@@ -194,6 +194,11 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
   "version": 1,
   "rig": "demo",
   "policy": { "max_in_flight": 1 },
+  "completion_condition": "Run the feature end-to-end on latest main from a fresh state path.",
+  "acceptance": {
+    "status": "pending",
+    "details": "Verify after code lands."
+  },
   "tasks": [
     { "id": "spec", "title": "Write the implementation spec" },
     { "id": "impl", "title": "Implement the feature", "depends_on": ["spec"] }
@@ -202,7 +207,7 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
 JSON
 
 sgt create plan demo --agent requester-9 "Build the feature from the whitepaper" >/dev/null
-sgt plan tick demo >/dev/null
+sgt plan tick demo > "$HOME/first-plan-tick.out" 2>&1
 BASH
 
 state_file="$TMP_HOME/sgt/.sgt/plan-state/demo.json"
@@ -215,12 +220,19 @@ with open(path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
 spec = data["tasks"]["spec"]
 impl = data["tasks"]["impl"]
+completion = data["completion"]
 assert spec["status"] in ("dispatched", "in_progress"), spec
 assert str(spec.get("issue_number")) == "1", spec
 assert impl["status"] == "pending", impl
+assert completion["status"] == "pending", completion
+assert completion["rollup"] == "tasks-in-progress", completion
 PY
 
 grep -q -- '--to requester-9' "$TMP_HOME/openclaw.calls" || { echo "expected requester notification on first plan dispatch" >&2; exit 1; }
+grep -q 'completion=tasks-in-progress status=pending' "$TMP_HOME/first-plan-tick.out" || {
+  echo "expected first plan tick summary to include pending completion status" >&2
+  exit 1
+}
 
 printf 'STATE=%q\nREPO=%q\nTITLE=%q\n' \
   'CLOSED' \
@@ -228,7 +240,7 @@ printf 'STATE=%q\nREPO=%q\nTITLE=%q\n' \
   'Write the implementation spec' \
   > "$TMP_HOME/state/issues/1.env"
 
-env -i "${COMMON_ENV[@]}" bash --noprofile --norc -c 'sgt plan tick demo >/dev/null'
+env -i "${COMMON_ENV[@]}" bash --noprofile --norc -c 'sgt plan tick demo > "$HOME/second-plan-tick.out" 2>&1'
 
 python3 - "$state_file" <<'PY'
 import json, sys
@@ -237,14 +249,41 @@ with open(path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
 spec = data["tasks"]["spec"]
 impl = data["tasks"]["impl"]
+completion = data["completion"]
 assert spec["status"] == "completed", spec
 assert str(impl.get("issue_number")) == "2", impl
 assert impl["status"] in ("dispatched", "in_progress"), impl
+assert completion["status"] == "pending", completion
+assert completion["rollup"] == "tasks-in-progress", completion
 PY
 
 if [[ "$(grep -c -- '--to requester-9' "$TMP_HOME/openclaw.calls")" -lt 2 ]]; then
   echo "expected requester notification on second plan dispatch" >&2
   exit 1
 fi
+
+printf 'STATE=%q\nREPO=%q\nTITLE=%q\n' \
+  'CLOSED' \
+  'https://github.com/acme/demo' \
+  'Implement the feature' \
+  > "$TMP_HOME/state/issues/2.env"
+
+env -i "${COMMON_ENV[@]}" bash --noprofile --norc -c 'sgt plan tick demo > "$HOME/third-plan-tick.out" 2>&1'
+
+python3 - "$state_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+completion = data["completion"]
+assert completion["status"] == "pending", completion
+assert completion["rollup"] == "tasks-exhausted-awaiting-acceptance", completion
+assert completion["condition"] == "Run the feature end-to-end on latest main from a fresh state path.", completion
+PY
+
+grep -q 'completion=tasks-exhausted-awaiting-acceptance status=pending' "$TMP_HOME/third-plan-tick.out" || {
+  echo "expected final plan tick summary to include tasks-exhausted acceptance rollup" >&2
+  exit 1
+}
 
 echo "ALL TESTS PASSED"

@@ -77,6 +77,7 @@ sgt create plan <rig> --agent <openclaw-id> "<prompt>"
 - **How it runs**:
   - Mayor calls `sgt plan tick <rig>` automatically for any rig that contains `SGT_PLAN.json`.
   - `sgt plan tick` queues “ready” tasks up to `policy.max_in_flight`.
+  - If the plan declares a `completion_condition` and/or `acceptance` block, mayor will not treat “all tasks merged” as sufficient completion until acceptance is `verified`, `waived`, or explicitly `blocked`.
   - Plan state is stored at: `~/sgt/.sgt/plan-state/<rig>.json`
 
 ### Minimal schema
@@ -86,12 +87,27 @@ sgt create plan <rig> --agent <openclaw-id> "<prompt>"
   "version": 1,
   "rig": "scrapegoat",
   "policy": { "max_in_flight": 2 },
+  "completion_condition": "On latest main, the operator can complete a fresh-state smoke test successfully.",
+  "acceptance": {
+    "status": "pending",
+    "details": "Verify on latest main after merge.",
+    "machine_readable": {
+      "kind": "smoke-test",
+      "command": "./scripts/smoke.sh --fresh"
+    }
+  },
   "tasks": [
     { "id": "ci", "title": "Add CI", "depends_on": [] },
     { "id": "lint-fix", "title": "Fix lint", "depends_on": ["ci"] }
   ]
 }
 ```
+
+Acceptance status values:
+- `pending`: declared but not yet satisfied
+- `verified`: acceptance condition has been met
+- `blocked`: waiting on an external condition; mayor should not mark all-clear
+- `waived`: a human explicitly waived the condition
 
 ### Manual control
 
