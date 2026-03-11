@@ -69,7 +69,15 @@ tmux() {
   return 0
 }
 
+set +e
 cmd_mayor_start
+rc=$?
+set -e
+
+if [[ "$rc" -eq 0 ]]; then
+  echo "expected startup validation failure to return non-zero" >&2
+  exit 1
+fi
 
 if ! grep -q 'MAYOR_SPAWN attempt=mayor-start-' "$EVENT_LOG"; then
   echo "expected structured MAYOR_SPAWN event" >&2
@@ -77,6 +85,10 @@ if ! grep -q 'MAYOR_SPAWN attempt=mayor-start-' "$EVENT_LOG"; then
 fi
 if ! grep -q 'MAYOR_SPAWN_FAILED reason_code=startup-validation-failed' "$EVENT_LOG"; then
   echo "expected explicit mayor spawn failure event" >&2
+  exit 1
+fi
+if ! grep -q 'MAYOR_START_FAILED reason_code=startup-validation-failed' "$EVENT_LOG"; then
+  echo "expected explicit mayor start failure event" >&2
   exit 1
 fi
 if [[ ! -f "$SGT_CONFIG/mayor-start-failure.state" ]]; then

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Mayor background spawns now prefer the stable `sgt` executable found on `PATH` over the current polecat worktree script path, preventing post-merge mayor restart loops after the originating worktree is cleaned up.
+- Mayor startup now emits distinct failure telemetry for both `tmux` spawn failures (`MAYOR_SPAWN_FAILED reason_code=tmux-new-session-failed`) and startup receipt timeouts (`MAYOR_START_FAILED ...`) so supervision failures are explicit in logs/status.
+- Added deterministic regression coverage for post-merge mayor exec resolution and tmux spawn failure telemetry in `test_mayor_spawn_exec_resolution.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Mayor bootstrap now validates that each tmux spawn actually reaches `_mayor_loop` via a durable startup receipt, logs explicit `MAYOR_SPAWN_FAILED` events plus a persisted startup warning state when validation fails, and writes bootstrap output to `~/.sgt/mayor-start.log` for postmortem inspection.
 - Mayor tmux spawns now use the resolved `sgt` executable path instead of a bare PATH-dependent `sgt` command, which fixes deacon/mayor flapping when background sessions do not inherit the caller's shell PATH.
 - Added regression coverage for mayor startup validation and spawn-failure observability in `test_mayor_startup_validation.sh` (wired into `test_mayor_wake_replay_regression.sh`).

@@ -113,6 +113,9 @@ echo "=== mayor stale witness/refinery heartbeat watchdog ==="
 echo "=== mayor supervision and exit receipts ==="
 "$REPO_ROOT/test_mayor_supervision_and_exit_receipt.sh"
 
+echo "=== mayor stable spawn exec resolution ==="
+"$REPO_ROOT/test_mayor_spawn_exec_resolution.sh"
+
 echo "=== mayor startup validation and spawn failure logging ==="
 "$REPO_ROOT/test_mayor_startup_validation.sh"
 
