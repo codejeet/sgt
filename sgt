@@ -8900,24 +8900,15 @@ _witness_record_stalled_followup() {
   owner_repo="$(_repo_owner_repo "$repo")"
   issue_url="$(_repo_issue_url "$repo" "$issue_number")"
   title="Replacement work required after stalled polecat for issue #$issue_number"
-  evidence="$(cat <<EOF
-$title
-
-Stalled polecat recovery did not produce replacement work.
-
-- Rig: $rig
-- Repo: ${owner_repo:-$repo}
-- Issue: #$issue_number
-- Issue URL: ${issue_url:-unknown}
-- Issue title: ${issue_title:-unknown}
-- Polecat: $polecat_name
-- Failure reason: $reason_code
-
-Required follow-up:
-- create replacement work (new PR or re-dispatched polecat) before closing the incident
-- re-investigate why the worker exited without producing a PR
-EOF
-)"
+  printf -v evidence '%s\n\nStalled polecat recovery did not produce replacement work.\n\n- Rig: %s\n- Repo: %s\n- Issue: #%s\n- Issue URL: %s\n- Issue title: %s\n- Polecat: %s\n- Failure reason: %s\n\nRequired follow-up:\n- create replacement work (new PR or re-dispatched polecat) before closing the incident\n- re-investigate why the worker exited without producing a PR\n' \
+    "$title" \
+    "$rig" \
+    "${owner_repo:-$repo}" \
+    "$issue_number" \
+    "${issue_url:-unknown}" \
+    "${issue_title:-unknown}" \
+    "$polecat_name" \
+    "$reason_code"
 
   blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
   if [[ -n "$blocker_id" ]]; then
