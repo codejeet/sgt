@@ -139,6 +139,29 @@ log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
 }
 
+_sgt_exec_path() {
+  if [[ -n "${SGT_EXEC_PATH:-}" ]]; then
+    printf '%s\n' "$SGT_EXEC_PATH"
+    return 0
+  fi
+
+  local source_path="${BASH_SOURCE[0]:-$0}"
+  local resolved=""
+  if [[ "$source_path" == */* ]]; then
+    if resolved="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd -P)"; then
+      printf '%s/%s\n' "$resolved" "$(basename "$source_path")"
+      return 0
+    fi
+  fi
+
+  if command -v sgt >/dev/null 2>&1; then
+    command -v sgt
+    return 0
+  fi
+
+  printf '%s\n' "$source_path"
+}
+
 _MAYOR_DECISION_LOG_LAST_ERROR=""
 _MAYOR_DISPATCH_TRIGGER_KEY=""
 _MAYOR_DISPATCH_TRIGGER_FILE=""
@@ -218,6 +241,107 @@ _mayor_decision_log_failure_state_write() {
 
 _mayor_decision_log_failure_state_clear() {
   rm -f "$SGT_MAYOR_DECISION_LOG_ALERT_STATE"
+}
+
+_mayor_start_receipt_file() {
+  echo "$SGT_CONFIG/mayor-start.receipt"
+}
+
+_mayor_start_log_file() {
+  echo "$SGT_CONFIG/mayor-start.log"
+}
+
+_mayor_start_failure_state_file() {
+  echo "$SGT_CONFIG/mayor-start-failure.state"
+}
+
+_mayor_start_failure_state_read() {
+  local ts="" reason_code="" attempt="" log_path="" detail=""
+  local state_file
+  state_file="$(_mayor_start_failure_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts reason_code attempt log_path detail < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s\n' "$ts" "$reason_code" "$attempt" "$log_path" "$detail"
+}
+
+_mayor_start_failure_state_write() {
+  local ts="${1:-}" reason_code="${2:-}" attempt="${3:-}" log_path="${4:-}" detail="${5:-}"
+  local state_file state_tmp
+  state_file="$(_mayor_start_failure_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  printf '%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$(_escape_wake_value "$reason_code")" \
+    "$(_escape_wake_value "$attempt")" \
+    "$(_escape_wake_value "$log_path")" \
+    "$(_escape_wake_value "$detail")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_start_failure_state_clear() {
+  rm -f "$(_mayor_start_failure_state_file)"
+}
+
+_mayor_start_receipt_write() {
+  local attempt="${1:-}" pid="${2:-$$}" now_epoch now_iso receipt_file receipt_tmp
+  receipt_file="$(_mayor_start_receipt_file)"
+  receipt_tmp="${receipt_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  cat > "$receipt_tmp" <<EOF
+ATTEMPT=$attempt
+PID=$pid
+STARTED_AT=$now_iso
+STARTED_EPOCH=$now_epoch
+EOF
+  mv "$receipt_tmp" "$receipt_file"
+}
+
+_mayor_start_receipt_matches() {
+  local expected_attempt="${1:-}"
+  local receipt_file receipt_attempt
+  receipt_file="$(_mayor_start_receipt_file)"
+  [[ -f "$receipt_file" ]] || return 1
+  receipt_attempt="$(grep '^ATTEMPT=' "$receipt_file" 2>/dev/null | head -n1 | cut -d= -f2-)"
+  [[ -n "$receipt_attempt" && "$receipt_attempt" == "$expected_attempt" ]]
+}
+
+_mayor_start_validation_timeout_secs() {
+  local raw="${SGT_MAYOR_START_TIMEOUT_SECS:-8}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -le 0 ]]; then
+    raw="8"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_start_log_tail() {
+  local log_file
+  log_file="$(_mayor_start_log_file)"
+  if [[ -f "$log_file" ]]; then
+    tail -n 5 "$log_file" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/[[:space:]]+$//'
+  fi
+}
+
+_mayor_wait_for_start() {
+  local session="${1:-sgt-mayor}" attempt="${2:-}" timeout_secs="${3:-$(_mayor_start_validation_timeout_secs)}"
+  local waited=0
+
+  while (( waited < timeout_secs )); do
+    if _mayor_start_receipt_matches "$attempt"; then
+      return 0
+    fi
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  _mayor_start_receipt_matches "$attempt"
 }
 
 _rfc3339_utc_now() {
@@ -5733,6 +5857,15 @@ _cmd_status_human() {
   else
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "lock: state=$mayor_lock_state ownerPid=$mayor_lock_owner startedAt=$mayor_lock_started leaseUntil=$mayor_lock_until" "$(_reset)"
   fi
+  local mayor_start_fail_ts mayor_start_fail_reason mayor_start_fail_attempt mayor_start_fail_log mayor_start_fail_detail mayor_start_fail_age
+  IFS='|' read -r mayor_start_fail_ts mayor_start_fail_reason mayor_start_fail_attempt mayor_start_fail_log mayor_start_fail_detail <<< "$(_mayor_start_failure_state_read)"
+  if [[ "$mayor_start_fail_ts" =~ ^[0-9]+$ ]]; then
+    mayor_start_fail_age=$(( $(date +%s) - mayor_start_fail_ts ))
+    if [[ "$mayor_start_fail_age" -lt 0 ]]; then
+      mayor_start_fail_age=0
+    fi
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "startup warning: ${mayor_start_fail_age}s ago reason=$mayor_start_fail_reason detail=$mayor_start_fail_detail log=$mayor_start_fail_log" "$(_reset)"
+  fi
   local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
   IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
   if [[ "$log_fail_ts" =~ ^[0-9]+$ ]]; then
@@ -8736,6 +8869,8 @@ _mayor_exit_receipt() {
 
 _mayor_loop() {
   set +e  # Mayor loop must never exit on errors
+  _mayor_start_receipt_write "${SGT_MAYOR_START_TOKEN:-unknown}" "$$" || true
+  _mayor_start_failure_state_clear || true
   log_event "MAYOR_START"
   local lock_claim lock_rc lock_decision lock_owner lock_started lock_until lock_reason
   lock_claim="$(_mayor_lock_claim)"
@@ -9520,11 +9655,48 @@ cmd_mayor_start() {
   # Create FIFO for event-driven wake
   [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
 
-  tmux new-session -d -s "$session" \
-    "SGT_ROOT='$SGT_ROOT' SGT_MAYOR_INTERVAL='$SGT_MAYOR_INTERVAL' sgt _mayor"
+  local sgt_exec mayor_log attempt_token spawn_cmd startup_timeout startup_detail
+  sgt_exec="$(_sgt_exec_path)"
+  mayor_log="$(_mayor_start_log_file)"
+  attempt_token="mayor-start-$(date +%s)-$$"
+  startup_timeout="$(_mayor_start_validation_timeout_secs)"
 
-  log_event "MAYOR_SPAWN"
-  info "mayor started (session: $session, event-driven + fallback every ${SGT_MAYOR_INTERVAL}s)"
+  mkdir -p "$(dirname "$mayor_log")"
+  {
+    printf '[%s] MAYOR_SPAWN_ATTEMPT attempt=%s exec=%s root=%s\n' \
+      "$(date -Iseconds)" \
+      "$attempt_token" \
+      "$sgt_exec" \
+      "$SGT_ROOT"
+  } >> "$mayor_log"
+
+  printf -v spawn_cmd 'SGT_ROOT=%q SGT_MAYOR_INTERVAL=%q SGT_MAYOR_START_TOKEN=%q exec %q _mayor >> %q 2>&1' \
+    "$SGT_ROOT" \
+    "$SGT_MAYOR_INTERVAL" \
+    "$attempt_token" \
+    "$sgt_exec" \
+    "$mayor_log"
+
+  tmux new-session -d -s "$session" "$spawn_cmd"
+
+  log_event "MAYOR_SPAWN attempt=$attempt_token exec_path=\"$(_escape_quotes "$sgt_exec")\""
+  if _mayor_wait_for_start "$session" "$attempt_token" "$startup_timeout"; then
+    info "mayor started (session: $session, event-driven + fallback every ${SGT_MAYOR_INTERVAL}s)"
+    return 0
+  fi
+
+  startup_detail="$(_mayor_start_log_tail)"
+  if [[ -z "$startup_detail" ]]; then
+    startup_detail="startup receipt missing after ${startup_timeout}s"
+  fi
+  _mayor_start_failure_state_write \
+    "$(date +%s)" \
+    "startup-validation-failed" \
+    "$attempt_token" \
+    "$mayor_log" \
+    "$startup_detail"
+  log_event "MAYOR_SPAWN_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
+  warn "mayor spawn failed validation (attempt=$attempt_token, timeout=${startup_timeout}s). See $mayor_log"
 }
 
 cmd_mayor_stop() {
