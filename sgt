@@ -4189,6 +4189,10 @@ tasks_state = state.get("tasks")
 if not isinstance(tasks_state, dict):
     tasks_state = {}
 
+completion_state = state.get("completion")
+if not isinstance(completion_state, dict):
+    completion_state = {}
+
 max_in_flight = 1
 policy = plan.get("policy")
 if isinstance(policy, dict):
@@ -4199,6 +4203,32 @@ if isinstance(policy, dict):
 tasks = plan.get("tasks")
 if not isinstance(tasks, list):
     raise SystemExit("plan tasks must be a list")
+
+completion_condition = plan.get("completion_condition")
+if completion_condition is None:
+    completion_condition = ""
+elif not isinstance(completion_condition, str):
+    completion_condition = str(completion_condition)
+completion_condition = completion_condition.strip()
+
+acceptance = plan.get("acceptance")
+if not isinstance(acceptance, dict):
+    acceptance = {}
+
+allowed_completion_status = {"pending", "verified", "blocked", "waived"}
+plan_completion_status = str(acceptance.get("status") or "").strip().lower()
+state_completion_status = str(completion_state.get("status") or "").strip().lower()
+if plan_completion_status in allowed_completion_status:
+    completion_status = plan_completion_status
+elif state_completion_status in allowed_completion_status:
+    completion_status = state_completion_status
+elif completion_condition or acceptance:
+    completion_status = "pending"
+else:
+    completion_status = "not_declared"
+
+def one_line(value):
+    return str(value or "").replace("\t", " ").replace("\n", " ").strip()
 
 normalized = {}
 for task in tasks:
@@ -4222,20 +4252,50 @@ doc = {
     "tasks": normalized,
 }
 
+completion_doc = {
+    "declared": bool(completion_condition or acceptance),
+    "condition": completion_condition,
+    "status": completion_status,
+    "acceptance": acceptance,
+    "details": one_line(acceptance.get("details") or completion_state.get("details")),
+    "blocked_reason": one_line(acceptance.get("blocked_reason") or completion_state.get("blocked_reason")),
+    "rollup": str(completion_state.get("rollup") or "").strip() or (
+        "not_declared" if not (completion_condition or acceptance) else "pending"
+    ),
+}
+for field in ("verified_at", "blocked_at", "waived_at", "updated_at"):
+    value = acceptance.get(field) or completion_state.get(field)
+    if value:
+        completion_doc[field] = str(value)
+doc["completion"] = completion_doc
+
 tmp = state_file + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
 os.replace(tmp, state_file)
 
-print(f"CONFIG{DELIM}{max_in_flight}")
+print(
+    DELIM.join(
+        [
+            "CONFIG",
+            str(max_in_flight),
+            completion_status,
+            completion_doc["rollup"],
+            one_line(completion_condition),
+            json.dumps(acceptance, ensure_ascii=True, sort_keys=True),
+            completion_doc["details"],
+            completion_doc["blocked_reason"],
+        ]
+    )
+)
 for task in tasks:
     if not isinstance(task, dict):
         continue
     task_id = str(task.get("id", "")).strip()
     if not task_id:
         continue
-    title = str(task.get("title") or task.get("task") or task_id).replace("\t", " ").replace("\n", " ").strip()
-    task_text = str(task.get("task") or task.get("title") or task_id).replace("\t", " ").replace("\n", " ").strip()
+    title = one_line(task.get("title") or task.get("task") or task_id)
+    task_text = one_line(task.get("task") or task.get("title") or task_id)
     deps = task.get("depends_on") or []
     if not isinstance(deps, list):
         deps = []
@@ -4302,6 +4362,62 @@ os.replace(tmp, state_file)
 PY
 }
 
+_plan_state_update_completion() {
+  local rig="${1:-}" condition="${2:-}" acceptance_json="${3:-{}}" status="${4:-not_declared}" rollup="${5:-not_declared}" details="${6:-}" blocked_reason="${7:-}"
+  local state_file
+  state_file="$(_plan_state_path "$rig")"
+  mkdir -p "$(dirname "$state_file")"
+  python3 - "$state_file" "$condition" "$acceptance_json" "$status" "$rollup" "$details" "$blocked_reason" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+state_file, condition, acceptance_json, status, rollup, details, blocked_reason = sys.argv[1:8]
+doc = {}
+if os.path.exists(state_file):
+    with open(state_file, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+completion = doc.setdefault("completion", {})
+previous_status = str(completion.get("status") or "").strip().lower()
+previous_acceptance = completion.get("acceptance")
+if not isinstance(previous_acceptance, dict):
+    previous_acceptance = {}
+try:
+    acceptance = json.loads(acceptance_json or "{}")
+    if not isinstance(acceptance, dict):
+        acceptance = dict(previous_acceptance)
+except Exception:
+    acceptance = dict(previous_acceptance)
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+completion["declared"] = bool(condition.strip() or acceptance)
+completion["condition"] = condition.strip()
+completion["acceptance"] = acceptance
+completion["status"] = status
+completion["rollup"] = rollup
+completion["details"] = details.strip()
+completion["blocked_reason"] = blocked_reason.strip()
+completion["updated_at"] = now
+if status == "verified":
+    completion.setdefault("verified_at", acceptance.get("verified_at") or now)
+elif previous_status == "verified":
+    completion.pop("verified_at", None)
+if status == "blocked":
+    completion.setdefault("blocked_at", acceptance.get("blocked_at") or now)
+elif previous_status == "blocked":
+    completion.pop("blocked_at", None)
+if status == "waived":
+    completion.setdefault("waived_at", acceptance.get("waived_at") or now)
+elif previous_status == "waived":
+    completion.pop("waived_at", None)
+doc["updated_at"] = now
+tmp = state_file + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
+os.replace(tmp, state_file)
+PY
+}
+
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
   local plan_file repo snapshot_line
@@ -4310,6 +4426,7 @@ _plan_tick_run() {
   repo="$(rig_repo "$rig")"
 
   local max_in_flight=1
+  local plan_completion_status="not_declared" plan_completion_rollup="not_declared" plan_completion_condition="" plan_acceptance_json="{}" plan_completion_details="" plan_completion_blocked_reason=""
   local -a task_ids=()
   local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=()
   while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9; do
@@ -4317,6 +4434,12 @@ _plan_tick_run() {
     case "$record_type" in
       CONFIG)
         max_in_flight="$c1"
+        plan_completion_status="${c2:-not_declared}"
+        plan_completion_rollup="${c3:-not_declared}"
+        plan_completion_condition="${c4:-}"
+        plan_acceptance_json="${c5:-{}}"
+        plan_completion_details="${c6:-}"
+        plan_completion_blocked_reason="${c7:-}"
         ;;
       TASK)
         task_ids+=("$c1")
@@ -4398,7 +4521,55 @@ _plan_tick_run() {
     fi
   done
 
-  printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s\n' "$rig" "$total" "$completed" "$inflight" "$dispatched_count" "$tick_source"
+  if [[ "$total" -eq 0 ]]; then
+    inflight=0
+  fi
+
+  case "$plan_completion_status" in
+    verified)
+      plan_completion_rollup="acceptance-verified"
+      ;;
+    waived)
+      plan_completion_rollup="acceptance-waived"
+      ;;
+    blocked)
+      plan_completion_rollup="blocked-pending-external"
+      ;;
+    pending)
+      if [[ "$total" -gt 0 && "$completed" -eq "$total" && "$inflight" -eq 0 ]]; then
+        plan_completion_rollup="tasks-exhausted-awaiting-acceptance"
+      elif [[ "$total" -eq 0 ]]; then
+        plan_completion_rollup="pending"
+      else
+        plan_completion_rollup="tasks-in-progress"
+      fi
+      ;;
+    *)
+      plan_completion_rollup="not_declared"
+      ;;
+  esac
+
+  _plan_state_update_completion \
+    "$rig" \
+    "$plan_completion_condition" \
+    "$plan_acceptance_json" \
+    "$plan_completion_status" \
+    "$plan_completion_rollup" \
+    "$plan_completion_details" \
+    "$plan_completion_blocked_reason"
+
+  printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$rig" \
+    "$total" \
+    "$completed" \
+    "$inflight" \
+    "$dispatched_count" \
+    "$tick_source" \
+    "$plan_completion_rollup" \
+    "$plan_completion_status" \
+    "$plan_completion_condition" \
+    "$plan_completion_details" \
+    "$plan_completion_blocked_reason"
 }
 
 cmd_create_plan() {
@@ -4536,10 +4707,10 @@ cmd_plan_tick() {
   [[ -n "$rig" ]] || die "usage: sgt plan tick <rig>"
   ensure_init
   ensure_rig "$rig"
-  local summary total completed inflight dispatched source
-  summary="$(_plan_tick_run "$rig" "manual")"
-  IFS='|' read -r _ _ total completed inflight dispatched source <<< "$summary"
-  info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched)"
+  local summary total completed inflight dispatched source completion_rollup completion_status
+  summary="$(_plan_tick_run "$rig" "manual" | grep '^PLAN_TICK|' | tail -n 1)"
+  IFS='|' read -r _ _ total completed inflight dispatched source completion_rollup completion_status _ _ _ <<< "$summary"
+  info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched completion=$completion_rollup status=$completion_status)"
 }
 
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
@@ -8881,15 +9052,32 @@ _mayor_loop() {
     # === 5b. Auto-tick repo-local plans ===
     for rig_file in "$SGT_RIGS"/*; do
       [[ -f "$rig_file" ]] || continue
-      local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched
+      local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason
       rname="$(basename "$rig_file")"
       plan_path="$(_plan_file_path "$rname")"
       [[ -f "$plan_path" ]] || continue
-      if plan_tick_summary="$(_plan_tick_run "$rname" "mayor" 2>/dev/null)"; then
-        IFS='|' read -r _ _ plan_total plan_completed plan_inflight plan_dispatched _ <<< "$plan_tick_summary"
+      if plan_tick_summary="$(_plan_tick_run "$rname" "mayor" 2>/dev/null | grep '^PLAN_TICK|' | tail -n 1)"; then
+        IFS='|' read -r _ _ plan_total plan_completed plan_inflight plan_dispatched _ plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason <<< "$plan_tick_summary"
         if [[ "${plan_dispatched:-0}" =~ ^[0-9]+$ ]] && (( plan_dispatched > 0 )); then
           actions_taken+="  - auto-ticked plan for $rname (dispatched_now=${plan_dispatched} completed=${plan_completed}/${plan_total})\n"
         fi
+        case "${plan_completion_rollup:-not_declared}" in
+          tasks-exhausted-awaiting-acceptance)
+            issues_found+="  - plan completion condition unmet on $rname after tasks exhausted (status=${plan_completion_status:-pending}"
+            [[ -n "${plan_completion_condition:-}" ]] && issues_found+=" condition=\"${plan_completion_condition}\""
+            [[ -n "${plan_completion_details:-}" ]] && issues_found+=" details=\"${plan_completion_details}\""
+            issues_found+=")\n"
+            needs_ai=true
+            ;;
+          blocked-pending-external)
+            issues_found+="  - plan completion blocked pending external condition on $rname"
+            [[ -n "${plan_completion_condition:-}" ]] && issues_found+=" (condition=\"${plan_completion_condition}\""
+            [[ -n "${plan_completion_blocked_reason:-}" ]] && issues_found+=" blocked_reason=\"${plan_completion_blocked_reason}\""
+            [[ -n "${plan_completion_condition:-}" ]] && issues_found+=")"
+            [[ -z "${plan_completion_condition:-}" && -n "${plan_completion_blocked_reason:-}" ]] && issues_found+=" (blocked_reason=\"${plan_completion_blocked_reason}\")"
+            issues_found+="\n"
+            ;;
+        esac
       else
         issues_found+="  - repo plan tick failed for $rname\n"
       fi
@@ -9089,6 +9277,7 @@ For each pending plan request, turn the request into a repo-local \`SGT_PLAN.jso
 For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
 If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
 After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
+If a repo-local plan declares \`completion_condition\` / \`acceptance\`, treat closed issues and merged PRs as insufficient until acceptance is \`verified\`, \`waived\`, or explicitly \`blocked\` by a human.
 
 If an issue/PR just merged, you should proactively:
 - queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
