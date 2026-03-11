@@ -72,6 +72,28 @@ If you want clarification routed back to a specific OpenClaw agent, pass:
 sgt create plan <rig> --agent <openclaw-id> "<prompt>"
 ```
 
+### Record a verified acceptance blocker
+
+Use `sgt create blocker` when merges landed but verified user-facing acceptance is still red and the rig must not go idle-green.
+
+```bash
+sgt create blocker <rig> "Verified acceptance still fails after merge: ..."
+sgt create blocker <rig> --file /tmp/verification-notes.md
+cat verification.md | sgt create blocker <rig> -
+```
+
+What happens:
+- the blocker evidence is appended to the rig’s shared `SGT_CONTEXT.md`
+- a durable blocker record is created under `~/sgt/.sgt/acceptance-blockers/`
+- the Mayor is woken immediately to re-create actionable work if the rig is otherwise idle
+- periodic mayor cycles will no longer treat an empty issue/PR board as success while the blocker remains open
+
+When the blocker is cleared by fresh verification:
+
+```bash
+sgt blocker resolve <blocker-id> --note "Acceptance now passes on latest master"
+```
+
 - **File**: `SGT_PLAN.json` at the repo root of any rig you want on autopilot.
 - **What it does**: defines a DAG of tasks with explicit dependencies via `depends_on`.
 - **How it runs**:
