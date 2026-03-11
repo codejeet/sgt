@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Mayor bootstrap now validates that each tmux spawn actually reaches `_mayor_loop` via a durable startup receipt, logs explicit `MAYOR_SPAWN_FAILED` events plus a persisted startup warning state when validation fails, and writes bootstrap output to `~/.sgt/mayor-start.log` for postmortem inspection.
+- Mayor tmux spawns now use the resolved `sgt` executable path instead of a bare PATH-dependent `sgt` command, which fixes deacon/mayor flapping when background sessions do not inherit the caller's shell PATH.
+- Added regression coverage for mayor startup validation and spawn-failure observability in `test_mayor_startup_validation.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Added shared per-rig memory commands: `sgt context path/add/index/search`, backed by repo-local `SGT_CONTEXT.md` files and local embedding indexes under `~/.sgt/context/<rig>/index.json`.
 - `sgt context index/search` now use the OpenAI Embeddings API (default model `text-embedding-3-small`) and fail explicitly when `OPENAI_API_KEY` is missing; `sgt context add` still appends notes even when indexing prerequisites are unavailable.
 - Spawned worker instructions now tell polecats, dogs, CI-fix workers, and crew to read `SGT_CONTEXT.md` before work, use `sgt context search` when useful, and append durable notes with `sgt context add` before wrapping up.
