@@ -145,6 +145,17 @@ _sgt_exec_path() {
     return 0
   fi
 
+  local command_path=""
+  if command_path="$(command -v sgt 2>/dev/null)" && [[ "$command_path" == */* ]]; then
+    local command_dir=""
+    if command_dir="$(cd "$(dirname "$command_path")" 2>/dev/null && pwd -P)"; then
+      printf '%s/%s\n' "$command_dir" "$(basename "$command_path")"
+      return 0
+    fi
+    printf '%s\n' "$command_path"
+    return 0
+  fi
+
   local source_path="${BASH_SOURCE[0]:-$0}"
   local resolved=""
   if [[ "$source_path" == */* ]]; then
@@ -9655,7 +9666,7 @@ cmd_mayor_start() {
   # Create FIFO for event-driven wake
   [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
 
-  local sgt_exec mayor_log attempt_token spawn_cmd startup_timeout startup_detail
+  local sgt_exec mayor_log attempt_token spawn_cmd startup_timeout startup_detail tmux_error
   sgt_exec="$(_sgt_exec_path)"
   mayor_log="$(_mayor_start_log_file)"
   attempt_token="mayor-start-$(date +%s)-$$"
@@ -9677,9 +9688,20 @@ cmd_mayor_start() {
     "$sgt_exec" \
     "$mayor_log"
 
-  tmux new-session -d -s "$session" "$spawn_cmd"
-
   log_event "MAYOR_SPAWN attempt=$attempt_token exec_path=\"$(_escape_quotes "$sgt_exec")\""
+  if ! tmux_error="$(tmux new-session -d -s "$session" "$spawn_cmd" 2>&1)"; then
+    startup_detail="${tmux_error:-tmux new-session returned non-zero exit status}"
+    _mayor_start_failure_state_write \
+      "$(date +%s)" \
+      "tmux-new-session-failed" \
+      "$attempt_token" \
+      "$mayor_log" \
+      "$startup_detail"
+    log_event "MAYOR_SPAWN_FAILED reason_code=tmux-new-session-failed attempt=$attempt_token exec_path=\"$(_escape_quotes "$sgt_exec")\" detail=\"$(_escape_quotes "$startup_detail")\""
+    warn "mayor spawn failed before startup validation (attempt=$attempt_token). See $mayor_log"
+    return 1
+  fi
+
   if _mayor_wait_for_start "$session" "$attempt_token" "$startup_timeout"; then
     info "mayor started (session: $session, event-driven + fallback every ${SGT_MAYOR_INTERVAL}s)"
     return 0
@@ -9696,7 +9718,9 @@ cmd_mayor_start() {
     "$mayor_log" \
     "$startup_detail"
   log_event "MAYOR_SPAWN_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
+  log_event "MAYOR_START_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
   warn "mayor spawn failed validation (attempt=$attempt_token, timeout=${startup_timeout}s). See $mayor_log"
+  return 1
 }
 
 cmd_mayor_stop() {
