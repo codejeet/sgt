@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Mayor now writes a durable runtime heartbeat plus last-cycle receipt, so deacon can distinguish `session-missing`, `heartbeat-missing`, `heartbeat-invalid`, and `heartbeat-stale` supervision failures instead of only noticing a missing tmux session.
+- Mayor exit receipts now persist the last completed cycle trigger/status in `~/.sgt/mayor-exit.state`, and deacon restart telemetry includes those fields so post-merge exits are explicit in both operator output and `DEACON_RESTART_MAYOR` events.
+- Added deterministic regression coverage for mayor going off after a successful merge-triggered cycle in `test_mayor_post_merge_runtime_supervision.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Mayor background spawns now prefer the stable `sgt` executable found on `PATH` over the current polecat worktree script path, preventing post-merge mayor restart loops after the originating worktree is cleaned up.
 - Mayor startup now emits distinct failure telemetry for both `tmux` spawn failures (`MAYOR_SPAWN_FAILED reason_code=tmux-new-session-failed`) and startup receipt timeouts (`MAYOR_START_FAILED ...`) so supervision failures are explicit in logs/status.
 - Added deterministic regression coverage for post-merge mayor exec resolution and tmux spawn failure telemetry in `test_mayor_spawn_exec_resolution.sh` (wired into `test_mayor_wake_replay_regression.sh`).
