@@ -445,6 +445,8 @@ export SGT_DEACON_HEARTBEAT_STALE_SECS=300
 ```
 
 - Mayor also checks this heartbeat age and proactively restarts deacon when the heartbeat is missing/invalid/stale.
+- Deacon also supervises the mayor tmux session and restarts it if `sgt-mayor` disappears.
+- Mayor shutdown/exit paths emit a durable `MAYOR_STOP` receipt with `reason_code`, `exit_code`, `signal`, and `unexpected` fields so silent exits remain visible in logs/decision history.
 - `sgt status` now shows deacon heartbeat age + health (`healthy|stale|unknown`) and the active stale threshold.
 - `sgt status` render guardrails are non-fatal: terminal width falls back safely in non-TTY/sparse envs, and polecat metadata races/misses are surfaced as actionable warning lines (for example, retry `sgt status` or run `sgt nuke <polecat>` if stale) while `sgt status` still exits `0`.
 
