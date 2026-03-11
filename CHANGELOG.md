@@ -32,6 +32,9 @@
 - Added regression coverage for watchdog threshold boundary and transition dedupe in `test_mayor_review_watchdog.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Added witness/refinery heartbeat watchdog coverage for stuck-but-running agent loops: mayor now escalates stale heartbeat incidents with exact `stale_seconds` + `last_heartbeat`, deduped once per agent per configurable window (`SGT_AGENT_HEARTBEAT_STALE_SECS`, `SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS`) and reset on recovery.
 - Added regression coverage for heartbeat watchdog dedupe-window behavior and recovery reset in `test_mayor_agent_heartbeat_watchdog.sh` (wired into `test_mayor_wake_replay_regression.sh`).
+- Deacon now supervises the mayor tmux session too, so a missing `sgt-mayor` session is auto-restarted instead of leaving the system stuck in `mayor off`.
+- Mayor shutdowns now emit a durable `MAYOR_STOP` receipt with `reason_code`, `exit_code`, `signal`, and `unexpected` fields, and unexpected non-zero exits are appended to the decision log for postmortem debugging.
+- Added regression coverage for deacon-driven mayor restart and single-write unexpected exit receipts in `test_mayor_supervision_and_exit_receipt.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - Refinery merge processing now retries transient `gh pr merge` failures with bounded attempts + jitter (`SGT_REFINERY_MERGE_MAX_ATTEMPTS`, `SGT_REFINERY_MERGE_RETRY_BASE_MS`, `SGT_REFINERY_MERGE_RETRY_JITTER_MS`), revalidates PR open/head state before each retry, and emits structured final-failure notify metadata including attempts/error class.
 - Added refinery merge resilience regression coverage for transient-then-success and retry-time head-drift skip paths in `test_refinery_merge_retry_resilience.sh`.
 - Refinery merge attempts now claim an idempotency key (`repo+PR+head SHA`) so duplicate PR-ready queue replays for the same head are explicitly skipped before merge/conflict/reject side effects run.

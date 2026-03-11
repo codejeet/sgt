@@ -7974,6 +7974,13 @@ HEARTBEAT
       fi
     done
 
+    if ! tmux has-session -t "sgt-mayor" 2>/dev/null; then
+      echo "[deacon] mayor is down — restarting"
+      log_event "DEACON_RESTART_MAYOR"
+      cmd_mayor_start
+      actions=$((actions + 1))
+    fi
+
     # Check for orphaned polecats (no matching rig)
     for f in "$SGT_POLECATS"/*; do
       [[ -f "$f" ]] || continue
@@ -8687,6 +8694,46 @@ _mayor_wake_summary() {
   echo "$summary"
 }
 
+_mayor_cleanup() {
+  _mayor_ai_cycle_state_clear || true
+  _mayor_lock_release "$$" || true
+}
+
+_mayor_exit_receipt() {
+  local exit_code="${1:-0}" signal="${2:-EXIT}"
+  local reason_code="clean-exit" unexpected="false" decision_context="mayor-stop"
+
+  if [[ "${_MAYOR_EXIT_RECEIPT_LOGGED:-0}" == "1" ]]; then
+    return 0
+  fi
+  _MAYOR_EXIT_RECEIPT_LOGGED=1
+
+  case "$signal" in
+    TERM)
+      reason_code="signal-term"
+      ;;
+    INT)
+      reason_code="signal-int"
+      ;;
+    EXIT)
+      if [[ "$exit_code" -ne 0 ]]; then
+        reason_code="nonzero-exit"
+      fi
+      ;;
+    *)
+      reason_code="signal-${signal,,}"
+      ;;
+  esac
+
+  if [[ "$reason_code" == "nonzero-exit" ]]; then
+    unexpected="true"
+    decision_context="mayor-stop-unexpected"
+  fi
+
+  log_event "MAYOR_STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected"
+  _mayor_record_decision "MAYOR STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected" "$decision_context" "$SGT_ROOT" || true
+}
+
 _mayor_loop() {
   set +e  # Mayor loop must never exit on errors
   log_event "MAYOR_START"
@@ -8701,7 +8748,10 @@ _mayor_loop() {
   fi
   echo "[mayor] lock decision: ${lock_decision} (ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason})"
   log_event "MAYOR_LOCK_DECISION decision=${lock_decision} ownerPid=${lock_owner} startedAt=${lock_started} leaseUntil=${lock_until} reason=${lock_reason}"
-  trap '_mayor_ai_cycle_state_clear; _mayor_lock_release "$$"' EXIT INT TERM
+  _MAYOR_EXIT_RECEIPT_LOGGED=0
+  trap 'rc=$?; _mayor_cleanup; _mayor_exit_receipt "$rc" "EXIT"' EXIT
+  trap '_mayor_cleanup; _mayor_exit_receipt 143 "TERM"; exit 143' TERM
+  trap '_mayor_cleanup; _mayor_exit_receipt 130 "INT"; exit 130' INT
 
   local wake_dedupe_ttl
   wake_dedupe_ttl="$(_mayor_wake_dedupe_ttl_secs)"
@@ -9480,8 +9530,8 @@ cmd_mayor_start() {
 cmd_mayor_stop() {
   local session="sgt-mayor"
   if tmux has-session -t "$session" 2>/dev/null; then
+    log_event "MAYOR_STOP_REQUEST"
     tmux kill-session -t "$session"
-    log_event "MAYOR_STOP"
     info "mayor stopped"
   else
     info "mayor not running"
