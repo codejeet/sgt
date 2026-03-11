@@ -297,6 +297,163 @@ _mayor_start_failure_state_clear() {
   rm -f "$(_mayor_start_failure_state_file)"
 }
 
+_mayor_heartbeat_file() {
+  echo "$SGT_CONFIG/mayor-heartbeat.state"
+}
+
+_mayor_heartbeat_stale_secs() {
+  local default_secs raw
+  default_secs=$(( ${SGT_MAYOR_INTERVAL:-600} + 120 ))
+  raw="${SGT_MAYOR_HEARTBEAT_STALE_SECS:-$default_secs}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -le 0 ]]; then
+    raw="$default_secs"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_heartbeat_write() {
+  local phase="${1:-running}" trigger="${2:-periodic}" cycle="${3:-0}"
+  local state_file state_tmp now_epoch now_iso
+  state_file="$(_mayor_heartbeat_file)"
+  state_tmp="${state_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  printf '%s|%s|%s|%s|%s|%s\n' \
+    "$now_epoch" \
+    "$now_iso" \
+    "$$" \
+    "$(_escape_wake_value "$phase")" \
+    "$cycle" \
+    "$(_escape_wake_value "$trigger")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_heartbeat_snapshot() {
+  local state_file now_epoch ts iso pid phase cycle trigger age
+  state_file="$(_mayor_heartbeat_file)"
+  now_epoch="$(date +%s)"
+  if [[ ! -f "$state_file" ]]; then
+    printf 'unknown|unknown|missing||||\n'
+    return 1
+  fi
+  IFS='|' read -r ts iso pid phase cycle trigger < "$state_file" 2>/dev/null || true
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    printf 'unknown|%s|invalid|%s|%s|%s|%s\n' \
+      "${iso:-unknown}" \
+      "${pid:-}" \
+      "${phase:-}" \
+      "${cycle:-}" \
+      "${trigger:-}"
+    return 1
+  fi
+  age=$((now_epoch - ts))
+  if [[ "$age" -lt 0 ]]; then
+    age=0
+  fi
+  printf '%s|%s|ok|%s|%s|%s|%s\n' \
+    "$age" \
+    "${iso:-unknown}" \
+    "${pid:-}" \
+    "${phase:-unknown}" \
+    "${cycle:-0}" \
+    "${trigger:-unknown}"
+}
+
+_mayor_heartbeat_health() {
+  local age="${1:-unknown}" stale_secs="${2:-$(_mayor_heartbeat_stale_secs)}"
+  if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [[ "$age" -gt "$stale_secs" ]]; then
+    printf 'stale\n'
+  else
+    printf 'healthy\n'
+  fi
+}
+
+_mayor_last_cycle_state_file() {
+  echo "$SGT_CONFIG/mayor-last-cycle.state"
+}
+
+_mayor_last_cycle_state_read() {
+  local ts="" completed_at="" trigger="" status=""
+  local state_file
+  state_file="$(_mayor_last_cycle_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts completed_at trigger status < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s\n' "$ts" "$completed_at" "$trigger" "$status"
+}
+
+_mayor_last_cycle_state_write() {
+  local trigger="${1:-periodic}" status="${2:-completed}"
+  local state_file state_tmp now_epoch now_iso
+  state_file="$(_mayor_last_cycle_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  printf '%s|%s|%s|%s\n' \
+    "$now_epoch" \
+    "$now_iso" \
+    "$(_escape_wake_value "$trigger")" \
+    "$(_escape_wake_value "$status")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_exit_state_file() {
+  echo "$SGT_CONFIG/mayor-exit.state"
+}
+
+_mayor_exit_state_read() {
+  local ts="" reason_code="" exit_code="" signal="" unexpected="" pid="" last_cycle_trigger="" last_cycle_at="" last_cycle_status=""
+  local state_file
+  state_file="$(_mayor_exit_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts reason_code exit_code signal unexpected pid last_cycle_trigger last_cycle_at last_cycle_status < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$reason_code" \
+    "$exit_code" \
+    "$signal" \
+    "$unexpected" \
+    "$pid" \
+    "$last_cycle_trigger" \
+    "$last_cycle_at" \
+    "$last_cycle_status"
+}
+
+_mayor_exit_state_write() {
+  local reason_code="${1:-clean-exit}" exit_code="${2:-0}" signal="${3:-EXIT}" unexpected="${4:-false}" pid="${5:-$$}"
+  local last_cycle_trigger="${6:-}" last_cycle_at="${7:-}" last_cycle_status="${8:-}"
+  local state_file state_tmp now_epoch
+  state_file="$(_mayor_exit_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$now_epoch" \
+    "$(_escape_wake_value "$reason_code")" \
+    "$exit_code" \
+    "$(_escape_wake_value "$signal")" \
+    "$(_escape_wake_value "$unexpected")" \
+    "$pid" \
+    "$(_escape_wake_value "$last_cycle_trigger")" \
+    "$(_escape_wake_value "$last_cycle_at")" \
+    "$(_escape_wake_value "$last_cycle_status")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_exit_state_clear() {
+  rm -f "$(_mayor_exit_state_file)"
+}
+
 _mayor_start_receipt_write() {
   local attempt="${1:-}" pid="${2:-$$}" now_epoch now_iso receipt_file receipt_tmp
   receipt_file="$(_mayor_start_receipt_file)"
@@ -5661,6 +5818,19 @@ cmd_status_json() {
   tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
   local mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until
   IFS='|' read -r mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until <<< "$(_mayor_lock_snapshot)"
+  local mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale_secs mayor_hb_health
+  mayor_hb_stale_secs="$(_mayor_heartbeat_stale_secs)"
+  IFS='|' read -r mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger <<< "$(_mayor_heartbeat_snapshot)"
+  mayor_hb_health="$(_mayor_heartbeat_health "$mayor_hb_age" "$mayor_hb_stale_secs")"
+  local mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status mayor_exit_age
+  IFS='|' read -r mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status <<< "$(_mayor_exit_state_read)"
+  mayor_exit_age=""
+  if [[ "$mayor_exit_ts" =~ ^[0-9]+$ ]]; then
+    mayor_exit_age=$(( $(date +%s) - mayor_exit_ts ))
+    if [[ "$mayor_exit_age" -lt 0 ]]; then
+      mayor_exit_age=0
+    fi
+  fi
   local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
   IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
   log_fail_age=""
@@ -5672,7 +5842,7 @@ cmd_status_json() {
   fi
   local review_watch_count review_watch_oldest review_watch_threshold
   IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
 
   local df dname
   if [[ -d "$SGT_CONFIG/dogs" ]]; then
@@ -5873,6 +6043,17 @@ _cmd_status_human() {
   else
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "lock: state=$mayor_lock_state ownerPid=$mayor_lock_owner startedAt=$mayor_lock_started leaseUntil=$mayor_lock_until" "$(_reset)"
   fi
+  local mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale_secs mayor_hb_health
+  mayor_hb_stale_secs="$(_mayor_heartbeat_stale_secs)"
+  IFS='|' read -r mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger <<< "$(_mayor_heartbeat_snapshot)"
+  mayor_hb_health="$(_mayor_heartbeat_health "$mayor_hb_age" "$mayor_hb_stale_secs")"
+  if [[ "$mayor_hb_state" == "ok" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $mayor_hb_ts (${mayor_hb_age}s ago, ${mayor_hb_health}, stale>${mayor_hb_stale_secs}s, phase=${mayor_hb_phase:-unknown}, trigger=${mayor_hb_trigger:-unknown})" "$(_reset)"
+  elif [[ "$mayor_hb_state" == "missing" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: missing (health unknown, stale>${mayor_hb_stale_secs}s)" "$(_reset)"
+  else
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${mayor_hb_ts:-invalid} (state=${mayor_hb_state:-invalid}, stale>${mayor_hb_stale_secs}s)" "$(_reset)"
+  fi
   local mayor_start_fail_ts mayor_start_fail_reason mayor_start_fail_attempt mayor_start_fail_log mayor_start_fail_detail mayor_start_fail_age
   IFS='|' read -r mayor_start_fail_ts mayor_start_fail_reason mayor_start_fail_attempt mayor_start_fail_log mayor_start_fail_detail <<< "$(_mayor_start_failure_state_read)"
   if [[ "$mayor_start_fail_ts" =~ ^[0-9]+$ ]]; then
@@ -5881,6 +6062,15 @@ _cmd_status_human() {
       mayor_start_fail_age=0
     fi
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "startup warning: ${mayor_start_fail_age}s ago reason=$mayor_start_fail_reason detail=$mayor_start_fail_detail log=$mayor_start_fail_log" "$(_reset)"
+  fi
+  local mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status mayor_exit_age
+  IFS='|' read -r mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status <<< "$(_mayor_exit_state_read)"
+  if [[ "$mayor_exit_ts" =~ ^[0-9]+$ ]]; then
+    mayor_exit_age=$(( $(date +%s) - mayor_exit_ts ))
+    if [[ "$mayor_exit_age" -lt 0 ]]; then
+      mayor_exit_age=0
+    fi
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "last exit: ${mayor_exit_age}s ago reason=$mayor_exit_reason signal=$mayor_exit_signal code=$mayor_exit_code unexpected=$mayor_exit_unexpected trigger=${mayor_exit_trigger:-unknown} status=${mayor_exit_cycle_status:-unknown}" "$(_reset)"
   fi
   local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
   IFS='|' read -r log_fail_ts log_fail_context log_fail_workspace log_fail_error <<< "$(_mayor_decision_log_failure_state_read)"
@@ -8085,6 +8275,49 @@ cmd_refinery_stop() {
 # - Writes heartbeat for Boot to check
 # - Runs as a bash loop (no AI needed)
 
+_deacon_supervise_mayor() {
+  local mayor_session="off"
+  local hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger hb_stale_secs hb_health
+  local exit_ts exit_reason exit_code exit_signal exit_unexpected exit_pid exit_trigger exit_cycle_at exit_cycle_status
+  local restart_reason restart_line
+
+  tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_session="on"
+  hb_stale_secs="$(_mayor_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger <<< "$(_mayor_heartbeat_snapshot)"
+  hb_health="$(_mayor_heartbeat_health "$hb_age" "$hb_stale_secs")"
+  IFS='|' read -r exit_ts exit_reason exit_code exit_signal exit_unexpected exit_pid exit_trigger exit_cycle_at exit_cycle_status <<< "$(_mayor_exit_state_read)"
+
+  restart_reason=""
+  restart_line=""
+  if [[ "$mayor_session" != "on" ]]; then
+    restart_reason="session-missing"
+    restart_line="[deacon] mayor is down — restarting"
+  elif [[ "$hb_state" == "missing" ]]; then
+    restart_reason="heartbeat-missing"
+    restart_line="[deacon] mayor heartbeat missing — restarting"
+  elif [[ "$hb_state" != "ok" ]]; then
+    restart_reason="heartbeat-invalid"
+    restart_line="[deacon] mayor heartbeat invalid — restarting"
+  elif [[ "$hb_age" =~ ^[0-9]+$ && "$hb_age" -gt "$hb_stale_secs" ]]; then
+    restart_reason="heartbeat-stale"
+    restart_line="[deacon] mayor heartbeat stale (${hb_age}s > ${hb_stale_secs}s) — restarting"
+  fi
+
+  [[ -n "$restart_reason" ]] || return 1
+
+  if [[ "$restart_reason" == heartbeat-* ]]; then
+    tmux kill-session -t "sgt-mayor" 2>/dev/null || true
+  fi
+
+  if [[ -n "$exit_reason" || -n "$exit_trigger" ]]; then
+    restart_line+=" (last_exit=${exit_reason:-unknown} signal=${exit_signal:-unknown} code=${exit_code:-unknown} last_cycle_trigger=${exit_trigger:-unknown} last_cycle_status=${exit_cycle_status:-unknown})"
+  fi
+  echo "$restart_line"
+  log_event "DEACON_RESTART_MAYOR reason=$restart_reason session=$mayor_session heartbeat_state=${hb_state:-unknown} heartbeat_health=${hb_health:-unknown} heartbeat_age=${hb_age:-unknown}s heartbeat_phase=${hb_phase:-unknown} heartbeat_cycle=${hb_cycle:-unknown} trigger=\"$(_escape_quotes "${hb_trigger:-unknown}")\" last_exit_reason=${exit_reason:-none} last_exit_signal=${exit_signal:-none} last_exit_code=${exit_code:-unknown} last_exit_unexpected=${exit_unexpected:-unknown} last_exit_pid=${exit_pid:-unknown} last_cycle_trigger=\"$(_escape_quotes "${exit_trigger:-unknown}")\" last_cycle_status=${exit_cycle_status:-unknown} last_cycle_at=\"$(_escape_quotes "${exit_cycle_at:-unknown}")\""
+  cmd_mayor_start
+  return 0
+}
+
 _deacon_loop() {
   log_event "DEACON_START"
   echo "[deacon] started — patrolling sgt system"
@@ -8130,10 +8363,7 @@ HEARTBEAT
       fi
     done
 
-    if ! tmux has-session -t "sgt-mayor" 2>/dev/null; then
-      echo "[deacon] mayor is down — restarting"
-      log_event "DEACON_RESTART_MAYOR"
-      cmd_mayor_start
+    if _deacon_supervise_mayor; then
       actions=$((actions + 1))
     fi
 
@@ -8858,6 +9088,7 @@ _mayor_cleanup() {
 _mayor_exit_receipt() {
   local exit_code="${1:-0}" signal="${2:-EXIT}"
   local reason_code="clean-exit" unexpected="false" decision_context="mayor-stop"
+  local last_cycle_ts last_cycle_at last_cycle_trigger last_cycle_status
 
   if [[ "${_MAYOR_EXIT_RECEIPT_LOGGED:-0}" == "1" ]]; then
     return 0
@@ -8886,8 +9117,10 @@ _mayor_exit_receipt() {
     decision_context="mayor-stop-unexpected"
   fi
 
-  log_event "MAYOR_STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected"
-  _mayor_record_decision "MAYOR STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected" "$decision_context" "$SGT_ROOT" || true
+  IFS='|' read -r last_cycle_ts last_cycle_at last_cycle_trigger last_cycle_status <<< "$(_mayor_last_cycle_state_read)"
+  _mayor_exit_state_write "$reason_code" "$exit_code" "$signal" "$unexpected" "$$" "$last_cycle_trigger" "$last_cycle_at" "$last_cycle_status"
+  log_event "MAYOR_STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected last_cycle_trigger=\"$(_escape_quotes "${last_cycle_trigger:-unknown}")\" last_cycle_status=${last_cycle_status:-unknown} last_cycle_at=\"$(_escape_quotes "${last_cycle_at:-unknown}")\""
+  _mayor_record_decision "MAYOR STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected last_cycle_trigger=${last_cycle_trigger:-unknown} last_cycle_status=${last_cycle_status:-unknown} last_cycle_at=\"${last_cycle_at:-unknown}\"" "$decision_context" "$SGT_ROOT" || true
 }
 
 _witness_record_stalled_followup() {
@@ -8950,6 +9183,7 @@ _mayor_loop() {
   local wake_dedupe_ttl
   wake_dedupe_ttl="$(_mayor_wake_dedupe_ttl_secs)"
   local -A wake_seen_at=()
+  local cycle_count=0
 
   # Set up FIFO for event-driven wake
   [[ -p "$SGT_MAYOR_FIFO" ]] || mkfifo "$SGT_MAYOR_FIFO"
@@ -8957,6 +9191,8 @@ _mayor_loop() {
   exec 3<>"$SGT_MAYOR_FIFO"
   _mayor_start_receipt_write "${SGT_MAYOR_START_TOKEN:-unknown}" "$$" || true
   _mayor_start_failure_state_clear || true
+  _mayor_exit_state_clear || true
+  _mayor_heartbeat_write "startup" "startup" "$cycle_count" || true
   log_event "MAYOR_START"
   echo "[mayor] started — event-driven (fallback every ${SGT_MAYOR_INTERVAL}s)"
 
@@ -8998,6 +9234,8 @@ _mayor_loop() {
       echo "[mayor] periodic check at $(date -Iseconds)"
       wake_reason="periodic"
     fi
+    cycle_count=$((cycle_count + 1))
+    _mayor_heartbeat_write "cycle-begin" "$wake_reason" "$cycle_count" || true
 
     local needs_ai=false
     local ai_dispatch_trigger_key=""
@@ -9483,6 +9721,8 @@ _mayor_loop() {
         echo "[mayor] AI cycle aborted — briefing freshness gate failed (status=${briefing_status:-invalid} age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s path=${briefing_path:-aborted})"
         _mayor_record_decision "MAYOR AI CYCLE ABORT reason_code=stale-briefing path=${briefing_path:-aborted} status=${briefing_status:-invalid} stale_detected=${briefing_stale_detected:-true} generated_at=\"${briefing_generated_at:-unknown}\" age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s" "briefing-freshness-gate" "$SGT_ROOT" || true
         log_event "MAYOR_AI_CYCLE aborted reason=stale-briefing path=${briefing_path:-aborted} status=${briefing_status:-invalid} stale_detected=${briefing_stale_detected:-true} generated_at=\"$(_escape_quotes "${briefing_generated_at:-unknown}")\" age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s"
+        _mayor_last_cycle_state_write "$wake_reason" "briefing-aborted" || true
+        _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
         continue
       fi
       IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "$briefing_gate"
@@ -9541,11 +9781,15 @@ MAYORMD
 
       if ! _mayor_run_ai_decision_cycle "$backend" "$mayor_workspace" "$dispatch_snapshot_file" "$ai_dispatch_trigger_key" "$ai_dispatch_trigger_reason"; then
         log_event "MAYOR_CYCLE completed (trigger: $wake_reason status=ai-fail-closed)"
+        _mayor_last_cycle_state_write "$wake_reason" "ai-fail-closed" || true
+        _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
         continue
       fi
     fi
 
     log_event "MAYOR_CYCLE completed (trigger: $wake_reason)"
+    _mayor_last_cycle_state_write "$wake_reason" "completed" || true
+    _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
   done
 }
 
@@ -9748,6 +9992,7 @@ cmd_mayor_start() {
       "$attempt_token" \
       "$mayor_log" \
       "$startup_detail"
+    _mayor_exit_state_write "tmux-new-session-failed" "1" "START" "true" "$$" "" "" "spawn-failed"
     log_event "MAYOR_SPAWN_FAILED reason_code=tmux-new-session-failed attempt=$attempt_token exec_path=\"$(_escape_quotes "$sgt_exec")\" detail=\"$(_escape_quotes "$startup_detail")\""
     warn "mayor spawn failed before startup validation (attempt=$attempt_token). See $mayor_log"
     return 1
@@ -9768,6 +10013,7 @@ cmd_mayor_start() {
     "$attempt_token" \
     "$mayor_log" \
     "$startup_detail"
+  _mayor_exit_state_write "startup-validation-failed" "1" "START" "true" "$$" "" "" "start-validation-failed"
   log_event "MAYOR_SPAWN_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
   log_event "MAYOR_START_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
   warn "mayor spawn failed validation (attempt=$attempt_token, timeout=${startup_timeout}s). See $mayor_log"
@@ -10711,6 +10957,7 @@ Environment:
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
   SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS  Timebox mayor AI decision runs in seconds (default: 300, set >0)
+  SGT_MAYOR_HEARTBEAT_STALE_SECS  Restart mayor when runtime heartbeat is older than N seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_ACTION_FENCE       Enable mayor post-action receipt verification fence for dispatch/nuke/merge (default: 0)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_WAKE_DEDUPE_TTL    Suppress identical wake trigger keys for N seconds (default: 15, set 0 to disable)

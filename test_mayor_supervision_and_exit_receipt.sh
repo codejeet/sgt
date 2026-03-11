@@ -20,11 +20,25 @@ bash -s "$SGT_SCRIPT" <<'BASH'
 set -euo pipefail
 SGT_SCRIPT="$1"
 
+extract_fn() {
+  local name="$1"
+  awk -v n="$name" '
+    $0 ~ "^" n "\\(\\) \\{" {in_fn=1}
+    in_fn {print}
+    in_fn && $0 == "}" {exit}
+  ' "$SGT_SCRIPT"
+}
+
 extract_range() {
   local start="$1" end="$2"
   sed -n "/^${start}() {/,/^${end}() {/p" "$SGT_SCRIPT" | sed '$d'
 }
 
+eval "$(extract_fn _mayor_heartbeat_stale_secs)"
+eval "$(extract_fn _mayor_heartbeat_snapshot)"
+eval "$(extract_fn _mayor_heartbeat_health)"
+eval "$(extract_fn _mayor_exit_state_read)"
+eval "$(extract_fn _deacon_supervise_mayor)"
 eval "$(extract_range _deacon_loop cmd_deacon_start)"
 
 TMP_ROOT="$(mktemp -d)"
@@ -33,6 +47,7 @@ SGT_ROOT="$TMP_ROOT/root"
 SGT_RIGS="$SGT_ROOT/rigs"
 SGT_POLECATS="$SGT_ROOT/polecats"
 SGT_DEACON_HEARTBEAT="$SGT_ROOT/.sgt/deacon-heartbeat.json"
+SGT_CONFIG="$SGT_ROOT/.sgt"
 mkdir -p "$SGT_RIGS" "$SGT_POLECATS" "$(dirname "$SGT_DEACON_HEARTBEAT")"
 printf 'org/repo\n' > "$SGT_RIGS/demo"
 
@@ -43,6 +58,13 @@ export SGT_ROOT SGT_RIGS SGT_POLECATS SGT_DEACON_HEARTBEAT EVENT_LOG TRACE_LOG S
 
 log_event() {
   echo "$*" >> "$EVENT_LOG"
+}
+
+_escape_quotes() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
 }
 
 cmd_witness_start() { :; }
@@ -124,6 +146,21 @@ _mayor_record_decision() {
   printf '%s|%s|%s\n' "$context" "$workspace" "$entry" >> "$DECISION_LOG"
 }
 
+_mayor_last_cycle_state_read() {
+  printf '1773244186|2026-03-11T08:29:46-07:00|merged:pr#192:#191:sgt|completed\n'
+}
+
+_mayor_exit_state_write() {
+  :
+}
+
+_escape_quotes() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
 _MAYOR_EXIT_RECEIPT_LOGGED=0
 _mayor_exit_receipt 42 EXIT
 _mayor_exit_receipt 99 EXIT
@@ -140,7 +177,7 @@ if [[ "$(wc -l < "$DECISION_LOG")" -ne 1 ]]; then
   echo "expected mayor exit receipt to append one decision entry" >&2
   exit 1
 fi
-if ! grep -q 'mayor-stop-unexpected|'"$SGT_ROOT"'|MAYOR STOP reason_code=nonzero-exit exit_code=42 signal=EXIT unexpected=true' "$DECISION_LOG"; then
+if ! grep -q 'mayor-stop-unexpected|'"$SGT_ROOT"'|MAYOR STOP reason_code=nonzero-exit exit_code=42 signal=EXIT unexpected=true last_cycle_trigger=merged:pr#192:#191:sgt last_cycle_status=completed' "$DECISION_LOG"; then
   echo "expected durable unexpected-stop decision entry" >&2
   exit 1
 fi
