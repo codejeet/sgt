@@ -4679,21 +4679,34 @@ doc = {
     "tasks": normalized,
 }
 
+completion_details = one_line(acceptance.get("details") or completion_state.get("details"))
+blocked_reason = one_line(acceptance.get("blocked_reason") or completion_state.get("blocked_reason"))
+if completion_status != "blocked":
+    blocked_reason = ""
+
 completion_doc = {
     "declared": bool(completion_condition or acceptance),
     "condition": completion_condition,
     "status": completion_status,
     "acceptance": acceptance,
-    "details": one_line(acceptance.get("details") or completion_state.get("details")),
-    "blocked_reason": one_line(acceptance.get("blocked_reason") or completion_state.get("blocked_reason")),
+    "details": completion_details,
+    "blocked_reason": blocked_reason,
     "rollup": str(completion_state.get("rollup") or "").strip() or (
         "not_declared" if not (completion_condition or acceptance) else "pending"
     ),
 }
-for field in ("verified_at", "blocked_at", "waived_at", "updated_at"):
-    value = acceptance.get(field) or completion_state.get(field)
+timestamp_field = {
+    "verified": "verified_at",
+    "blocked": "blocked_at",
+    "waived": "waived_at",
+}.get(completion_status)
+if timestamp_field:
+    value = acceptance.get(timestamp_field) or completion_state.get(timestamp_field)
     if value:
-        completion_doc[field] = str(value)
+        completion_doc[timestamp_field] = str(value)
+updated_at = completion_state.get("updated_at")
+if updated_at:
+    completion_doc["updated_at"] = str(updated_at)
 doc["completion"] = completion_doc
 
 tmp = state_file + ".tmp"
