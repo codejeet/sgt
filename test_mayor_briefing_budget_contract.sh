@@ -190,6 +190,12 @@ briefing_path="$(_mayor_build_briefing)"
 
 grep -q '^budget_target_tokens=900$' "$briefing_path" || { echo "expected budget metadata" >&2; exit 1; }
 grep -q '^budget_compaction_applied=true$' "$briefing_path" || { echo "expected compaction to be recorded" >&2; exit 1; }
+used_tokens="$(awk -F= '/^budget_used_tokens_est=/{print $2}' "$briefing_path")"
+[[ -n "$used_tokens" && "$used_tokens" =~ ^[0-9]+$ ]] || { echo "expected numeric used token estimate" >&2; exit 1; }
+if (( used_tokens > 900 )); then
+  echo "expected briefing to stay within configured budget" >&2
+  exit 1
+fi
 grep -q '^protected_fact_sections=system_status,merge_queue,open_issues,open_prs,acceptance_blockers,pending_plan_requests,repo_plans$' "$briefing_path" || {
   echo "expected protected fact contract metadata" >&2
   exit 1
@@ -203,6 +209,18 @@ grep -q 'acceptance_details: Need latest-main proof and operator-visible budget 
   exit 1
 }
 grep -q 'requesting_agent: gastown' "$briefing_path" || { echo "expected pending request to survive" >&2; exit 1; }
+grep -q 'latest-main proof remains required before closure.' "$briefing_path" || {
+  echo "expected durable latest-main proof context to survive" >&2
+  exit 1
+}
+grep -q 'Mayor prompt budget should stay under 100k tokens with lower default when practical.' "$briefing_path" || {
+  echo "expected durable budget context to survive" >&2
+  exit 1
+}
+grep -q 'MAYOR AI CYCLE ABORT reason_code=stale-briefing' "$briefing_path" || {
+  echo "expected recent still-relevant decision to survive" >&2
+  exit 1
+}
 grep -q 'repeated_event_groups:' "$briefing_path" || { echo "expected recent activity summary" >&2; exit 1; }
 if [[ "$(grep -c 'WATCHDOG alpha repeated churn event' "$briefing_path")" -ge 30 ]]; then
   echo "expected repeated watchdog noise to be compacted" >&2
