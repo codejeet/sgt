@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Verified Mayor context-compaction acceptance on latest `master` commit `bb6478e1ce0427f27e40d4de6adff2ccad82fcd7`: `./test_mayor_context_compaction_latest_main_proof.sh` and `./test_mayor_briefing_budget_contract.sh` both passed, confirming the configured budget stayed under cap while protected facts and operator-visible budget telemetry survived compaction.
 - Mayor briefing assembly now enforces a configurable prompt budget (`SGT_MAYOR_PROMPT_BUDGET_TOKENS`, default `60000`) with protected-fact sections for active work state, acceptance blockers, pending requests, and repo-plan status.
 - Briefing generation now compacts repeated recent activity / decision churn, records budget usage plus kept-vs-summarized sections inside `~/.sgt/mayor-briefing.md`, and emits structured `MAYOR_BRIEFING_BUDGET` telemetry for operators.
 - `sgt status` and `sgt status --json` now surface the latest mayor briefing budget snapshot so operators can see target/used/protected tokens plus kept-vs-summarized sections without opening the briefing file manually.
