@@ -179,3 +179,5 @@ Add a Mayor-side context compaction layer before prompt assembly so the effectiv
 
 This is a feature request against the `sgt` repo / Mayor control-plane behavior.
 ```
+- 2026-03-12T23:51:22+01:00 — 2026-03-12 — Mayor briefing assembly now enforces SGT_MAYOR_PROMPT_BUDGET_TOKENS (default 60000) with protected sections for system status, merge queue, open issues/PRs, active acceptance blockers, pending plan requests, and repo-plan state; noisy history is compacted into summaries and MAYOR_BRIEFING_BUDGET telemetry records budget use plus kept/summarized/omitted sections.
+- 2026-03-12T23:57:00+01:00 — 2026-03-12 — The repo-owned latest-main proof bundle now runs test_mayor_briefing_budget_contract.sh, so mayor prompt-budget/compaction acceptance is covered by ./test_self_test_convoy_latest_main_proof.sh instead of relying on a standalone test invocation.

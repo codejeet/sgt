@@ -8,5 +8,6 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 bash "$REPO_ROOT/test_plan_completion_acceptance_lifecycle.sh"
 bash "$REPO_ROOT/test_worker_prompt_completion_context.sh"
 bash "$REPO_ROOT/test_mayor_completion_condition_regression.sh"
+bash "$REPO_ROOT/test_mayor_briefing_budget_contract.sh"
 
 echo "SELF-TEST CONVOY LATEST-MAIN PROOF PASSED"

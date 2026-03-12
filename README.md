@@ -188,6 +188,8 @@ Run this on a fresh checkout of the latest `master`/mainline commit when you wan
 ./test_self_test_convoy_latest_main_proof.sh
 ```
 
+That proof bundle covers acceptance lifecycle state, worker completion-context relay, mayor follow-up behavior, and the mayor briefing budget/compaction contract on a latest-main checkout.
+
 This proof path intentionally bundles the three convoy checks that matter:
 - `test_plan_completion_acceptance_lifecycle.sh` proves repo plans keep `tasks exhausted + acceptance pending/blocked/verified/waived` states deterministic.
 - `test_worker_prompt_completion_context.sh` proves workers receive the larger completion condition plus acceptance context.
