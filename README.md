@@ -195,6 +195,20 @@ This proof path intentionally bundles the three convoy checks that matter:
 - `test_worker_prompt_completion_context.sh` proves workers receive the larger completion condition plus acceptance context.
 - `test_mayor_completion_condition_regression.sh` proves mayor does not go idle-green when only intermediate tasks merged and latest-main acceptance is still unmet.
 
+### Mayor context compaction latest-main proof path
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want the narrow proof for Mayor prompt-budget and context-compaction acceptance:
+
+```bash
+./test_mayor_context_compaction_latest_main_proof.sh
+```
+
+That proof path runs `test_mayor_briefing_budget_contract.sh` and proves all of the acceptance points specific to Mayor compaction on latest main:
+- briefing assembly stays within the configured token budget
+- protected facts survive compaction, including open issues/PRs, blockers, plan state, and durable latest-main proof context
+- repeated watchdog churn is summarized instead of appended raw
+- operator-visible telemetry remains available in `MAYOR_BRIEFING_BUDGET`, `sgt status`, and `sgt status --json`
+
 ### Manual control
 
 ```bash
