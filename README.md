@@ -131,11 +131,46 @@ Acceptance status values:
 - `blocked`: waiting on an external condition; mayor should not mark all-clear
 - `waived`: a human explicitly waived the condition
 
+### Minimal completion-condition example
+
+Use this when the repo has one mergeable implementation task, but the real definition of done is a later verification on latest `master`:
+
+```json
+{
+  "version": 1,
+  "rig": "demo",
+  "policy": { "max_in_flight": 1 },
+  "completion_condition": "On latest master, the operator can run the smoke test from a fresh state and see it pass.",
+  "acceptance": {
+    "status": "pending",
+    "details": "Run ./scripts/smoke.sh --fresh after the implementation PR merges."
+  },
+  "tasks": [
+    { "id": "fix-smoke", "title": "Fix the smoke-test failure" }
+  ]
+}
+```
+
+What this means:
+- the issue/PR for `fix-smoke` is only intermediate work
+- when that task merges, the rig is still not done while `acceptance.status` is `pending`
+- mayor and worker prompts will keep surfacing the larger completion condition until acceptance is `verified`, `waived`, or explicitly `blocked`
+
 ### Recommended operator pattern
 
 Declare the end condition in `SGT_PLAN.json`, not just the task list:
 - set `completion_condition` to the real repo-level definition of done
 - set `acceptance.status` and `acceptance.details` to the current verification state
+
+### Dispatcher pattern
+
+Use this loop when dispatching work from a plan with a repo-level completion condition:
+
+1. Declare the real definition of done in `completion_condition`, then set `acceptance.status` to `pending` until that condition is actually checked on latest `master`.
+2. Dispatch normal mergeable work from `tasks[]`; treat those issues as intermediate steps, not final acceptance.
+3. After each merge, either dispatch the next ready task or run the stated acceptance check if the task graph is exhausted.
+4. If verification fails on latest `master`, record durable evidence with `sgt create blocker <rig> "Verified acceptance still fails after merge: ..."` so the rig cannot go idle-green.
+5. Keep dispatching follow-up fixes until the verification passes, then update `SGT_PLAN.json` to `acceptance.status: "verified"` and resolve any open blocker with `sgt blocker resolve <blocker-id> --note "Acceptance now passes on latest master"`.
 
 Use blockers only for verified red acceptance after merges:
 - when intermediate PRs merge but fresh verification is still red, run `sgt create blocker <rig> ...`
