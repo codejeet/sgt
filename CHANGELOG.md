@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Plan-state acceptance snapshots now clear stale terminal timestamps/reasons when `acceptance.status` changes, so `blocked -> verified/waived` transitions cannot preserve old `blocked_at` or `blocked_reason` data.
+- Added deterministic regression coverage for the full acceptance lifecycle in `test_plan_completion_acceptance_lifecycle.sh`, covering task exhaustion plus `pending -> blocked -> verified -> waived` rollups.
 - Mayor now writes a durable runtime heartbeat plus last-cycle receipt, so deacon can distinguish `session-missing`, `heartbeat-missing`, `heartbeat-invalid`, and `heartbeat-stale` supervision failures instead of only noticing a missing tmux session.
 - Mayor exit receipts now persist the last completed cycle trigger/status in `~/.sgt/mayor-exit.state`, and deacon restart telemetry includes those fields so post-merge exits are explicit in both operator output and `DEACON_RESTART_MAYOR` events.
 - Added deterministic regression coverage for mayor going off after a successful merge-triggered cycle in `test_mayor_post_merge_runtime_supervision.sh` (wired into `test_mayor_wake_replay_regression.sh`).
