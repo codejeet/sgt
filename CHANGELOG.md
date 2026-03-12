@@ -4,6 +4,7 @@
 
 - Mayor briefing assembly now enforces a configurable prompt budget (`SGT_MAYOR_PROMPT_BUDGET_TOKENS`, default `60000`) with protected-fact sections for active work state, acceptance blockers, pending requests, and repo-plan status.
 - Briefing generation now compacts repeated recent activity / decision churn, records budget usage plus kept-vs-summarized sections inside `~/.sgt/mayor-briefing.md`, and emits structured `MAYOR_BRIEFING_BUDGET` telemetry for operators.
+- `sgt status` and `sgt status --json` now surface the latest mayor briefing budget snapshot so operators can see target/used/protected tokens plus kept-vs-summarized sections without opening the briefing file manually.
 - Added regression coverage for the mayor prompt-budget contract in `test_mayor_briefing_budget_contract.sh`.
 - Mayor notify receipt failures now fail open after durable escalation logging, preventing `sgt mayor notify` false-negatives from converting successful mayor AI work into `ai-fail-closed` restart churn; `sgt status` surfaces the latest notify warning and `sgt trail` classifies `[work]` vs `[retry-noise]`.
 - Plan-state acceptance snapshots now clear stale terminal timestamps/reasons when `acceptance.status` changes, so `blocked -> verified/waived` transitions cannot preserve old `blocked_at` or `blocked_reason` data.

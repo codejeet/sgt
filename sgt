@@ -6274,7 +6274,9 @@ cmd_status_json() {
   fi
   local review_watch_count review_watch_oldest review_watch_threshold
   IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+  local briefing_budget_path briefing_budget_target briefing_budget_used briefing_budget_remaining briefing_budget_protected briefing_budget_compaction briefing_budget_kept briefing_budget_summarized briefing_budget_omitted
+  IFS='|' read -r briefing_budget_path briefing_budget_target briefing_budget_used briefing_budget_remaining briefing_budget_protected briefing_budget_compaction briefing_budget_kept briefing_budget_summarized briefing_budget_omitted <<< "$(_mayor_briefing_budget_snapshot)"
+  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")},\"briefing_budget\":{\"path\":$(_json_quote "$briefing_budget_path"),\"target_tokens\":$(_json_quote "$briefing_budget_target"),\"used_tokens_est\":$(_json_quote "$briefing_budget_used"),\"remaining_tokens_est\":$(_json_quote "$briefing_budget_remaining"),\"protected_tokens_est\":$(_json_quote "$briefing_budget_protected"),\"compaction_applied\":$(_json_quote "$briefing_budget_compaction"),\"kept_sections\":$(_json_quote "$briefing_budget_kept"),\"summarized_sections\":$(_json_quote "$briefing_budget_summarized"),\"omitted_sections\":$(_json_quote "$briefing_budget_omitted")}}")
 
   local df dname
   if [[ -d "$SGT_CONFIG/dogs" ]]; then
@@ -6558,6 +6560,12 @@ _cmd_status_human() {
   fi
   local review_watch_count review_watch_oldest review_watch_threshold
   IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
+  local briefing_budget_path briefing_budget_target briefing_budget_used briefing_budget_remaining briefing_budget_protected briefing_budget_compaction briefing_budget_kept briefing_budget_summarized briefing_budget_omitted
+  IFS='|' read -r briefing_budget_path briefing_budget_target briefing_budget_used briefing_budget_remaining briefing_budget_protected briefing_budget_compaction briefing_budget_kept briefing_budget_summarized briefing_budget_omitted <<< "$(_mayor_briefing_budget_snapshot)"
+  if [[ -n "$briefing_budget_target" ]]; then
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "briefing budget: target=${briefing_budget_target} used=${briefing_budget_used:-unknown} remaining=${briefing_budget_remaining:-unknown} protected=${briefing_budget_protected:-unknown} compaction=${briefing_budget_compaction:-false}" "$(_reset)"
+    printf "  %-16s %s%s%s\n" "" "$(_dim)" "budget sections: kept=${briefing_budget_kept:-none} summarized=${briefing_budget_summarized:-none} omitted=${briefing_budget_omitted:-none} path=${briefing_budget_path:-unknown}" "$(_reset)"
+  fi
   if [[ "$review_watch_count" =~ ^[0-9]+$ && "$review_watch_count" -gt 0 ]]; then
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "review watchdog: ${review_watch_count} stalled REVIEW_UNCLEAR (oldest=${review_watch_oldest}s threshold>=${review_watch_threshold}s)" "$(_reset)"
   else
@@ -9323,6 +9331,41 @@ _mayor_briefing_token_budget() {
     tokens=60000
   fi
   echo "$tokens"
+}
+
+_mayor_briefing_budget_snapshot() {
+  local briefing="${1:-$SGT_CONFIG/mayor-briefing.md}"
+  python3 - "$briefing" <<'PY' 2>/dev/null || echo "|||||||||"
+import os
+import sys
+
+path = sys.argv[1]
+keys = [
+    "budget_target_tokens",
+    "budget_used_tokens_est",
+    "budget_remaining_tokens_est",
+    "budget_protected_tokens_est",
+    "budget_compaction_applied",
+    "budget_kept_sections",
+    "budget_summarized_sections",
+    "budget_omitted_sections",
+]
+if not path or not os.path.exists(path):
+    print("|||||||||")
+    sys.exit(0)
+
+values = {key: "" for key in keys}
+with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    for raw in fh:
+        line = raw.rstrip("\n")
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in values:
+            values[key] = value
+
+print("|".join([path] + [values[key] for key in keys]))
+PY
 }
 
 _mayor_briefing_recent_activity_section() {

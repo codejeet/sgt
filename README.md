@@ -255,6 +255,12 @@ Mayor AI briefing generation also has a strict freshness gate:
   - noisy history (`Recent Activity`, `Recent Mayor Decisions`, durable-context notes, escalation JSON) is compacted or omitted before protected facts are dropped
   - the briefing file now records `budget_target_tokens`, `budget_used_tokens_est`, `budget_kept_sections`, `budget_summarized_sections`, and `budget_omitted_sections`
   - mayor emits structured `MAYOR_BRIEFING_BUDGET ...` telemetry so operators can see what was kept versus summarized
+  - `sgt status` now surfaces the latest briefing budget snapshot directly under the mayor agent, including target/used/protected tokens plus kept/summarized/omitted sections and the source briefing path
+- Operator inspection path for compaction telemetry:
+  - quick check: run `sgt status` and inspect the mayor `briefing budget:` / `budget sections:` lines
+  - machine-readable check: run `sgt status --json` and read `agents[].briefing_budget` for the `mayor` entry
+  - raw source of truth: open `~/.sgt/mayor-briefing.md` to inspect the embedded `budget_*` metadata and the actual compacted briefing body
+  - event stream: filter `~/.sgt/sgt.log` or `sgt trail` for `MAYOR_BRIEFING_BUDGET` to see per-cycle budget telemetry
 - If the briefing is stale/invalid, mayor performs one immediate auto-refresh and re-check.
 - If freshness still fails after refresh, mayor aborts that AI cycle (`MAYOR_AI_CYCLE aborted reason=stale-briefing`) instead of sending stale context to the model.
 - Structured freshness telemetry is emitted on each path:

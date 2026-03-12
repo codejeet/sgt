@@ -227,6 +227,29 @@ if [[ "$(grep -c 'WATCHDOG alpha repeated churn event' "$briefing_path")" -ge 30
   exit 1
 fi
 grep -q 'MAYOR_BRIEFING_BUDGET budget_tokens=900' "$EVENT_LOG" || { echo "expected budget log event" >&2; exit 1; }
+
+ln -s "$SGT_CONFIG" "$SGT_ROOT/.sgt"
+cp "$SGT_LOG" "$SGT_ROOT/sgt.log"
+
+status_output="$("$SGT_SCRIPT" status)"
+printf '%s\n' "$status_output" | grep -q 'briefing budget: target=900 used=' || {
+  echo "expected status to surface mayor briefing budget" >&2
+  exit 1
+}
+printf '%s\n' "$status_output" | grep -q 'budget sections: kept=' || {
+  echo "expected status to surface kept/summarized sections" >&2
+  exit 1
+}
+
+status_json="$("$SGT_SCRIPT" status --json)"
+printf '%s\n' "$status_json" | grep -q '"briefing_budget":{"path":' || {
+  echo "expected status json to expose briefing budget object" >&2
+  exit 1
+}
+printf '%s\n' "$status_json" | grep -q '"target_tokens":"900"' || {
+  echo "expected status json to expose briefing budget target" >&2
+  exit 1
+}
 BASH
 
 echo "ALL TESTS PASSED"
