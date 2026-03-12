@@ -1063,6 +1063,20 @@ _mayor_notify_receipt_has_token() {
   [[ "$text" =~ (^|[^[:alnum:]_])${token}([^[:alnum:]_]|$) ]]
 }
 
+_mayor_notify_receipt_json_bool() {
+  local text="${1:-}" field="${2:-}"
+  [[ -n "$field" ]] || return 1
+  [[ "$text" =~ \"$field\"[[:space:]]*:[[:space:]]*(true|false) ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+_mayor_notify_receipt_json_string() {
+  local text="${1:-}" field="${2:-}"
+  [[ -n "$field" ]] || return 1
+  [[ "$text" =~ \"$field\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 _mayor_notify_decision_outcome() {
   local outcome="${1:-}" reason="${2:-}"
   if [[ "$outcome" == "delivered" ]]; then
@@ -1077,18 +1091,37 @@ _mayor_notify_decision_outcome() {
 }
 
 _mayor_notify_classify_receipt() {
-  local send_rc="${1:-1}" details="${2:-}" details_one_line details_lower
+  local send_rc="${1:-1}" details="${2:-}" details_one_line details_lower json_delivered="" json_delivery_status="" json_delivery_error=""
   _MAYOR_NOTIFY_CLASSIFY_OUTCOME="transport-failure"
   _MAYOR_NOTIFY_CLASSIFY_REASON="transport-command-failed"
   _MAYOR_NOTIFY_CLASSIFY_MATCHER="transport-command-failed"
   details_one_line="$(_one_line "$details")"
   details_lower="$(printf '%s' "$details_one_line" | tr '[:upper:]' '[:lower:]')"
+  json_delivered="$(_mayor_notify_receipt_json_bool "$details_one_line" "delivered" 2>/dev/null || true)"
+  json_delivery_status="$(_mayor_notify_receipt_json_string "$details_one_line" "deliveryStatus" 2>/dev/null || true)"
+  json_delivery_error="$(_mayor_notify_receipt_json_string "$details_one_line" "deliveryError" 2>/dev/null || true)"
 
   if [[ "$send_rc" -eq 0 ]]; then
     if [[ "$details_lower" =~ stale[[:space:]_-]*ack|ack[[:space:]_-]*stale|mismatched[[:space:]_-]*ack ]]; then
       _MAYOR_NOTIFY_CLASSIFY_OUTCOME="stale-ack"
       _MAYOR_NOTIFY_CLASSIFY_REASON="stale-ack"
       _MAYOR_NOTIFY_CLASSIFY_MATCHER="stale-ack-pattern"
+    elif [[ "$json_delivered" == "false" && "$json_delivery_status" == "not-delivered" ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="json-not-delivered"
+    elif [[ "$json_delivered" == "true" ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="json-delivered-true"
+    elif [[ "$json_delivery_status" == "delivered" ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="json-delivery-status"
+    elif [[ "$json_delivery_status" == "not-delivered" || -n "$json_delivery_error" ]]; then
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="missing-ack"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="json-delivery-error"
     elif [[ "$details_lower" =~ (^|[^[:alnum:]_])ack[[:space:]]*=[[:space:]]*(delivered|ok|true|1)([^[:alnum:]_]|$) ]]; then
       _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
       _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
@@ -1114,9 +1147,9 @@ _mayor_notify_classify_receipt() {
       _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
       _MAYOR_NOTIFY_CLASSIFY_MATCHER="roger-token"
     else
-      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="missing-ack"
-      _MAYOR_NOTIFY_CLASSIFY_REASON="missing-ack"
-      _MAYOR_NOTIFY_CLASSIFY_MATCHER="no-ack-pattern"
+      _MAYOR_NOTIFY_CLASSIFY_OUTCOME="delivered"
+      _MAYOR_NOTIFY_CLASSIFY_REASON="ack-verified"
+      _MAYOR_NOTIFY_CLASSIFY_MATCHER="transport-exit-zero"
     fi
     return 0
   fi
@@ -5354,7 +5387,7 @@ _mayor_notify_rigger() {
     verify_reason="transport-command-failed"
     verify_details=""
 
-    local -a cmd=(openclaw agent --agent "$agent" --deliver --message "[SGT Mayor] $message" --channel "$channel")
+    local -a cmd=(openclaw agent --agent "$agent" --deliver --json --message "[SGT Mayor] $message" --channel "$channel")
     [[ -n "$to" ]] && cmd+=(--to "$to")
     [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
     set +e

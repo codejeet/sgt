@@ -61,8 +61,12 @@ case "$CASE_NAME" in
     echo "rOgEr?"
     exit 0
     ;;
-  non_ack_reply)
-    echo "queued for routing"
+  plain_reply_success)
+    echo "Working on it now."
+    exit 0
+    ;;
+  json_not_delivered)
+    printf '%s\n' '{"summary":"not delivered","delivered":false,"deliveryStatus":"not-delivered","deliveryError":"reply target missing"}'
     exit 0
     ;;
   transient_then_success)
@@ -199,6 +203,27 @@ run_case_transient_then_success() {
   }
 }
 
+run_case_plain_reply_success() {
+  local env_meta home_dir mock_bin state_dir decision_log
+  env_meta="$(setup_case_env plain_reply_success)"
+  IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
+
+  env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    SGT_MOCK_NOTIFY_STATE="$state_dir" \
+    SGT_MOCK_NOTIFY_CASE="plain_reply_success" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "plain reply success case" >/dev/null'
+
+  [[ "$(cat "$state_dir/openclaw.count")" == "1" ]] || { echo "expected plain reply success case to send exactly once" >&2; exit 1; }
+  decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=1 .*outcome=delivered .*matcher=transport-exit-zero' "$decision_log" || {
+    echo "expected successful plain reply text to be accepted via transport-exit-zero" >&2
+    exit 1
+  }
+}
+
 run_case_hard_failure_deduped_escalation() {
   local env_meta home_dir mock_bin state_dir decision_log
   env_meta="$(setup_case_env hard_failure)"
@@ -263,9 +288,9 @@ run_case_restart_replay() {
   }
 }
 
-run_case_non_ack_retry_and_escalate() {
+run_case_json_not_delivered_retry_and_escalate() {
   local env_meta home_dir mock_bin state_dir decision_log
-  env_meta="$(setup_case_env non_ack_reply)"
+  env_meta="$(setup_case_env json_not_delivered)"
   IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
 
   env -i \
@@ -273,21 +298,21 @@ run_case_non_ack_retry_and_escalate() {
     PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     SGT_ROOT="$home_dir/sgt" \
     SGT_MOCK_NOTIFY_STATE="$state_dir" \
-    SGT_MOCK_NOTIFY_CASE="non_ack_reply" \
-    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "non-ack case" >/dev/null || true'
+    SGT_MOCK_NOTIFY_CASE="json_not_delivered" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "json not delivered case" >/dev/null || true'
 
-  [[ "$(cat "$state_dir/openclaw.count")" == "2" ]] || { echo "expected non-ack case to retry once before escalation" >&2; exit 1; }
+  [[ "$(cat "$state_dir/openclaw.count")" == "2" ]] || { echo "expected json not-delivered case to retry once before escalation" >&2; exit 1; }
   decision_log="$home_dir/sgt/.sgt/mayor-decisions.log"
-  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=1 .*outcome=missing-ack .*matcher=no-ack-pattern' "$decision_log" || {
-    echo "expected attempt 1 missing-ack matcher in non-ack case" >&2
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=1 .*outcome=missing-ack .*matcher=json-not-delivered' "$decision_log" || {
+    echo "expected attempt 1 json-not-delivered matcher in json not-delivered case" >&2
     exit 1
   }
-  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=2 .*outcome=missing-ack .*matcher=no-ack-pattern' "$decision_log" || {
-    echo "expected attempt 2 missing-ack matcher in non-ack case" >&2
+  grep -q 'MAYOR NOTIFY RECEIPT .*attempt=2 .*outcome=missing-ack .*matcher=json-not-delivered' "$decision_log" || {
+    echo "expected attempt 2 json-not-delivered matcher in json not-delivered case" >&2
     exit 1
   }
-  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-missing-ack .*raw_reason=notify-missing-ack .*matcher=no-ack-pattern' "$decision_log")" -ne 1 ]]; then
-    echo "expected one notify-missing-ack escalation decision with matcher context in non-ack case" >&2
+  if [[ "$(grep -c 'MAYOR NOTIFY ESCALATE reason=notify-missing-ack .*raw_reason=notify-missing-ack .*matcher=json-not-delivered' "$decision_log")" -ne 1 ]]; then
+    echo "expected one notify-missing-ack escalation decision with matcher context in json not-delivered case" >&2
     exit 1
   fi
 }
@@ -297,9 +322,10 @@ run_case_positive_ack_variant ack_copy copy-token "copy ack variant case"
 run_case_positive_ack_variant ack_ack ack-token "ack token variant case"
 run_case_positive_ack_variant ack_received received-token "received token variant case"
 run_case_positive_ack_variant ack_roger roger-token "roger token variant case"
+run_case_plain_reply_success
 run_case_transient_then_success
 run_case_hard_failure_deduped_escalation
 run_case_restart_replay
-run_case_non_ack_retry_and_escalate
+run_case_json_not_delivered_retry_and_escalate
 
 echo "ALL TESTS PASSED"
