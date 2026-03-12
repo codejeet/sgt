@@ -348,9 +348,11 @@ Mayor notify delivery receipt + retry fence (`sgt mayor notify` / `_mayor_notify
   - `outcome`
 - Transient transport failures (`timeout/network/http-5xx/secondary-rate-limit`) and missing/stale ack outcomes trigger at most one idempotent retry.
 - Non-retriable transport failures are retry-fenced immediately; replay of the same `message_key` does not re-send and emits explicit dedupe skip telemetry.
+- `sgt mayor notify` now fails open after durable receipt/escalation logging, so notify false-negatives do not turn an otherwise completed mayor AI run into `ai-fail-closed` restart churn.
 - Receipt outcomes and escalation/skip reasons are recorded in both:
   - decision log: `MAYOR NOTIFY RECEIPT ...`, `MAYOR NOTIFY ESCALATE ...`, `MAYOR NOTIFY SKIP ...`
-  - activity log: `MAYOR_NOTIFY_RECEIPT ...`, `MAYOR_NOTIFY_ESCALATE ...`, `MAYOR_NOTIFY_ESCALATE_SUPPRESS ...`
+  - activity log: `MAYOR_NOTIFY_RECEIPT ...`, `MAYOR_NOTIFY_ESCALATE ...`, `MAYOR_NOTIFY_ESCALATE_SUPPRESS ...`, `MAYOR_NOTIFY_FAIL_OPEN ...`
+- The latest unresolved notify warning is surfaced in `sgt status` as `notify warning: ... fail_open=true ...`, and `sgt trail` now prints a `signal:` summary plus `[work]` vs `[retry-noise]` tags so real movement is distinguishable from restart/receipt chatter.
 
 Troubleshooting duplicate merged-trigger dispatch skips:
 1. Confirm the durable trigger key exists (key should match `repo+PR+merged_head`):

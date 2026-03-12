@@ -317,6 +317,58 @@ run_case_json_not_delivered_retry_and_escalate() {
   fi
 }
 
+run_case_fail_open_status_and_trail() {
+  local env_meta home_dir mock_bin state_dir status_out trail_out
+  env_meta="$(setup_case_env fail_open_status)"
+  IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
+
+  env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    SGT_MOCK_NOTIFY_STATE="$state_dir" \
+    SGT_MOCK_NOTIFY_CASE="json_not_delivered" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "fail-open case" >/dev/null; echo survived' > "$state_dir/fail-open.out"
+
+  grep -q '^survived$' "$state_dir/fail-open.out" || {
+    echo "expected notify failure to fail open under set -e" >&2
+    exit 1
+  }
+
+  status_out="$(env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt status')"
+  printf '%s\n' "$status_out" | grep -q 'notify warning: ' || {
+    echo "expected status to surface notify warning after fail-open notify" >&2
+    exit 1
+  }
+  printf '%s\n' "$status_out" | grep -q 'outcome=missing-ack reason=missing-ack matcher=json-not-delivered fail_open=true' || {
+    echo "expected status notify warning details after fail-open notify" >&2
+    exit 1
+  }
+
+  printf '[%s] SLING polecat-test rig=sgt issue=#210\n' "$(date -Iseconds)" >> "$home_dir/sgt/sgt.log"
+  trail_out="$(env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt trail 20')"
+  printf '%s\n' "$trail_out" | grep -q 'signal: work=1 retry_noise=' || {
+    echo "expected trail summary to count real work separately from retry noise" >&2
+    exit 1
+  }
+  printf '%s\n' "$trail_out" | grep -q '^\[retry-noise\].*MAYOR_NOTIFY_FAIL_OPEN' || {
+    echo "expected trail to label fail-open notify churn as retry-noise" >&2
+    exit 1
+  }
+  printf '%s\n' "$trail_out" | grep -q '^\[work\].*SLING polecat-test rig=sgt issue=#210' || {
+    echo "expected trail to label real dispatch work separately" >&2
+    exit 1
+  }
+}
+
 run_case_success
 run_case_positive_ack_variant ack_copy copy-token "copy ack variant case"
 run_case_positive_ack_variant ack_ack ack-token "ack token variant case"
@@ -327,5 +379,6 @@ run_case_transient_then_success
 run_case_hard_failure_deduped_escalation
 run_case_restart_replay
 run_case_json_not_delivered_retry_and_escalate
+run_case_fail_open_status_and_trail
 
 echo "ALL TESTS PASSED"

@@ -31,6 +31,7 @@ SGT_MAYOR_AI_CYCLE_STATE="$SGT_CONFIG/mayor-ai-cycle.state"
 SGT_MAYOR_AI_OBSERVABILITY_STATE="$SGT_CONFIG/mayor-ai-observability.state"
 SGT_MAYOR_CRITICAL_ALERT_STATE="$SGT_CONFIG/mayor-critical-alert.state"
 SGT_MAYOR_DECISION_LOG_ALERT_STATE="$SGT_CONFIG/mayor-decision-log-alert.state"
+SGT_MAYOR_NOTIFY_ALERT_STATE="$SGT_CONFIG/mayor-notify-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
 SGT_MAYOR_CI_CHECK_WATCHDOG_STATE="$SGT_CONFIG/mayor-ci-check-watchdog.state"
 SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE="$SGT_CONFIG/mayor-agent-heartbeat-watchdog.state"
@@ -199,6 +200,14 @@ _MAYOR_NOTIFY_RECEIPT_MESSAGE_KEY=""
 _MAYOR_NOTIFY_RECEIPT_ATTEMPT=""
 _MAYOR_NOTIFY_RECEIPT_VERIFIED_AT=""
 _MAYOR_NOTIFY_RECEIPT_OUTCOME=""
+_MAYOR_NOTIFY_RESULT_CHANNEL=""
+_MAYOR_NOTIFY_RESULT_TARGET=""
+_MAYOR_NOTIFY_RESULT_MESSAGE_KEY=""
+_MAYOR_NOTIFY_RESULT_ATTEMPT=""
+_MAYOR_NOTIFY_RESULT_OUTCOME=""
+_MAYOR_NOTIFY_RESULT_REASON=""
+_MAYOR_NOTIFY_RESULT_MATCHER=""
+_MAYOR_NOTIFY_RESULT_ESCALATED=""
 _REFINERY_MERGE_ATTEMPT_KEY=""
 _REFINERY_MERGE_ATTEMPT_FILE=""
 _REFINERY_REVIEW_UNCLEAR_REASON=""
@@ -253,6 +262,46 @@ _mayor_decision_log_failure_state_write() {
 
 _mayor_decision_log_failure_state_clear() {
   rm -f "$SGT_MAYOR_DECISION_LOG_ALERT_STATE"
+}
+
+_mayor_notify_alert_state_read() {
+  local ts="" channel="" target="" message_key="" attempt="" outcome="" reason="" matcher="" fail_open=""
+  if [[ -f "$SGT_MAYOR_NOTIFY_ALERT_STATE" ]]; then
+    IFS='|' read -r ts channel target message_key attempt outcome reason matcher fail_open < "$SGT_MAYOR_NOTIFY_ALERT_STATE" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$channel" \
+    "$target" \
+    "$message_key" \
+    "$attempt" \
+    "$outcome" \
+    "$reason" \
+    "$matcher" \
+    "$fail_open"
+}
+
+_mayor_notify_alert_state_write() {
+  local ts="${1:-}" channel="${2:-}" target="${3:-}" message_key="${4:-}" attempt="${5:-}" outcome="${6:-}" reason="${7:-}" matcher="${8:-}" fail_open="${9:-true}"
+  local state_tmp="${SGT_MAYOR_NOTIFY_ALERT_STATE}.tmp.$$"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$(_escape_wake_value "$channel")" \
+    "$(_escape_wake_value "$target")" \
+    "$(_escape_wake_value "$message_key")" \
+    "$(_escape_wake_value "$attempt")" \
+    "$(_escape_wake_value "$outcome")" \
+    "$(_escape_wake_value "$reason")" \
+    "$(_escape_wake_value "$matcher")" \
+    "$(_escape_wake_value "$fail_open")" > "$state_tmp"
+  mv "$state_tmp" "$SGT_MAYOR_NOTIFY_ALERT_STATE"
+}
+
+_mayor_notify_alert_state_clear() {
+  rm -f "$SGT_MAYOR_NOTIFY_ALERT_STATE"
 }
 
 _mayor_start_receipt_file() {
@@ -965,6 +1014,17 @@ _mayor_notify_receipt_summary() {
     "${_MAYOR_NOTIFY_RECEIPT_ATTEMPT:-0}" \
     "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown}" \
     "$(_escape_quotes "${_MAYOR_NOTIFY_RECEIPT_OUTCOME:-unknown}")"
+}
+
+_mayor_notify_result_set() {
+  _MAYOR_NOTIFY_RESULT_CHANNEL="${1:-}"
+  _MAYOR_NOTIFY_RESULT_TARGET="${2:-}"
+  _MAYOR_NOTIFY_RESULT_MESSAGE_KEY="${3:-}"
+  _MAYOR_NOTIFY_RESULT_ATTEMPT="${4:-}"
+  _MAYOR_NOTIFY_RESULT_OUTCOME="${5:-}"
+  _MAYOR_NOTIFY_RESULT_REASON="${6:-}"
+  _MAYOR_NOTIFY_RESULT_MATCHER="${7:-}"
+  _MAYOR_NOTIFY_RESULT_ESCALATED="${8:-0}"
 }
 
 _mayor_notify_message_key() {
@@ -5305,6 +5365,7 @@ _mayor_notify_rigger() {
   local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
 
   [[ -n "$message" ]] || return 1
+  _mayor_notify_result_set "" "" "" "" "" "" "" "0"
   if [[ "$message" == mayor\ warning:\ decision-log\ write\ failed* ]]; then
     suppress_decision_log=1
   fi
@@ -5321,6 +5382,7 @@ _mayor_notify_rigger() {
     if [[ "$suppress_decision_log" != "1" ]]; then
       _mayor_record_decision "MAYOR NOTIFY SKIP reason=$no_transport_reason retry=no-openclaw $(_mayor_notify_receipt_summary)" "$context" "$SGT_ROOT" || true
     fi
+    _mayor_notify_result_set "rigger" "$target" "$message_key" "1" "skipped-unavailable" "$no_transport_reason" "transport-unavailable" "1"
     return 1
   fi
 
@@ -5356,6 +5418,7 @@ _mayor_notify_rigger() {
     if [[ "$suppress_decision_log" != "1" ]]; then
       _mayor_record_decision "MAYOR NOTIFY SKIP reason=replayed-message-key-existing-success retry=no-op channel=$channel target=$target message_key=$message_key" "$context" "$SGT_ROOT" || true
     fi
+    _mayor_notify_result_set "$channel" "$target" "$message_key" "${attempt_count:-1}" "delivered" "${last_reason:-ack-verified}" "${last_matcher:-replayed-success}" "${escalated:-0}"
     return 0
   fi
 
@@ -5376,6 +5439,7 @@ _mayor_notify_rigger() {
         _mayor_record_decision "MAYOR NOTIFY SKIP reason=notify-retry-budget-exhausted-escalation-deduped normalized_reason=$last_decision_reason channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_decision_outcome raw_outcome=$last_outcome raw_reason=$last_reason matcher=${last_matcher:-unknown}" "$context" "$SGT_ROOT" || true
       fi
     fi
+    _mayor_notify_result_set "$channel" "$target" "$message_key" "${attempt_count:-0}" "$last_outcome" "$last_reason" "${last_matcher:-unknown}" "1"
     return 1
   fi
 
@@ -5391,6 +5455,7 @@ _mayor_notify_rigger() {
         _mayor_record_decision "MAYOR NOTIFY ESCALATE reason=notify-retry-budget-exhausted normalized_reason=$last_decision_reason skip=deduped-replay channel=$channel target=$target message_key=$message_key attempts=$attempt_count outcome=$last_decision_outcome raw_outcome=$last_outcome raw_reason=$last_reason matcher=${last_matcher:-unknown}" "$context" "$SGT_ROOT" || true
       fi
     fi
+    _mayor_notify_result_set "$channel" "$target" "$message_key" "${attempt_count:-0}" "$last_outcome" "$last_reason" "${last_matcher:-unknown}" "1"
     return 1
   fi
 
@@ -5421,6 +5486,7 @@ _mayor_notify_rigger() {
       _mayor_record_decision "MAYOR NOTIFY RECEIPT channel=$channel target=$target message_key=$message_key attempt=$attempt verified_at=${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-unknown} outcome=$decision_outcome raw_outcome=$verify_outcome reason=$verify_reason matcher=$verify_matcher" "$context" "$SGT_ROOT" || true
     fi
     _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "$retry_used" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
+    _mayor_notify_result_set "$channel" "$target" "$message_key" "$attempt" "$verify_outcome" "$verify_reason" "$verify_matcher" "$escalated"
 
     if [[ "$verify_outcome" == "delivered" ]]; then
       echo "[mayor] notified Rigger: $message"
@@ -5449,6 +5515,7 @@ _mayor_notify_rigger() {
   done
 
   if [[ "$delivered" -eq 1 ]]; then
+    _mayor_notify_result_set "$channel" "$target" "$message_key" "$attempt" "delivered" "$verify_reason" "$verify_matcher" "$escalated"
     return 0
   fi
 
@@ -5464,6 +5531,7 @@ _mayor_notify_rigger() {
     escalated=1
     _mayor_notify_state_write "$state_file" "$channel" "$target" "$message_key" "$attempt" "${retry_used:-1}" "$verify_outcome" "$verify_reason" "${_MAYOR_NOTIFY_RECEIPT_VERIFIED_AT:-}" "$escalated" "$verify_matcher" || true
   fi
+  _mayor_notify_result_set "$channel" "$target" "$message_key" "$attempt" "$verify_outcome" "$verify_reason" "$verify_matcher" "$escalated"
   return 1
 }
 
@@ -6096,9 +6164,18 @@ cmd_status_json() {
       log_fail_age=0
     fi
   fi
+  local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+  IFS='|' read -r notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open <<< "$(_mayor_notify_alert_state_read)"
+  notify_alert_age=""
+  if [[ "$notify_alert_ts" =~ ^[0-9]+$ ]]; then
+    notify_alert_age=$(( $(date +%s) - notify_alert_ts ))
+    if [[ "$notify_alert_age" -lt 0 ]]; then
+      notify_alert_age=0
+    fi
+  fi
   local review_watch_count review_watch_oldest review_watch_threshold
   IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+  agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
 
   local df dname
   if [[ -d "$SGT_CONFIG/dogs" ]]; then
@@ -6336,6 +6413,15 @@ _cmd_status_human() {
       log_fail_age=0
     fi
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "decision-log warning: ${log_fail_age}s ago context=$log_fail_context error=$log_fail_error" "$(_reset)"
+  fi
+  local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+  IFS='|' read -r notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open <<< "$(_mayor_notify_alert_state_read)"
+  if [[ "$notify_alert_ts" =~ ^[0-9]+$ ]]; then
+    notify_alert_age=$(( $(date +%s) - notify_alert_ts ))
+    if [[ "$notify_alert_age" -lt 0 ]]; then
+      notify_alert_age=0
+    fi
+    printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "notify warning: ${notify_alert_age}s ago outcome=${notify_alert_outcome:-unknown} reason=${notify_alert_reason:-unknown} matcher=${notify_alert_matcher:-unknown} fail_open=${notify_alert_fail_open:-true} target=${notify_alert_target:-unknown}" "$(_reset)"
   fi
   local review_watch_count review_watch_oldest review_watch_threshold
   IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
@@ -10061,7 +10147,27 @@ MAYORMD
 # Public command: sgt mayor notify "<message>" — lets AI mayor report to Rigger
 cmd_mayor_notify() {
   local message="${1:?usage: sgt mayor notify \"<message>\"}"
-  _mayor_notify_rigger "$message"
+  local rc now_epoch
+  if _mayor_notify_rigger "$message"; then
+    _mayor_notify_alert_state_clear || true
+    return 0
+  fi
+  rc=$?
+
+  now_epoch="$(date +%s)"
+  _mayor_notify_alert_state_write \
+    "$now_epoch" \
+    "${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger}" \
+    "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}" \
+    "${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown}" \
+    "${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0}" \
+    "${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed}" \
+    "${_MAYOR_NOTIFY_RESULT_REASON:-unknown}" \
+    "${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown}" \
+    "true" || true
+  log_event "MAYOR_NOTIFY_FAIL_OPEN channel=${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger} target=\"$(_escape_quotes "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}")\" message_key=${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown} attempt=${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0} outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown} escalated=${_MAYOR_NOTIFY_RESULT_ESCALATED:-0} action=retain-warning-continue"
+  echo "[mayor] notify warning retained without failing command (outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown})"
+  return 0
 }
 
 cmd_mayor_request_list() {
@@ -11051,11 +11157,58 @@ cmd_log() {
 
 # ─── Trail (recent activity feed) ─────────────────────────────────────
 
+_trail_event_category() {
+  local line_lower
+  line_lower="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$line_lower" == *"mayor_notify_escalate"* || "$line_lower" == *"mayor_notify_fail_open"* || "$line_lower" == *"mayor_ai_cycle_fail_closed"* || "$line_lower" == *"status=ai-fail-closed"* || "$line_lower" == *"mayor_stop reason_code=nonzero-exit"* || "$line_lower" == *"deacon_restart_mayor"* || "$line_lower" == *"mayor_dispatch_cooldown_suppressed"* ]]; then
+    echo "retry-noise"
+    return 0
+  fi
+  if [[ "$line_lower" == *"sling "* || "$line_lower" == *"dog_spawn "* || "$line_lower" == *"crew_add "* || "$line_lower" == *"merge_queue_enqueue"* || "$line_lower" == *"mayor_action_receipt success"* || "$line_lower" == *"sweep "* || "$line_lower" == *"nuke "* || "$line_lower" == *"mayor_polecat_cleanup"* || "$line_lower" == *"plan_request_complete"* || "$line_lower" == *"openclaw_notify "* ]]; then
+    echo "work"
+    return 0
+  fi
+  echo "neutral"
+}
+
 cmd_trail() {
   local lines="${1:-20}"
   ensure_init
+  [[ "$lines" =~ ^[0-9]+$ ]] || die "usage: sgt trail [lines]"
+  local activity="" line category work_count=0 retry_noise_count=0 neutral_count=0
+  activity="$(tail -n "$lines" "$SGT_LOG" 2>/dev/null || true)"
+  if [[ -z "$activity" ]]; then
+    info "no activity"
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    category="$(_trail_event_category "$line")"
+    case "$category" in
+      work) work_count=$((work_count + 1)) ;;
+      retry-noise) retry_noise_count=$((retry_noise_count + 1)) ;;
+      *) neutral_count=$((neutral_count + 1)) ;;
+    esac
+  done <<< "$activity"
+
   echo "=== Recent Activity ==="
-  tail -n "$lines" "$SGT_LOG" 2>/dev/null || info "no activity"
+  printf 'signal: work=%s retry_noise=%s neutral=%s\n' "${work_count:-0}" "${retry_noise_count:-0}" "${neutral_count:-0}"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    category="$(_trail_event_category "$line")"
+    case "$category" in
+      work)
+        printf '[work] %s\n' "$line"
+        ;;
+      retry-noise)
+        printf '[retry-noise] %s\n' "$line"
+        ;;
+      *)
+        printf '[neutral] %s\n' "$line"
+        ;;
+    esac
+  done <<< "$activity"
 }
 
 # ─── CLAUDE.md Templates ─────────────────────────────────────────────

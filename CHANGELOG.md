@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Mayor notify receipt failures now fail open after durable escalation logging, preventing `sgt mayor notify` false-negatives from converting successful mayor AI work into `ai-fail-closed` restart churn; `sgt status` surfaces the latest notify warning and `sgt trail` classifies `[work]` vs `[retry-noise]`.
 - Plan-state acceptance snapshots now clear stale terminal timestamps/reasons when `acceptance.status` changes, so `blocked -> verified/waived` transitions cannot preserve old `blocked_at` or `blocked_reason` data.
 - Added deterministic regression coverage for the full acceptance lifecycle in `test_plan_completion_acceptance_lifecycle.sh`, covering task exhaustion plus `pending -> blocked -> verified -> waived` rollups.
 - Added `test_self_test_convoy_latest_main_proof.sh` plus README guidance as the explicit latest-main proof path for the SGT self-test convoy, bundling plan lifecycle, worker prompt relay, and mayor acceptance-follow-up coverage.

@@ -87,3 +87,32 @@ Close it when latest master has:
 ```
 - 2026-03-12T04:17:09+01:00 — 2026-03-12: Mayor notify receipt verification for OpenClaw now calls 'openclaw agent --deliver --json' and treats exit-0 deliveries as success unless JSON or explicit text contains negative delivery evidence; regression coverage includes plain reply-text success and JSON not-delivered retry/escalation.
 - 2026-03-12T04:35:15+01:00 — 2026-03-12 — README now publishes a copyable minimal SGT_PLAN.json example for completion_condition/acceptance plus a dispatcher loop: tasks are intermediate work, verify on latest master when tasks exhaust, create an acceptance blocker only for verified red acceptance after merges, and mark acceptance verified before treating the rig as done.
+- 2026-03-12T04:48:01+01:00 — 2026-03-12 — Worker prompt relay regression now explicitly verifies acceptance rollup and acceptance details appear in both generated CLAUDE.md and runtime tmux prompts for sling and re-sling paths.
+- 2026-03-12T04:51:13+01:00 — Plan-state completion snapshots must only carry the terminal timestamp/reason for the current acceptance.status; otherwise blocked->verified or blocked->waived transitions can leak stale blocked_at/blocked_reason into plan-state and worker/mayor context.
+- 2026-03-12T04:59:03+01:00 — 2026-03-12 — Added test_self_test_convoy_latest_main_proof.sh as the explicit latest-main proof path for the SGT self-test convoy; it bundles acceptance lifecycle, worker prompt relay, and mayor completion-condition follow-up coverage, and README now points operators at that one-command proof.
+- 2026-03-12T05:21:03+01:00 — Acceptance blocker sgt-acceptance-1773289263-f79b8b40 reported by rigger: SGT is currently spamming wake/retry messages because Mayor is flapping, not because useful work is happening.
+
+### Acceptance Blocker sgt-acceptance-1773289263-f79b8b40
+
+- Reported at: 2026-03-12T05:21:03+01:00
+- Reported by: rigger
+- Title: SGT is currently spamming wake/retry messages because Mayor is flapping, not because useful work is happening.
+
+```markdown
+SGT is currently spamming wake/retry messages because Mayor is flapping, not because useful work is happening.
+
+Live evidence from `sgt trail` / `sgt status`:
+- Mayor repeatedly starts, emits notify receipt checks, logs `MAYOR_NOTIFY_ESCALATE ... outcome=missing-ack`, then exits with `MAYOR_STOP reason_code=nonzero-exit exit_code=1 unexpected=true`.
+- Deacon then restarts mayor (`DEACON_RESTART_MAYOR reason=session-missing ...`), which creates another burst of wake/startup messages.
+- Current status shows mayor on, but there are no active polecats and no meaningful work movement at this moment.
+- PMKB specifically is quiet because there are no active PMKB workers right now, not because it is actively coding in the background.
+
+This is an SGT control-plane reliability/spam blocker.
+Do not treat the repeated wake traffic as successful progress.
+
+Needed:
+- identify why mayor still exits nonzero after the recent AI-cycle / notify-related fixes
+- stop the retry/spam loop
+- make notify receipt false-negatives and mayor fail-closed behavior stop generating noisy restart churn
+- ensure real work movement is distinguishable from retry noise
+```
