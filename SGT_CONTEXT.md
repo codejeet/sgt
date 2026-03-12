@@ -116,3 +116,66 @@ Needed:
 - make notify receipt false-negatives and mayor fail-closed behavior stop generating noisy restart churn
 - ensure real work movement is distinguishable from retry noise
 ```
+- 2026-03-12T05:49:23+01:00 — 2026-03-12 — The mayor flapping path in issue #210 was returning nonzero on notify receipt escalation inside AI shells running under ; fix is fail-open notify after durable receipt/escalation logging, surface the latest notify warning in ╭─ Agents ────────────────────────────────────────────────────────────────────╮ daemon on (pid 376043) deacon on last heartbeat: 2026-03-12T05:49:01+01:00 (21s ago, healthy, stale>300s) witness/pmkb on refinery/pmkb on witness/quant on refinery/quant on witness/sgt on refinery/sgt on witness/sstb on refinery/sstb on mayor on lock: state=live/valid ownerPid=599583 startedAt=1773290809 leaseUntil=1773291529 last heartbeat: 2026-03-12T05:46:49+01:00 (153s ago, healthy, stale>720s, phase=startup, trigger=startup) review watchdog: clear (threshold>=900s) ╭─ Dogs ──────────────────────────────────────────────────────────────────────╮ none ╭─ Crew ──────────────────────────────────────────────────────────────────────╮ none ╭─ Merge Queue ───────────────────────────────────────────────────────────────╮ empty ╭─ Polecats ──────────────────────────────────────────────────────────────────╮ pmkb-dacf90fc alive #155 sgt/pmkb-dacf90fc sgt-c1337d5a alive #210 sgt/sgt-c1337d5a 2 polecat(s) tracked, and classify === Recent Activity === [2026-03-12T05:42:33+01:00] RESLING pmkb-dacf90fc rig=pmkb issue=#155 branch=sgt/pmkb-dacf90fc [2026-03-12T05:42:33+01:00] REFINERY_CONFLICT_RESLING_RESUMED issue=#155 repo=codejeet/polymarket-kalshi-copy-trading-bot source_pr=none polecat=pmkb-dacf90fc source_pr_state=CLOSED evidence="/root/sgt/.sgt/refinery-conflicts/4e947b6e7a8f6f04c17ba87dfcaaf56e9f9d9eed786c0b2520aebde68d95d282.state" [2026-03-12T05:44:47+01:00] MAYOR_NOTIFY_RECEIPT channel=last target="channel=last" message_key=notify-cb0d9c9e124cd26d870a67335874a91009e9d1156258ea2f735aebbb6462024c attempt=1 verified_at=2026-03-12T05:44:46+01:00 outcome=delivered reason=channel-last-no-ack-assumed-delivered matcher=channel-last-fail-open details="completed" [2026-03-12T05:44:47+01:00] MAYOR_NOTIFY_RIGGER success channel=last target="channel=last" message_key=notify-cb0d9c9e124cd26d870a67335874a91009e9d1156258ea2f735aebbb6462024c attempt=1 [2026-03-12T05:44:47+01:00] MAYOR_SNAPSHOT_GUARD merge_queue_count snapshot=0 live=0 chosen=0 source=snapshot status=in-sync reason=snapshot-matches-live [2026-03-12T05:44:49+01:00] MAYOR_STOP reason_code=nonzero-exit exit_code=1 signal=EXIT unexpected=true last_cycle_trigger="manual-retry after inert startup" last_cycle_status=completed last_cycle_at="2026-03-12T05:41:23+01:00" [2026-03-12T05:45:00+01:00] DEACON_RESTART_MAYOR reason=session-missing session=off heartbeat_state=ok heartbeat_health=healthy heartbeat_age=26s heartbeat_phase=cycle-begin heartbeat_cycle=1 trigger="PMKB Phase 6 watch 2026-03-12 05:30 CET: latest origin/main 5c3e56e re-verified green on real latest-main path (proof: eligible_markets=162 candidate_wallets=3686 wallet_backfill_trades=51978 selected_wallets=43 copied_trades=357 live_guard=fail_closed; direct fresh-state path also green with ingest/show-wide-proof-after-paper-follow/paper-follow => candidate_wallets=3677 selected_wallets=44 copied_trades=358). Remaining gap is bookkeeping/operator-proof semantics only: repo-local SGT_PLAN.json still reports nodes=8 completed=7 actionable=1 even though acceptance is effectively complete. Active issue #154 / polecat pmkb-53acd650 is the correct remaining lane. Please avoid duplicate dispatch from pending request pmkb-1773289517-5bd5c2ea; reconcile/close that request against #154 and lock acceptance metadata once fresh-state verification is done. Keep live trading fail-closed." last_exit_reason=nonzero-exit last_exit_signal=EXIT last_exit_code=1 last_exit_unexpected=true last_exit_pid=578873 last_cycle_trigger="manual-retry after inert startup" last_cycle_status=completed last_cycle_at="2026-03-12T05:41:23+01:00" [2026-03-12T05:45:00+01:00] MAYOR_SPAWN attempt=mayor-start-1773290700-375867 exec_path="/usr/local/bin/sgt" [2026-03-12T05:45:00+01:00] MAYOR_LOCK_DECISION decision=acquired ownerPid=588082 startedAt=1773290700 leaseUntil=1773291420 reason=empty-or-invalid [2026-03-12T05:45:00+01:00] MAYOR_START [2026-03-12T05:45:00+01:00] MAYOR_LOCK_DECISION decision=reused ownerPid=588082 startedAt=1773290700 leaseUntil=1773291420 reason=same-owner [2026-03-12T05:46:19+01:00] MAYOR_NOTIFY_RECEIPT channel=last target="channel=last" message_key=notify-fc2eb178a88c4542052569e2e9d67d7938c652d112da835d9820bc5ff7001a8c attempt=1 verified_at=2026-03-12T05:46:19+01:00 outcome=delivered reason=channel-last-no-ack-assumed-delivered matcher=channel-last-fail-open details="I’m checking the live PMKB board and the actual issue texts so I can correct the lane instead of blindly relaying Mayor’s warning. I found the exact mismatch: PMKB is moving, but the repo-local plan-state is still internally inconsistent after #154 closed. I’m nudging Mayor to treat #155 as the separate docs/reporting lane you asked for, while reconciling stale acceptance metadata instead of letting the malformed issue replace the real acceptance-lock task. PMKB is moving, but I found a bookkeeping mess I just corrected upward. ### What’s live right now - **PMKB worker active:** `pmkb-dacf90fc` - **issue #155** is open and in flight - **SGT worker active:** `sgt-c1337d5a` on the Mayor flapping blocker ### What I found The real acceptance-lock task **#154** is correctly closed, but PMKB plan-state is still inconsistent: - `completion.acceptance.summary` says Phase 6 is complete via **#154** - but `completion.status` is still **pending** - `rollup` is still **tasks-in-progress** - and stale tasks like **PK44 / PK46** still show pending So the board/state is mixing: - **real acceptance metadata work** - with your newer **docs/reporting/readout** request ### What I did I woke Mayor with the correction: - keep **#155** as the **separate docs/reporting/readout lane** you asked for - do **not** let it replace the already-completed acceptance-lock task - reconcile PMKB repo-local plan/plan-state - clear stale synthetic placeholders - keep live trading fail-closed ### So practical status - **Yes, PMKB is moving** - **#155** should now be treated as the reporting/docs improvement lane - and I’ve explicitly pushed Mayor to clean up the broken acceptance metadata instead of letting the two concerns blur together" [2026-03-12T05:46:19+01:00] MAYOR_NOTIFY_RIGGER success channel=last target="channel=last" message_key=notify-fc2eb178a88c4542052569e2e9d67d7938c652d112da835d9820bc5ff7001a8c attempt=1 [2026-03-12T05:46:20+01:00] MAYOR_SNAPSHOT_GUARD merge_queue_count snapshot=0 live=0 chosen=0 source=snapshot status=in-sync reason=snapshot-matches-live [2026-03-12T05:46:21+01:00] MAYOR_STOP reason_code=nonzero-exit exit_code=1 signal=EXIT unexpected=true last_cycle_trigger="manual-retry after inert startup" last_cycle_status=completed last_cycle_at="2026-03-12T05:41:23+01:00" [2026-03-12T05:46:49+01:00] MAYOR_SPAWN attempt=mayor-start-1773290809-598197 exec_path="/usr/local/bin/sgt" [2026-03-12T05:46:49+01:00] MAYOR_LOCK_DECISION decision=acquired ownerPid=599583 startedAt=1773290809 leaseUntil=1773291529 reason=empty-or-invalid [2026-03-12T05:46:49+01:00] MAYOR_START [2026-03-12T05:46:49+01:00] MAYOR_LOCK_DECISION decision=reused ownerPid=599583 startedAt=1773290809 leaseUntil=1773291529 reason=same-owner [2026-03-12T05:46:50+01:00] SYSTEM_UP output into work vs retry-noise so churn is visible without looking like progress.
+- 2026-03-12T05:49:42+01:00 — 2026-03-12 - Issue #210 root cause: mayor churn came from sgt mayor notify returning nonzero after notify receipt escalation inside AI shells running under set -e. The fix is to fail open after durable receipt and escalation logging, surface the latest notify warning in sgt status, and classify sgt trail output into work versus retry-noise so unresolved acceptance stays visible without looking like progress.
+- 2026-03-12T06:41:58+01:00 — 2026-03-12 — Deacon now treats queued-work refinery sessions with missing/invalid/stale refinery heartbeats as restartable stalls; sgt status marks refinery/<rig> degraded and shows queue watchdog pending/oldest backlog so parked merge-queue items are visible before manual restart.
+- 2026-03-12T23:38:18+01:00 — Plan request sgt-1773355098-365882b0 submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1773355098-365882b0
+
+- Requested at: 2026-03-12T23:38:18+01:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# Mayor Context Compaction / Prompt-Budget Management
+
+## Problem
+
+Mayor context/briefing can drift toward huge prompts (>100k tokens) from accumulated issue churn, stale blockers, repeated watch messages, plan-state noise, and repeated restatements. We need a real feature so Mayor stays sharp and bounded instead of just growing forever.
+
+## Goal
+
+Add a Mayor-side context compaction layer before prompt assembly so the effective prompt stays under a configurable budget while preserving current actionable facts.
+
+## Requested behavior
+
+- Add a Mayor-side context compaction layer before prompt assembly.
+- Keep the effective Mayor context under a configurable budget.
+  - Target: under 100k tokens.
+  - Prefer a lower operational default if practical.
+- Preserve the highest-signal current facts:
+  - active/open issues and PRs
+  - current acceptance blockers
+  - latest detached-proof / latest-main evidence
+  - current plan-state / actionable tasks
+  - recent mayor decisions that still matter
+  - durable project context
+- Compact or summarize stale/redundant history:
+  - repeated watch updates that say the same thing
+  - superseded blocker narratives
+  - closed/merged churn that no longer matters
+  - duplicate restatements of acceptance bars
+- Prefer structured compaction over blind truncation.
+- Make compaction observable to operators:
+  - logs and/or stats
+  - what was kept vs summarized
+  - budget used
+
+## Acceptance criteria
+
+1. Mayor prompt/context assembly enforces a bounded token/size budget rather than unbounded growth.
+2. When over budget, stale history is summarized/compacted while current actionable facts survive intact.
+3. Active blockers/issues/PRs/current plan state are not dropped accidentally.
+4. Repeated stale messages no longer cause prompt bloat or degraded sharpness.
+5. Add tests covering compaction behavior and preservation of active facts.
+6. Add operator-visible docs or status output describing the budget/compaction behavior.
+
+## Design preference from user
+
+- Keep Mayor below 100k tokens and sharp.
+- Use summary checkpoints / rolling compaction rather than feeding raw history forever if needed.
+
+## Notes
+
+This is a feature request against the `sgt` repo / Mayor control-plane behavior.
+```

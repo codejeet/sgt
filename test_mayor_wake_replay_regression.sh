@@ -92,6 +92,9 @@ echo "=== mayor briefing freshness gate ==="
 echo "=== mayor missing briefing fallback ==="
 "$REPO_ROOT/test_mayor_briefing_missing_fallback.sh"
 
+echo "=== mayor briefing budget contract ==="
+"$REPO_ROOT/test_mayor_briefing_budget_contract.sh"
+
 echo "=== mayor AI-cycle timeout recovery ==="
 "$REPO_ROOT/test_mayor_ai_cycle_timeout_recovery.sh"
 
