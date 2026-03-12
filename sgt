@@ -42,6 +42,7 @@ SGT_NOTIFY="$SGT_CONFIG/notify.json"
 SGT_PLAN_REQUESTS="$SGT_CONFIG/plan-requests"
 SGT_PLAN_STATE_DIR="$SGT_CONFIG/plan-state"
 SGT_ACCEPTANCE_BLOCKERS="$SGT_CONFIG/acceptance-blockers"
+SGT_PLAN_BLOCKERS="$SGT_CONFIG/plan-blockers"
 # Review queue removed in v0.5.0 — refinery handles review inline
 
 # AI backend (claude|codex)
@@ -4422,6 +4423,102 @@ _plan_notify_requester() {
   _openclaw_notify_target "$target" "$message" "[SGT Plan]" || true
 }
 
+_plan_blockers_dir() {
+  echo "$SGT_PLAN_BLOCKERS"
+}
+
+_plan_blocker_key() {
+  local rig="${1:-}" task_id="${2:-}"
+  printf '%s--%s\n' "$(_normalize_label "$rig")" "$(_normalize_label "$task_id")"
+}
+
+_plan_blocker_path() {
+  local rig="${1:-}" task_id="${2:-}"
+  echo "$(_plan_blockers_dir)/$(_plan_blocker_key "$rig" "$task_id").env"
+}
+
+_plan_blocker_record() {
+  local rig="${1:-}" task_id="${2:-}" title="${3:-}" reason_code="${4:-unknown}" reason="${5:-unknown}" tick_source="${6:-manual}"
+  local blocker_path
+  blocker_path="$(_plan_blocker_path "$rig" "$task_id")"
+  mkdir -p "$(_plan_blockers_dir)"
+  python3 - "$blocker_path" "$rig" "$task_id" "$title" "$reason_code" "$reason" "$tick_source" <<'PY'
+import os
+import sys
+from datetime import datetime, timezone
+
+path, rig, task_id, title, reason_code, reason, tick_source = sys.argv[1:8]
+doc = {}
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            doc[key] = value
+
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+attempts = int(doc.get("ATTEMPTS", "0") or "0") + 1
+doc.update({
+    "RIG": rig,
+    "TASK_ID": task_id,
+    "TITLE": title,
+    "STATUS": "open",
+    "REASON_CODE": reason_code,
+    "REASON": reason,
+    "TICK_SOURCE": tick_source,
+    "ATTEMPTS": str(attempts),
+    "LAST_SEEN_AT": now,
+})
+doc.setdefault("FIRST_SEEN_AT", now)
+doc.pop("RESOLVED_AT", None)
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    for key in sorted(doc):
+        fh.write(f"{key}={doc[key]}\n")
+os.replace(tmp, path)
+print(os.path.basename(path)[:-4])
+PY
+}
+
+_plan_blocker_resolve() {
+  local rig="${1:-}" task_id="${2:-}"
+  local blocker_path
+  blocker_path="$(_plan_blocker_path "$rig" "$task_id")"
+  [[ -f "$blocker_path" ]] || return 0
+  python3 - "$blocker_path" <<'PY'
+import os
+import sys
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+doc = {}
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        doc[key] = value
+
+if doc.get("STATUS") == "resolved":
+    raise SystemExit(0)
+
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+doc["STATUS"] = "resolved"
+doc["RESOLVED_AT"] = now
+doc["LAST_SEEN_AT"] = now
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    for key in sorted(doc):
+        fh.write(f"{key}={doc[key]}\n")
+os.replace(tmp, path)
+PY
+}
+
 _mayor_rig_actionable_work_counts() {
   local rig="${1:-}" repo="${2:-}"
   local open_prs open_authorized open_polecats pending_plan_requests
@@ -4715,6 +4812,28 @@ os.replace(tmp, state_file)
 PY
 }
 
+_plan_sync_state_and_labels() {
+  local rig="${1:-}" plan_file="${2:-}" repo="${3:-}"
+  [[ -n "$rig" && -n "$plan_file" && -n "$repo" ]] || return 1
+  local -a labels=("plan")
+  local record_type c1 c8
+  while IFS=$'\x1f' read -r record_type c1 _ _ _ _ _ _ c8 _; do
+    [[ -n "$record_type" ]] || continue
+    case "$record_type" in
+      TASK)
+        labels+=("plan-$c1")
+        IFS=',' read -r -a extra_labels <<< "$c8"
+        local label
+        for label in "${extra_labels[@]}"; do
+          [[ -n "$label" ]] || continue
+          labels+=("$label")
+        done
+        ;;
+    esac
+  done < <(_plan_state_snapshot "$rig" "$plan_file")
+  _ensure_labels_exist "$repo" "${labels[@]}"
+}
+
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
   local plan_file repo snapshot_line
@@ -4752,7 +4871,19 @@ _plan_tick_run() {
     esac
   done < <(_plan_state_snapshot "$rig" "$plan_file")
 
-  local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0
+  if ! _plan_sync_state_and_labels "$rig" "$plan_file" "$repo"; then
+    local sync_reason sync_blocker_id
+    sync_reason="failed to sync plan labels/state on repo $repo"
+    sync_blocker_id="$(_plan_blocker_record "$rig" "__plan__" "Plan sync" "plan-sync-failed" "$sync_reason" "$tick_source" 2>/dev/null || true)"
+    log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=__plan__ blocker_id=${sync_blocker_id:-unavailable} reason_code=plan-sync-failed source=$tick_source reason=\"$(_escape_quotes "$sync_reason")\""
+    if [[ "$tick_source" == "mayor" ]]; then
+      _mayor_record_decision "PLAN MOVEMENT BLOCKER rig=$rig task=__plan__ blocker_id=${sync_blocker_id:-unavailable} reason_code=plan-sync-failed retry=next-mayor-cycle reason=\"$(_escape_quotes "$sync_reason")\"" "plan-movement-blocker" "$SGT_ROOT" || true
+    fi
+  else
+    _plan_blocker_resolve "$rig" "__plan__" || true
+  fi
+
+  local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0 dispatch_failures=0 pending_ready=0 pending_blocked=0 last_failure_reason_code="" last_failure_detail=""
   local task_id issue_number issue_state active_polecat
   for task_id in "${task_ids[@]}"; do
     issue_number="${task_issue[$task_id]}"
@@ -4780,7 +4911,7 @@ _plan_tick_run() {
 
   local dispatch_budget=$((max_in_flight - inflight))
   (( dispatch_budget < 0 )) && dispatch_budget=0
-  local deps_ok dep_id label
+  local deps_ok dep_id label sling_out blocker_id failure_reason_code sling_log
   for task_id in "${task_ids[@]}"; do
     [[ "$dispatch_budget" -gt 0 ]] || break
     [[ "${task_status[$task_id]}" == "pending" ]] || continue
@@ -4807,13 +4938,39 @@ _plan_tick_run() {
     if [[ -n "${task_backend[$task_id]}" ]]; then
       sling_args+=(--backend "${task_backend[$task_id]}")
     fi
-    cmd_sling "${sling_args[@]}"
+    sling_log="$(mktemp)"
+    sling_out=""
+    if cmd_sling "${sling_args[@]}" >"$sling_log" 2>&1; then
+      sling_out="$(cat "$sling_log" 2>/dev/null || true)"
+      rm -f "$sling_log"
+      :
+    else
+      sling_out="$(cat "$sling_log" 2>/dev/null || true)"
+      rm -f "$sling_log"
+      if grep -qi 'failed to ensure labels' <<< "$sling_out"; then
+        failure_reason_code="label-ensure-failed"
+      elif grep -qi 'failed to create issue' <<< "$sling_out"; then
+        failure_reason_code="issue-create-failed"
+      else
+        failure_reason_code="dispatch-failed"
+      fi
+      blocker_id="$(_plan_blocker_record "$rig" "$task_id" "${task_title[$task_id]}" "$failure_reason_code" "$(_one_line "$sling_out")" "$tick_source" 2>/dev/null || true)"
+      log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=$task_id blocker_id=${blocker_id:-unavailable} reason_code=$failure_reason_code source=$tick_source reason=\"$(_escape_quotes "$(_one_line "$sling_out")")\""
+      if [[ "$tick_source" == "mayor" ]]; then
+        _mayor_record_decision "PLAN MOVEMENT BLOCKER rig=$rig task=$task_id blocker_id=${blocker_id:-unavailable} reason_code=$failure_reason_code retry=next-mayor-cycle reason=\"$(_escape_quotes "$(_one_line "$sling_out")")\"" "plan-movement-blocker" "$SGT_ROOT" || true
+      fi
+      dispatch_failures=$((dispatch_failures + 1))
+      last_failure_reason_code="$failure_reason_code"
+      last_failure_detail="$(_one_line "$sling_out")"
+      continue
+    fi
     if [[ -n "${_SGT_LAST_SLING_ISSUE_NUMBER:-}" ]]; then
       _plan_state_update_task "$rig" "$task_id" "dispatched" "${_SGT_LAST_SLING_ISSUE_NUMBER:-}" "${_SGT_LAST_SLING_ISSUE_URL:-}"
       task_status["$task_id"]="dispatched"
       task_issue["$task_id"]="${_SGT_LAST_SLING_ISSUE_NUMBER:-}"
       dispatched_count=$((dispatched_count + 1))
       dispatch_budget=$((dispatch_budget - 1))
+      _plan_blocker_resolve "$rig" "$task_id" || true
       _plan_notify_requester "$rig" "rig=$rig task=$task_id dispatched issue=#${_SGT_LAST_SLING_ISSUE_NUMBER:-unknown} title=\"${task_title[$task_id]}\""
     fi
   done
@@ -4821,6 +4978,24 @@ _plan_tick_run() {
   if [[ "$total" -eq 0 ]]; then
     inflight=0
   fi
+
+  for task_id in "${task_ids[@]}"; do
+    [[ "${task_status[$task_id]}" == "pending" ]] || continue
+    deps_ok="true"
+    IFS=',' read -r -a dep_ids <<< "${task_deps[$task_id]}"
+    for dep_id in "${dep_ids[@]}"; do
+      [[ -n "$dep_id" ]] || continue
+      if [[ "${task_status[$dep_id]:-pending}" != "completed" ]]; then
+        deps_ok="false"
+        break
+      fi
+    done
+    if [[ "$deps_ok" == "true" ]]; then
+      pending_ready=$((pending_ready + 1))
+    else
+      pending_blocked=$((pending_blocked + 1))
+    fi
+  done
 
   case "$plan_completion_status" in
     verified)
@@ -4855,7 +5030,7 @@ _plan_tick_run() {
     "$plan_completion_details" \
     "$plan_completion_blocked_reason"
 
-  printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$rig" \
     "$total" \
     "$completed" \
@@ -4866,7 +5041,11 @@ _plan_tick_run() {
     "$plan_completion_status" \
     "$plan_completion_condition" \
     "$plan_completion_details" \
-    "$plan_completion_blocked_reason"
+    "$plan_completion_blocked_reason" \
+    "$dispatch_failures" \
+    "$pending_ready" \
+    "$pending_blocked" \
+    "$last_failure_reason_code"
 }
 
 cmd_create_plan() {
@@ -5379,12 +5558,55 @@ _has_sgt_authorized() {
   echo "$labels" | grep -qx "sgt-authorized"
 }
 
+# Best-effort label metadata for auto-created labels.
+_label_description_for_name() {
+  local label="${1:-}" norm
+  norm="$(_normalize_label "$label")"
+  case "$norm" in
+    sgt-authorized) echo "Authorized for sgt processing — do not apply manually" ;;
+    plan) echo "Tracks repo-plan managed work" ;;
+    plan-*) echo "Tracks a repo-plan task" ;;
+    critical) echo "Critical priority work" ;;
+    high) echo "High priority work" ;;
+    *) echo "Managed by sgt" ;;
+  esac
+}
+
+_label_color_for_name() {
+  local label="${1:-}" norm
+  norm="$(_normalize_label "$label")"
+  case "$norm" in
+    sgt-authorized) echo "0E8A16" ;;
+    plan|plan-*) echo "1D76DB" ;;
+    critical) echo "B60205" ;;
+    high) echo "D93F0B" ;;
+    *) echo "8A8A8A" ;;
+  esac
+}
+
+_ensure_labels_exist() {
+  local repo="${1:-}"
+  shift || true
+  [[ -n "$repo" ]] || return 1
+  local -A seen=()
+  local label norm description color
+  for label in "${@+"$@"}"; do
+    norm="$(_normalize_label "$label")"
+    [[ -n "$norm" ]] || continue
+    [[ -z "${seen[$norm]:-}" ]] || continue
+    seen["$norm"]=1
+    description="$(_label_description_for_name "$label")"
+    color="$(_label_color_for_name "$label")"
+    gh label create "$label" --repo "$repo" \
+      --description "$description" \
+      --color "$color" --force >/dev/null 2>&1 || return 1
+  done
+}
+
 # Ensure the sgt-authorized label exists on a repo (idempotent)
 _ensure_sgt_authorized_label() {
   local repo="$1"
-  gh label create "sgt-authorized" --repo "$repo" \
-    --description "Authorized for sgt processing — do not apply manually" \
-    --color "0E8A16" --force 2>/dev/null || true
+  _ensure_labels_exist "$repo" "sgt-authorized" || true
 }
 
 # Generate polecat name: <rig>-<short-id>
@@ -5525,8 +5747,8 @@ cmd_sling() {
 
   # ── 1. Create GitHub Issue ──
   info "creating issue on $(basename "$repo")..."
-  _ensure_sgt_authorized_label "$repo"
   labels+=("sgt-authorized")
+  _ensure_labels_exist "$repo" "${labels[@]}" || die "failed to ensure labels on $repo"
   local label_args=""
   for l in "${labels[@]+"${labels[@]}"}"; do
     label_args="$label_args --label $l"
@@ -9537,14 +9759,21 @@ _mayor_loop() {
     # === 5b. Auto-tick repo-local plans ===
     for rig_file in "$SGT_RIGS"/*; do
       [[ -f "$rig_file" ]] || continue
-      local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason
+      local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason plan_dispatch_failures plan_pending_ready plan_pending_blocked plan_last_failure_reason
       rname="$(basename "$rig_file")"
       plan_path="$(_plan_file_path "$rname")"
       [[ -f "$plan_path" ]] || continue
       if plan_tick_summary="$(_plan_tick_run "$rname" "mayor" 2>/dev/null | grep '^PLAN_TICK|' | tail -n 1)"; then
-        IFS='|' read -r _ _ plan_total plan_completed plan_inflight plan_dispatched _ plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason <<< "$plan_tick_summary"
+        IFS='|' read -r _ _ plan_total plan_completed plan_inflight plan_dispatched _ plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason plan_dispatch_failures plan_pending_ready plan_pending_blocked plan_last_failure_reason <<< "$plan_tick_summary"
         if [[ "${plan_dispatched:-0}" =~ ^[0-9]+$ ]] && (( plan_dispatched > 0 )); then
           actions_taken+="  - auto-ticked plan for $rname (dispatched_now=${plan_dispatched} completed=${plan_completed}/${plan_total})\n"
+        fi
+        if [[ "${plan_dispatch_failures:-0}" =~ ^[0-9]+$ ]] && (( plan_dispatch_failures > 0 )); then
+          issues_found+="  - plan movement blocked on $rname (dispatch_failures=${plan_dispatch_failures} ready_pending=${plan_pending_ready:-0} reason_code=${plan_last_failure_reason:-dispatch-failed})\n"
+          needs_ai=true
+        elif [[ "${plan_pending_ready:-0}" =~ ^[0-9]+$ && "${plan_inflight:-0}" =~ ^[0-9]+$ ]] && (( plan_pending_ready > 0 )) && (( plan_inflight == 0 )); then
+          issues_found+="  - plan movement stalled on $rname (ready_pending=${plan_pending_ready} blocked_pending=${plan_pending_blocked:-0} inflight=0)\n"
+          needs_ai=true
         fi
         case "${plan_completion_rollup:-not_declared}" in
           tasks-exhausted-awaiting-acceptance)
@@ -9845,6 +10074,21 @@ cmd_mayor_request_complete() {
   ensure_init
   local meta_path="$(_plan_request_meta_path "$request_id")"
   [[ -f "$meta_path" ]] || die "plan request '$request_id' not found"
+  local rig plan_file repo sync_reason sync_blocker_id
+  eval "$(grep -E '^(RIG|REQUESTING_AGENT_ID)=' "$meta_path" 2>/dev/null || true)"
+  rig="${RIG:-}"
+  plan_file="$(_plan_file_path "$rig")"
+  repo="$(rig_repo "$rig" 2>/dev/null || true)"
+  if [[ -n "$rig" && -n "$repo" && -f "$plan_file" ]]; then
+    if ! _plan_sync_state_and_labels "$rig" "$plan_file" "$repo"; then
+      sync_reason="failed to sync plan labels/state on repo $repo while completing request $request_id"
+      sync_blocker_id="$(_plan_blocker_record "$rig" "__plan__" "Plan sync" "plan-sync-failed" "$sync_reason" "mayor-request-complete" 2>/dev/null || true)"
+      log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=__plan__ blocker_id=${sync_blocker_id:-unavailable} reason_code=plan-sync-failed source=mayor-request-complete reason=\"$(_escape_quotes "$sync_reason")\""
+      warn "$sync_reason"
+    else
+      _plan_blocker_resolve "$rig" "__plan__" || true
+    fi
+  fi
   _plan_request_update_field "$request_id" "STATUS" "planned"
   _plan_request_update_field "$request_id" "COMPLETED_AT" "$(date -Iseconds)"
   _plan_request_update_field "$request_id" "LAST_UPDATED_AT" "$(date -Iseconds)"
