@@ -180,6 +180,19 @@ How SGT relays this:
 - mayor uses `completion_condition`, `acceptance`, and active blockers to decide whether the rig is actually done or still needs follow-up
 - coding-worker prompts (`sling` and re-sling) inject the same completion condition, acceptance status/details, blocker summary, and a warning that merged intermediate work is not enough while acceptance is still pending or blocked
 
+### Self-test convoy latest-main proof path
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that the self-test convoy still works end to end:
+
+```bash
+./test_self_test_convoy_latest_main_proof.sh
+```
+
+This proof path intentionally bundles the three convoy checks that matter:
+- `test_plan_completion_acceptance_lifecycle.sh` proves repo plans keep `tasks exhausted + acceptance pending/blocked/verified/waived` states deterministic.
+- `test_worker_prompt_completion_context.sh` proves workers receive the larger completion condition plus acceptance context.
+- `test_mayor_completion_condition_regression.sh` proves mayor does not go idle-green when only intermediate tasks merged and latest-main acceptance is still unmet.
+
 ### Manual control
 
 ```bash
