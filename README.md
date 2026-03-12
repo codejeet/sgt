@@ -247,6 +247,12 @@ Mayor AI briefing generation also has a strict freshness gate:
   - `generated_at: <ISO-8601 timestamp>`
   - `generated_at_epoch: <unix-seconds>`
 - Mayor validates briefing age against `SGT_MAYOR_BRIEFING_STALE_SECS` (default `5` seconds).
+- Mayor now also enforces a prompt-budget contract on the generated briefing:
+  - default budget: `SGT_MAYOR_PROMPT_BUDGET_TOKENS=60000` (keeps the effective context well below 100k unless explicitly overridden)
+  - protected sections always survive in the briefing metadata/assembly: system status, merge queue, open issues, open PRs, active acceptance blockers, pending plan requests, and repo-plan state
+  - noisy history (`Recent Activity`, `Recent Mayor Decisions`, durable-context notes, escalation JSON) is compacted or omitted before protected facts are dropped
+  - the briefing file now records `budget_target_tokens`, `budget_used_tokens_est`, `budget_kept_sections`, `budget_summarized_sections`, and `budget_omitted_sections`
+  - mayor emits structured `MAYOR_BRIEFING_BUDGET ...` telemetry so operators can see what was kept versus summarized
 - If the briefing is stale/invalid, mayor performs one immediate auto-refresh and re-check.
 - If freshness still fails after refresh, mayor aborts that AI cycle (`MAYOR_AI_CYCLE aborted reason=stale-briefing`) instead of sending stale context to the model.
 - Structured freshness telemetry is emitted on each path:

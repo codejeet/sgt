@@ -9051,10 +9051,30 @@ cmd_daemon_status() {
 
 _mayor_build_briefing() {
   local briefing="$SGT_CONFIG/mayor-briefing.md"
-  local briefing_tmp now_iso now_epoch
+  local briefing_tmp briefing_dir now_iso now_epoch budget_tokens
+  local status_file merge_queue_file open_issues_file open_prs_file pending_requests_file
+  local repo_plans_file blockers_file context_file activity_file decisions_file escalation_file
+  local manifest_file stats_file line_count
   now_iso="$(date -Iseconds)"
   now_epoch="$(date +%s)"
+  budget_tokens="$(_mayor_briefing_token_budget)"
   briefing_tmp="$(mktemp "$SGT_CONFIG/mayor-briefing.tmp.XXXXXX")"
+  briefing_dir="$(mktemp -d "$SGT_CONFIG/mayor-briefing.parts.XXXXXX")"
+  trap 'rm -rf "$briefing_dir"' RETURN
+
+  status_file="$briefing_dir/system-status.md"
+  merge_queue_file="$briefing_dir/merge-queue.md"
+  open_issues_file="$briefing_dir/open-issues.md"
+  open_prs_file="$briefing_dir/open-prs.md"
+  pending_requests_file="$briefing_dir/pending-plan-requests.md"
+  repo_plans_file="$briefing_dir/repo-plans.md"
+  blockers_file="$briefing_dir/acceptance-blockers.md"
+  context_file="$briefing_dir/durable-context.md"
+  activity_file="$briefing_dir/recent-activity.md"
+  decisions_file="$briefing_dir/recent-decisions.md"
+  escalation_file="$briefing_dir/escalation-rules.md"
+  manifest_file="$briefing_dir/sections.tsv"
+  stats_file="$briefing_dir/budget.env"
 
   cat > "$briefing_tmp" <<HEADER
 # SGT System Briefing
@@ -9067,113 +9087,489 @@ generated_at_epoch: $now_epoch
 
 HEADER
 
-  # System status
-  echo "## System Status" >> "$briefing_tmp"
-  echo '```' >> "$briefing_tmp"
-  cmd_status 2>&1 >> "$briefing_tmp"
-  echo '```' >> "$briefing_tmp"
-  echo "" >> "$briefing_tmp"
+  echo "## System Status" > "$status_file"
+  line_count=0
+  echo '```' >> "$status_file"
+  while IFS= read -r line; do
+    line_count=$((line_count + 1))
+    if [[ "$line_count" -le 160 ]]; then
+      printf '%s\n' "$line" >> "$status_file"
+    fi
+  done < <(cmd_status 2>&1 || true)
+  echo '```' >> "$status_file"
+  if [[ "$line_count" -gt 160 ]]; then
+    printf '\n- status_lines_shown: 160 of %s\n' "$line_count" >> "$status_file"
+  fi
+  echo >> "$status_file"
 
-  # Recent log
-  echo "## Recent Activity (last 30 events)" >> "$briefing_tmp"
-  echo '```' >> "$briefing_tmp"
-  tail -30 "$SGT_LOG" 2>/dev/null >> "$briefing_tmp" || echo "no log" >> "$briefing_tmp"
-  echo '```' >> "$briefing_tmp"
-  echo "" >> "$briefing_tmp"
-
-  # Merge queue (refinery handles review + merge)
-  echo "## Merge Queue (pending refinery review + merge)" >> "$briefing_tmp"
-  local mq_count=0
+  echo "## Merge Queue (pending refinery review + merge)" > "$merge_queue_file"
+  local mq_count=0 mqf
   if [[ -d "$SGT_CONFIG/merge-queue" ]]; then
     for mqf in "$SGT_CONFIG/merge-queue"/*; do
       [[ -f "$mqf" ]] || continue
       mq_count=$((mq_count + 1))
-      echo "- $(basename "$mqf"): $(grep '^PR=' "$mqf" | cut -d= -f2)" >> "$briefing_tmp"
+      echo "- $(basename "$mqf"): $(grep '^PR=' "$mqf" | cut -d= -f2)" >> "$merge_queue_file"
     done
   fi
-  [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$briefing_tmp"
-  echo "" >> "$briefing_tmp"
+  [[ "$mq_count" -eq 0 ]] && echo "Empty" >> "$merge_queue_file"
+  echo >> "$merge_queue_file"
 
-  # Open issues across all rigs (sgt-authorized only)
-  echo "## Open Issues (all rigs, sgt-authorized)" >> "$briefing_tmp"
+  echo "## Open Issues (all rigs, sgt-authorized)" > "$open_issues_file"
+  local rig_file rname repo
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
-    local rname repo
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
-    echo "### $rname ($repo)" >> "$briefing_tmp"
+    echo "### $rname ($repo)" >> "$open_issues_file"
     gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number,title,labels,milestone \
       --jq '.[] | "- #\(.number): \(.title) [\(.labels | map(.name) | join(","))] \(if .milestone then "(" + .milestone.title + ")" else "" end)"' \
-      2>/dev/null >> "$briefing_tmp" || echo "  (couldn't fetch)" >> "$briefing_tmp"
-    echo "" >> "$briefing_tmp"
+      2>/dev/null >> "$open_issues_file" || echo "  (couldn't fetch)" >> "$open_issues_file"
+    echo >> "$open_issues_file"
   done
 
-  # Open PRs across all rigs
-  echo "## Open PRs (all rigs)" >> "$briefing_tmp"
+  echo "## Open PRs (all rigs)" > "$open_prs_file"
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
-    local rname repo
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
-    echo "### $rname" >> "$briefing_tmp"
+    echo "### $rname ($repo)" >> "$open_prs_file"
     gh pr list --repo "$repo" --state open --json number,title,headRefName,mergeable \
       --jq '.[] | "- PR #\(.number): \(.title) [\(.headRefName)] mergeable=\(.mergeable)"' \
-      2>/dev/null >> "$briefing_tmp" || echo "  (couldn't fetch)" >> "$briefing_tmp"
-    echo "" >> "$briefing_tmp"
+      2>/dev/null >> "$open_prs_file" || echo "  (couldn't fetch)" >> "$open_prs_file"
+    echo >> "$open_prs_file"
   done
 
-  echo "## Pending Plan Requests" >> "$briefing_tmp"
+  echo "## Pending Plan Requests" > "$pending_requests_file"
   local pending_plan_count=0 request_line request_id request_rig request_status request_requested_at request_requester request_prompt_file
   while IFS='|' read -r request_id request_rig request_status request_requested_at request_requester request_prompt_file; do
     [[ -n "$request_id" ]] || continue
     pending_plan_count=$((pending_plan_count + 1))
-    echo "### $request_id ($request_rig)" >> "$briefing_tmp"
-    echo "- status: $request_status" >> "$briefing_tmp"
-    echo "- requested_at: $request_requested_at" >> "$briefing_tmp"
-    echo "- requesting_agent: $request_requester" >> "$briefing_tmp"
-    echo "- plan_path: $(_plan_file_path "$request_rig")" >> "$briefing_tmp"
-    echo "- prompt_excerpt:" >> "$briefing_tmp"
-    head -n 12 "$request_prompt_file" 2>/dev/null | sed 's/^/    /' >> "$briefing_tmp" || true
-    echo "" >> "$briefing_tmp"
+    echo "### $request_id ($request_rig)" >> "$pending_requests_file"
+    echo "- status: $request_status" >> "$pending_requests_file"
+    echo "- requested_at: $request_requested_at" >> "$pending_requests_file"
+    echo "- requesting_agent: $request_requester" >> "$pending_requests_file"
+    echo "- plan_path: $(_plan_file_path "$request_rig")" >> "$pending_requests_file"
+    echo "- prompt_excerpt:" >> "$pending_requests_file"
+    head -n 6 "$request_prompt_file" 2>/dev/null | sed 's/^/    /' >> "$pending_requests_file" || true
+    echo >> "$pending_requests_file"
   done < <(_plan_request_list_pending)
-  [[ "$pending_plan_count" -eq 0 ]] && echo "None" >> "$briefing_tmp"
-  echo "" >> "$briefing_tmp"
+  [[ "$pending_plan_count" -eq 0 ]] && echo "None" >> "$pending_requests_file"
+  echo >> "$pending_requests_file"
 
-  echo "## Repo Plans" >> "$briefing_tmp"
-  local plan_count=0 rig_file rname repo plan_path
+  _mayor_briefing_repo_plans_section > "$repo_plans_file"
+  _mayor_briefing_acceptance_blockers_section > "$blockers_file"
+  _mayor_briefing_context_section > "$context_file"
+  _mayor_briefing_recent_activity_section > "$activity_file"
+  _mayor_briefing_recent_decisions_section > "$decisions_file"
+
+  if [[ -f "$SGT_ESCALATION" ]]; then
+    echo "## Escalation Rules" > "$escalation_file"
+    echo '```json' >> "$escalation_file"
+    sed -n '1,120p' "$SGT_ESCALATION" >> "$escalation_file"
+    echo '```' >> "$escalation_file"
+    if [[ "$(wc -l < "$SGT_ESCALATION" 2>/dev/null || echo 0)" -gt 120 ]]; then
+      echo >> "$escalation_file"
+      echo "- escalation_lines_shown: 120" >> "$escalation_file"
+    fi
+    echo >> "$escalation_file"
+  fi
+
+  cat > "$manifest_file" <<EOF
+system_status	1	1	$status_file
+merge_queue	2	1	$merge_queue_file
+open_issues	3	1	$open_issues_file
+open_prs	4	1	$open_prs_file
+acceptance_blockers	5	1	$blockers_file
+pending_plan_requests	6	1	$pending_requests_file
+repo_plans	7	1	$repo_plans_file
+durable_context	8	0	$context_file
+recent_activity	9	0	$activity_file
+recent_mayor_decisions	10	0	$decisions_file
+escalation_rules	11	0	$escalation_file
+EOF
+
+  python3 - "$briefing_tmp" "$manifest_file" "$stats_file" "$budget_tokens" <<'PY'
+import math
+import os
+import sys
+
+briefing_path, manifest_path, stats_path, budget_raw = sys.argv[1:5]
+budget = int(budget_raw) if str(budget_raw).isdigit() and int(budget_raw) > 0 else 60000
+
+def estimate_tokens(text):
+    text = text or ""
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / 4))
+
+def trim_to_budget(text, budget_left):
+    if budget_left <= 0:
+        return "", False
+    if estimate_tokens(text) <= budget_left:
+        return text, False
+    lines = text.splitlines()
+    if len(lines) <= 8:
+        return "", False
+    kept = []
+    for line in lines:
+      candidate = "\n".join(kept + [line]).rstrip() + "\n"
+      if estimate_tokens(candidate) > max(0, budget_left - 24):
+          break
+      kept.append(line)
+    if len(kept) < 6:
+        return "", False
+    kept.append("")
+    kept.append(f"- summarized_to_fit_budget: shown {len(kept) - 2} of {len(lines)} lines")
+    return "\n".join(kept).rstrip() + "\n", True
+
+with open(briefing_path, "r", encoding="utf-8") as fh:
+    header = fh.read()
+
+sections = []
+with open(manifest_path, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.rstrip("\n")
+        if not raw:
+            continue
+        key, priority, protected, path = raw.split("\t")
+        content = ""
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as sfh:
+                content = sfh.read().strip()
+        if not content:
+            continue
+        sections.append({
+            "key": key,
+            "priority": int(priority),
+            "protected": protected == "1",
+            "content": content + "\n\n",
+        })
+
+sections.sort(key=lambda item: item["priority"])
+body_parts = []
+kept = []
+summarized = []
+omitted = []
+used_tokens = estimate_tokens(header)
+protected_tokens = 0
+
+for section in sections:
+    content = section["content"]
+    section_tokens = estimate_tokens(content)
+    if section["protected"]:
+        body_parts.append(content)
+        kept.append(section["key"])
+        used_tokens += section_tokens
+        protected_tokens += section_tokens
+        continue
+    remaining = budget - used_tokens
+    if remaining <= 0:
+        omitted.append(section["key"])
+        continue
+    trimmed, was_trimmed = trim_to_budget(content, remaining)
+    if not trimmed:
+        omitted.append(section["key"])
+        continue
+    body_parts.append(trimmed)
+    used_tokens += estimate_tokens(trimmed)
+    if was_trimmed:
+        summarized.append(section["key"])
+    else:
+        kept.append(section["key"])
+
+compaction_applied = bool(summarized or omitted)
+stats_lines = [
+    f"protected_fact_contract_version=1",
+    "protected_fact_sections=" + ",".join([s["key"] for s in sections if s["protected"]]),
+    f"budget_target_tokens={budget}",
+    f"budget_used_tokens_est={used_tokens}",
+    f"budget_remaining_tokens_est={budget - used_tokens}",
+    f"budget_protected_tokens_est={protected_tokens}",
+    "budget_kept_sections=" + ",".join(kept),
+    "budget_summarized_sections=" + ",".join(summarized),
+    "budget_omitted_sections=" + ",".join(omitted),
+    "budget_compaction_applied=" + ("true" if compaction_applied else "false"),
+]
+
+header_lines = header.splitlines()
+insert_at = len(header_lines)
+for idx, line in enumerate(header_lines):
+    if line.startswith("generated_at_epoch: "):
+        insert_at = idx + 1
+        break
+header_lines[insert_at:insert_at] = [""] + stats_lines + [""]
+final = "\n".join(header_lines).rstrip() + "\n\n" + "".join(body_parts)
+
+with open(briefing_path, "w", encoding="utf-8") as fh:
+    fh.write(final)
+with open(stats_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(stats_lines) + "\n")
+PY
+
+  if [[ -f "$stats_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$stats_file"
+    log_event "MAYOR_BRIEFING_BUDGET budget_tokens=${budget_target_tokens:-$budget_tokens} used_tokens=${budget_used_tokens_est:-unknown} protected_tokens=${budget_protected_tokens_est:-unknown} compaction_applied=${budget_compaction_applied:-false} kept_sections=\"${budget_kept_sections:-}\" summarized_sections=\"${budget_summarized_sections:-}\" omitted_sections=\"${budget_omitted_sections:-}\""
+  fi
+
+  mv -f "$briefing_tmp" "$briefing"
+  echo "$briefing"
+}
+
+_mayor_briefing_token_budget() {
+  local tokens="${SGT_MAYOR_PROMPT_BUDGET_TOKENS:-60000}"
+  [[ "$tokens" =~ ^[0-9]+$ ]] || tokens=60000
+  if [[ "$tokens" -le 0 ]]; then
+    tokens=60000
+  fi
+  echo "$tokens"
+}
+
+_mayor_briefing_recent_activity_section() {
+  local log_file="${1:-$SGT_LOG}"
+  python3 - "$log_file" <<'PY'
+import collections
+import os
+import re
+import sys
+
+path = sys.argv[1]
+print("## Recent Activity Summary")
+if not path or not os.path.exists(path):
+    print("no log")
+    sys.exit(0)
+
+with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    lines = [line.rstrip("\n") for line in fh.readlines()[-200:]]
+
+if not lines:
+    print("no log")
+    sys.exit(0)
+
+def key_for(line):
+    line = re.sub(r"^\[[^\]]+\]\s*", "", line)
+    return (line.split(" ", 1)[0] if line else "unknown").strip() or "unknown"
+
+counts = collections.Counter(key_for(line) for line in lines)
+print(f"- scanned_events: {len(lines)}")
+print(f"- unique_event_keys: {len(counts)}")
+repeat_keys = [(key, count) for key, count in counts.most_common() if count > 1][:8]
+if repeat_keys:
+    print("- repeated_event_groups:")
+    for key, count in repeat_keys:
+        print(f"  - {key}: {count}")
+
+latest = []
+seen = set()
+for line in reversed(lines):
+    key = key_for(line)
+    if key in seen:
+        continue
+    seen.add(key)
+    latest.append(line)
+    if len(latest) >= 10:
+        break
+latest.reverse()
+
+print("")
+print("### Latest Unique Events")
+print("```")
+for line in latest:
+    print(line)
+print("```")
+PY
+}
+
+_mayor_briefing_recent_decisions_section() {
+  local decisions_file="${1:-$SGT_CONFIG/mayor-decisions.log}"
+  python3 - "$decisions_file" <<'PY'
+import collections
+import os
+import re
+import sys
+
+path = sys.argv[1]
+print("## Recent Mayor Decisions")
+if not path or not os.path.exists(path):
+    print("none")
+    sys.exit(0)
+
+with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    lines = [line.rstrip("\n") for line in fh.readlines()[-120:]]
+
+if not lines:
+    print("none")
+    sys.exit(0)
+
+def key_for(line):
+    line = re.sub(r"^\S+\s+workspace=\S+\s+", "", line)
+    return (line.split(" ", 3)[0:3] if line else ["unknown"])
+
+counts = collections.Counter(" ".join(key_for(line)) for line in lines)
+print(f"- scanned_decisions: {len(lines)}")
+repeat_keys = [(key, count) for key, count in counts.most_common() if count > 1][:6]
+if repeat_keys:
+    print("- repeated_decision_groups:")
+    for key, count in repeat_keys:
+        print(f"  - {key}: {count}")
+
+latest = []
+seen = set()
+for line in reversed(lines):
+    key = " ".join(key_for(line))
+    if key in seen:
+        continue
+    seen.add(key)
+    latest.append(line)
+    if len(latest) >= 8:
+        break
+latest.reverse()
+
+print("")
+print("```")
+for line in latest:
+    print(line)
+print("```")
+PY
+}
+
+_mayor_briefing_context_section() {
+  local context_path="${1:-$SGT_ROOT/SGT_CONTEXT.md}"
+  python3 - "$context_path" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+print("## Durable Project Context")
+if not path or not os.path.exists(path):
+    print("none")
+    sys.exit(0)
+
+with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    lines = fh.readlines()
+
+notes = [line.rstrip("\n") for line in lines if re.match(r"^- ", line)]
+if not notes:
+    print("none")
+    sys.exit(0)
+
+proof_like = [line for line in notes if re.search(r"proof|latest-main|verified|acceptance|budget|compact", line, re.I)]
+recent = notes[-10:]
+selected = []
+seen = set()
+for line in proof_like[-4:] + recent:
+    if line in seen:
+        continue
+    seen.add(line)
+    selected.append(line)
+
+for line in selected[-12:]:
+    print(line)
+PY
+}
+
+_mayor_briefing_acceptance_blockers_section() {
+  local blocker_id rig status created_at requester title evidence_file
+  local count=0
+  echo "## Active Acceptance Blockers"
+  while IFS='|' read -r blocker_id rig status created_at requester title evidence_file; do
+    [[ -n "$blocker_id" ]] || continue
+    count=$((count + 1))
+    echo "### $blocker_id ($rig)"
+    echo "- title: $title"
+    echo "- reported_by: $requester"
+    echo "- created_at: $created_at"
+    if [[ -f "$evidence_file" ]]; then
+      echo "- evidence_excerpt:"
+      sed -n '1,8p' "$evidence_file" | sed 's/^/    /'
+    fi
+    echo
+  done < <(_acceptance_blocker_list_active)
+  [[ "$count" -eq 0 ]] && echo "none"
+}
+
+_mayor_briefing_repo_plans_section() {
+  local rig_file rname repo plan_path
+  local any=0
+  echo "## Repo Plans"
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
     rname="$(basename "$rig_file")"
     repo="$(cat "$rig_file")"
     plan_path="$(_plan_file_path "$rname")"
-    if [[ -f "$plan_path" ]]; then
-      plan_count=$((plan_count + 1))
-      echo "- $rname: $plan_path" >> "$briefing_tmp"
-    fi
+    [[ -f "$plan_path" ]] || continue
+    any=1
+    python3 - "$rname" "$repo" "$plan_path" "$(_plan_state_path "$rname")" <<'PY'
+import json
+import os
+import sys
+
+rig, repo, plan_path, state_path = sys.argv[1:5]
+plan = {}
+state = {}
+try:
+    with open(plan_path, "r", encoding="utf-8") as fh:
+        plan = json.load(fh)
+except Exception:
+    plan = {}
+try:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    state = {}
+
+tasks = plan.get("tasks") or []
+state_tasks = state.get("tasks") or {}
+pending = []
+inflight = []
+completed = 0
+for task in tasks:
+    if not isinstance(task, dict):
+        continue
+    task_id = str(task.get("id") or "").strip()
+    if not task_id:
+        continue
+    title = str(task.get("title") or task.get("task") or task_id).strip()
+    task_state = state_tasks.get(task_id) if isinstance(state_tasks, dict) else {}
+    status = str((task_state or {}).get("status") or "pending").strip() or "pending"
+    issue = str((task_state or {}).get("issue_number") or "").strip()
+    suffix = f" issue=#{issue}" if issue else ""
+    entry = f"- {task_id}: {title} [{status}]{suffix}"
+    if status == "completed":
+        completed += 1
+    elif status in ("dispatched", "in_progress"):
+        inflight.append(entry)
+    else:
+        pending.append(entry)
+
+completion = state.get("completion") if isinstance(state.get("completion"), dict) else {}
+details = str(completion.get("details") or "").strip()
+condition = str(completion.get("condition") or "").strip()
+blocked_reason = str(completion.get("blocked_reason") or "").strip()
+print(f"### {rig} ({repo})")
+print(f"- plan_path: {plan_path}")
+print(f"- completion_status: {completion.get('status', 'not_declared')}")
+print(f"- completion_rollup: {completion.get('rollup', 'not_declared')}")
+if condition:
+    print(f"- completion_condition: {condition}")
+if details:
+    print(f"- acceptance_details: {details}")
+if blocked_reason:
+    print(f"- blocked_reason: {blocked_reason}")
+print(f"- task_counts: total={len(tasks)} completed={completed} inflight={len(inflight)} pending={len(pending)}")
+if inflight:
+    print("- actionable_now:")
+    for entry in inflight[:6]:
+        print(f"  {entry}")
+if pending:
+    print("- pending_next:")
+    for entry in pending[:6]:
+        print(f"  {entry}")
+print("")
+PY
   done
-  [[ "$plan_count" -eq 0 ]] && echo "None" >> "$briefing_tmp"
-  echo "" >> "$briefing_tmp"
-
-  # Escalation config
-  if [[ -f "$SGT_ESCALATION" ]]; then
-    echo "## Escalation Rules" >> "$briefing_tmp"
-    echo '```json' >> "$briefing_tmp"
-    cat "$SGT_ESCALATION" >> "$briefing_tmp"
-    echo '```' >> "$briefing_tmp"
-    echo "" >> "$briefing_tmp"
-  fi
-
-  # Mayor history (last decisions)
-  if [[ -f "$SGT_CONFIG/mayor-decisions.log" ]]; then
-    echo "## Recent Mayor Decisions" >> "$briefing_tmp"
-    echo '```' >> "$briefing_tmp"
-    tail -20 "$SGT_CONFIG/mayor-decisions.log" >> "$briefing_tmp"
-    echo '```' >> "$briefing_tmp"
-    echo "" >> "$briefing_tmp"
-  fi
-
-  mv -f "$briefing_tmp" "$briefing"
-  echo "$briefing"
+  [[ "$any" -eq 0 ]] && echo "None"
 }
 
 _mayor_briefing_stale_secs() {
@@ -11622,6 +12018,7 @@ Environment:
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
+  SGT_MAYOR_PROMPT_BUDGET_TOKENS  Approximate token budget for mayor briefing assembly (default: 60000, set >0)
   SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS  Timebox mayor AI decision runs in seconds (default: 300, set >0)
   SGT_MAYOR_HEARTBEAT_STALE_SECS  Restart mayor when runtime heartbeat is older than N seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_ACTION_FENCE       Enable mayor post-action receipt verification fence for dispatch/nuke/merge (default: 0)
