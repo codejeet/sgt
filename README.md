@@ -131,6 +131,20 @@ Acceptance status values:
 - `blocked`: waiting on an external condition; mayor should not mark all-clear
 - `waived`: a human explicitly waived the condition
 
+### Recommended operator pattern
+
+Declare the end condition in `SGT_PLAN.json`, not just the task list:
+- set `completion_condition` to the real repo-level definition of done
+- set `acceptance.status` and `acceptance.details` to the current verification state
+
+Use blockers only for verified red acceptance after merges:
+- when intermediate PRs merge but fresh verification is still red, run `sgt create blocker <rig> ...`
+- resolve that blocker only after the acceptance condition is truly green with `sgt blocker resolve <blocker-id> --note "..."`
+
+How SGT relays this:
+- mayor uses `completion_condition`, `acceptance`, and active blockers to decide whether the rig is actually done or still needs follow-up
+- coding-worker prompts (`sling` and re-sling) inject the same completion condition, acceptance status/details, blocker summary, and a warning that merged intermediate work is not enough while acceptance is still pending or blocked
+
 ### Manual control
 
 ```bash

@@ -5902,20 +5902,8 @@ PSTATE
   # ── 5. Spawn AI agent in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
 
-  # Include project README context in the polecat prompt (truncated).
-  local readme_prompt=""
-  if [[ -f "$rpath/README.md" ]]; then
-    # Keep it bounded to avoid huge prompts.
-    local readme_max_bytes=12000
-    local readme_excerpt
-    readme_excerpt=$(head -c "$readme_max_bytes" "$rpath/README.md" 2>/dev/null || true)
-    if [[ -n "$readme_excerpt" ]]; then
-      readme_prompt=$'\n\n---\nProject README (excerpt)\n\n'"$readme_excerpt"$'\n---\n'
-    fi
-  fi
-
   local polecat_prompt
-  polecat_prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}."  polecat_prompt+="$readme_prompt"
+  polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
     "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
@@ -7302,8 +7290,10 @@ CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
+  local polecat_prompt
+  polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue_number}. The issue title is: ${task}. Work on branch ${branch}. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue_number}." ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
   _RESLING_LAST_POLECAT="$pname"
   log_event "RESLING $pname rig=$rig issue=#$issue_number branch=$branch"
 }
@@ -11048,17 +11038,103 @@ Useful commands:
 
 1. Read your assigned GitHub issue for the task description
 2. Read `SGT_CONTEXT.md` for durable project context
-3. Work on your feature branch
-4. Commit frequently with clear messages
-5. Push your branch
-6. Open a PR that references the issue (use "Closes #N")
-7. Before exit, add any durable new context with `sgt context add <rig> "<note>"`
-8. Exit when done
+3. If the repo has `SGT_PLAN.json`, pay attention to any injected rig-level completion/acceptance context in worker instructions
+4. Work on your feature branch
+5. Commit frequently with clear messages
+6. Push your branch
+7. Open a PR that references the issue (use "Closes #N")
+8. Before exit, add any durable new context with `sgt context add <rig> "<note>"`
+9. Exit when done
 CLMD
+}
+
+_worker_plan_completion_context_md() {
+  local rig="${1:-}" plan_file="${2:-}" status="not_declared" rollup="not_declared" condition="" acceptance_json="{}" details="" blocked_reason=""
+  [[ -n "$rig" ]] || return 0
+  if [[ -z "$plan_file" ]]; then
+    plan_file="$(_plan_file_path "$rig")"
+  fi
+  [[ -f "$plan_file" ]] || return 0
+
+  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9; do
+    [[ -n "$record_type" ]] || continue
+    case "$record_type" in
+      CONFIG)
+        status="${c2:-not_declared}"
+        rollup="${c3:-not_declared}"
+        condition="${c4:-}"
+        acceptance_json="${c5:-{}}"
+        details="${c6:-}"
+        blocked_reason="${c7:-}"
+        ;;
+    esac
+  done < <(_plan_state_snapshot "$rig" "$plan_file" 2>/dev/null || true)
+
+  if [[ "$status" == "not_declared" && -z "$condition" && "${acceptance_json:-{}}" == "{}" ]]; then
+    return 0
+  fi
+
+  local blocker_count blocker_id
+  blocker_count=0
+  while IFS='|' read -r blocker_id _; do
+    [[ -n "$blocker_id" ]] || continue
+    blocker_count=$((blocker_count + 1))
+  done < <(_acceptance_blocker_list_active "$rig" 2>/dev/null || true)
+
+  cat <<EOF
+## Rig Completion Context
+
+This rig has a repo-local \`SGT_PLAN.json\` with a larger completion target beyond this single issue.
+
+- **Completion condition**: ${condition:-not declared}
+- **Acceptance status**: ${status:-not_declared}
+- **Acceptance rollup**: ${rollup:-not_declared}
+- **Acceptance details**: ${details:-none recorded}
+EOF
+  if [[ -n "$blocked_reason" ]]; then
+    printf '%s\n' "- **Blocked reason**: $blocked_reason"
+  fi
+  if [[ "$blocker_count" -gt 0 ]]; then
+    printf '%s\n' "- **Unresolved acceptance blockers**: yes (${blocker_count} active)"
+  else
+    printf '%s\n' "- **Unresolved acceptance blockers**: no"
+  fi
+  cat <<EOF
+- **Rule**: merged intermediate work is not rig completion while acceptance remains \`pending\` or \`blocked\`. Only verified acceptance, or an explicit human waiver, closes the plan-level requirement.
+- **If acceptance stays red after merges**: record durable evidence with \`sgt create blocker $rig "<evidence>"\`.
+EOF
+}
+
+_polecat_readme_prompt() {
+  local rpath="${1:-}"
+  local readme_prompt="" readme_excerpt
+  [[ -n "$rpath" ]] || return 0
+  if [[ -f "$rpath/README.md" ]]; then
+    readme_excerpt=$(head -c 12000 "$rpath/README.md" 2>/dev/null || true)
+    if [[ -n "$readme_excerpt" ]]; then
+      readme_prompt=$'\n\n---\nProject README (excerpt)\n\n'"$readme_excerpt"$'\n---\n'
+    fi
+  fi
+  printf '%s' "$readme_prompt"
+}
+
+_build_polecat_runtime_prompt() {
+  local rig="$1" issue="$2" task="$3" branch="$4" rpath="$5"
+  local prompt readme_prompt completion_context
+  readme_prompt="$(_polecat_readme_prompt "$rpath")"
+  completion_context="$(_worker_plan_completion_context_md "$rig")"
+  prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue}. The issue title is: ${task}. Work on branch ${branch}. Pay close attention to any 'Rig Completion Context' section in CLAUDE.md; merged intermediate work is not enough when plan acceptance is still pending or blocked. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue}."
+  if [[ -n "$completion_context" ]]; then
+    prompt+=$'\n\n---\nRig Completion Context\n\n'"$completion_context"
+  fi
+  prompt+="$readme_prompt"
+  printf '%s' "$prompt"
 }
 
 _write_polecat_claude_md() {
   local worktree="$1" rig="$2" issue="$3" task="$4" repo="$5" pname="$6" branch="$7" default_branch="$8" auto_merge="$9"
+  local completion_context
+  completion_context="$(_worker_plan_completion_context_md "$rig")"
 
   cat >> "$worktree/CLAUDE.md" <<CLMD
 
@@ -11080,21 +11156,25 @@ You are polecat \`$pname\`, an ephemeral coding agent.
 - Append durable shared notes with \`sgt context add $rig "<note>"\`
 - Before task completion, make sure any durable project context worth keeping has been added
 
+${completion_context}
+
 ## Protocol
 
 1. Read the issue description for full context
 2. Read \`SGT_CONTEXT.md\` for durable project context
-3. Implement the requested changes
-4. Write tests if appropriate
-5. If you learn something future agents should know, append it with \`sgt context add $rig "<note>"\`
-6. Commit your work with clear commit messages referencing #$issue
-7. Push your branch: \`git push -u origin $branch\`
-8. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
-9. Exit the session
+3. Read any \`Rig Completion Context\` section below as the plan-level success criteria for this task
+4. Implement the requested changes
+5. Write tests if appropriate
+6. If you learn something future agents should know, append it with \`sgt context add $rig "<note>"\`
+7. Commit your work with clear commit messages referencing #$issue
+8. Push your branch: \`git push -u origin $branch\`
+9. Open a PR: \`gh pr create --title "<concise title>" --body "Closes #$issue" --base $default_branch\`
+10. Exit the session
 
 ## Rules
 
 - Stay focused on the issue — don't scope-creep
+- If the rig-level acceptance state is still \`pending\` or \`blocked\`, do not treat a merged intermediate PR as full rig completion
 - If blocked, comment on the issue explaining the blocker, then exit
 - Never force-push or modify the default branch directly
 - Keep commits atomic and well-described

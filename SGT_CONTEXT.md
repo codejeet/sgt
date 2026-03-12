@@ -19,3 +19,14 @@ Useful commands:
 ## 2026-03-11
 - 2026-03-11T11:31:38+01:00 — 2026-03-11T00:00:00Z — Added durable acceptance blockers via 'sgt create blocker' / 'sgt blocker resolve'. Mayor now treats open blockers as unresolved acceptance state, suppresses idle-green all-clear, and re-invokes follow-up when a blocker exists with no open issues, PRs, polecats, or pending plan requests.
 - 2026-03-11T11:39:05+01:00 — Repo plans now support completion_condition plus acceptance status in SGT_PLAN.json; plan-state persists completion.rollup/status, and mayor treats tasks-exhausted-awaiting-acceptance as unresolved work instead of all-clear.
+- 2026-03-11T11:46:54+01:00 — Deacon now supervises the mayor tmux session and restarts it when sgt-mayor is missing; mayor exit paths also append durable MAYOR_STOP receipts with reason_code/exit_code/signal/unexpected fields for silent-exit forensics.
+- 2026-03-11T16:28:42+01:00 — 2026-03-11T00:00:00Z — CI regression guard forbids heredocs inside command substitution in the main sgt script; use printf -v for multiline evidence/comment bodies instead.
+
+## 2026-03-12
+- 2026-03-12T03:57:21+01:00 — Repo plan hardening: cmd_sling now auto-creates all requested labels (including plan / plan-<task> labels); mayor request completion syncs SGT_PLAN.json into plan-state and precreates future plan labels; plan tick records durable movement blockers under ~/.sgt/plan-blockers on sync/dispatch failures; mayor treats dispatch failures or ready pending tasks with inflight=0 as unresolved plan movement instead of idle-green.
+- 2026-03-12T04:05:09+01:00 — Worker prompts now inject repo-plan completion context on both sling and re-sling paths: completion_condition, acceptance status/details, unresolved blocker summary, and a reminder that merged intermediate work is not full rig completion while acceptance remains pending or blocked.
+- 2026-03-11T11:46:54+01:00 — Deacon now supervises the mayor tmux session and restarts it when sgt-mayor is missing; mayor exit paths also append durable MAYOR_STOP receipts with reason_code/exit_code/signal/unexpected fields for silent-exit forensics.
+- 2026-03-11T16:28:42+01:00 — 2026-03-11T00:00:00Z — CI regression guard forbids heredocs inside command substitution in the main sgt script; use printf -v for multiline evidence/comment bodies instead.
+
+## 2026-03-12
+- 2026-03-12T03:57:21+01:00 — Repo plan hardening: cmd_sling now auto-creates all requested labels (including plan / plan-<task> labels); mayor request completion syncs SGT_PLAN.json into plan-state and precreates future plan labels; plan tick records durable movement blockers under ~/.sgt/plan-blockers on sync/dispatch failures; mayor treats dispatch failures or ready pending tasks with inflight=0 as unresolved plan movement instead of idle-green.
