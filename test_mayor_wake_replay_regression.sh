@@ -110,6 +110,9 @@ echo "=== mayor stalled refinery REVIEW_UNCLEAR watchdog ==="
 echo "=== mayor stale witness/refinery heartbeat watchdog ==="
 "$REPO_ROOT/test_mayor_agent_heartbeat_watchdog.sh"
 
+echo "=== refinery inert queued-work watchdog ==="
+bash "$REPO_ROOT/test_refinery_inert_watchdog.sh"
+
 echo "=== mayor supervision and exit receipts ==="
 "$REPO_ROOT/test_mayor_supervision_and_exit_receipt.sh"
 

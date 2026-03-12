@@ -2039,6 +2039,68 @@ _agent_heartbeat_path() {
   echo "$SGT_CONFIG/${agent}-${rig}-heartbeat.json"
 }
 
+_merge_queue_count_for_rig() {
+  local rig="${1:-}"
+  local merge_dir="$SGT_CONFIG/merge-queue"
+  local mq_count=0
+  [[ -n "$rig" && -d "$merge_dir" ]] || {
+    echo "0"
+    return 0
+  }
+
+  local mqf mq_rig
+  for mqf in "$merge_dir"/*; do
+    [[ -f "$mqf" ]] || continue
+    mq_rig=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        RIG) mq_rig="$v" ;;
+      esac
+    done < <(grep -E '^(RIG)=' "$mqf" 2>/dev/null || true)
+    [[ "$mq_rig" == "$rig" ]] || continue
+    mq_count=$((mq_count + 1))
+  done
+  echo "$mq_count"
+}
+
+_merge_queue_oldest_age_for_rig() {
+  local rig="${1:-}"
+  local merge_dir="$SGT_CONFIG/merge-queue"
+  local now oldest_age
+  [[ -n "$rig" && -d "$merge_dir" ]] || {
+    echo "0"
+    return 0
+  }
+
+  now="$(date +%s)"
+  oldest_age=0
+
+  local mqf mq_rig queued_at queued_epoch age
+  for mqf in "$merge_dir"/*; do
+    [[ -f "$mqf" ]] || continue
+    mq_rig=""
+    queued_at=""
+    while IFS='=' read -r k v; do
+      case "$k" in
+        RIG) mq_rig="$v" ;;
+        QUEUED) queued_at="$v" ;;
+      esac
+    done < <(grep -E '^(RIG|QUEUED)=' "$mqf" 2>/dev/null || true)
+    [[ "$mq_rig" == "$rig" ]] || continue
+    queued_epoch="$(date -d "${queued_at:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)"
+    [[ "$queued_epoch" =~ ^[0-9]+$ ]] || queued_epoch=0
+    age=$((now - queued_epoch))
+    if [[ "$age" -lt 0 ]]; then
+      age=0
+    fi
+    if [[ "$age" -gt "$oldest_age" ]]; then
+      oldest_age="$age"
+    fi
+  done
+
+  echo "$oldest_age"
+}
+
 _heartbeat_snapshot_file() {
   local heartbeat_file="${1:-}"
   if [[ -z "$heartbeat_file" || ! -f "$heartbeat_file" ]]; then
@@ -2176,6 +2238,43 @@ _deacon_heartbeat_health() {
   else
     echo "healthy"
   fi
+}
+
+_deacon_refinery_watchdog_state() {
+  local rig="${1:-}"
+  local queue_count oldest_age hb_age hb_ts hb_state hb_stale_secs
+  [[ -n "$rig" ]] || {
+    echo "skip|missing-rig|0|0|-1||missing|$(_agent_heartbeat_stale_secs)"
+    return 0
+  }
+
+  queue_count="$(_merge_queue_count_for_rig "$rig")"
+  [[ "$queue_count" =~ ^[0-9]+$ ]] || queue_count=0
+  oldest_age="$(_merge_queue_oldest_age_for_rig "$rig")"
+  [[ "$oldest_age" =~ ^[0-9]+$ ]] || oldest_age=0
+  hb_stale_secs="$(_agent_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state <<< "$(_agent_heartbeat_snapshot "refinery" "$rig")"
+
+  if [[ "$queue_count" -le 0 ]]; then
+    echo "ok|queue-empty|$queue_count|$oldest_age|${hb_age:--1}|$hb_ts|${hb_state:-missing}|$hb_stale_secs"
+    return 0
+  fi
+
+  case "${hb_state:-missing}" in
+    ok)
+      if [[ "$hb_age" =~ ^[0-9]+$ && "$hb_age" -gt "$hb_stale_secs" ]]; then
+        echo "restart|heartbeat-stale|$queue_count|$oldest_age|$hb_age|$hb_ts|$hb_state|$hb_stale_secs"
+      else
+        echo "ok|heartbeat-fresh|$queue_count|$oldest_age|${hb_age:--1}|$hb_ts|$hb_state|$hb_stale_secs"
+      fi
+      ;;
+    missing)
+      echo "restart|heartbeat-missing|$queue_count|$oldest_age|${hb_age:--1}|$hb_ts|$hb_state|$hb_stale_secs"
+      ;;
+    *)
+      echo "restart|heartbeat-invalid|$queue_count|$oldest_age|${hb_age:--1}|$hb_ts|$hb_state|$hb_stale_secs"
+      ;;
+  esac
 }
 
 _mayor_critical_alert_signature() {
@@ -6360,10 +6459,44 @@ _cmd_status_human() {
     local rig_name
     rig_name="$(basename "$rig_file")"
     local w_alive="off" r_alive="off"
+    local w_hb_age w_hb_ts w_hb_state
+    local r_hb_age r_hb_ts r_hb_state
+    local agent_hb_stale_secs refinery_queue_count refinery_oldest_age
+    local refinery_badge
     tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null && w_alive="on"
     tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null && r_alive="on"
+    agent_hb_stale_secs="$(_agent_heartbeat_stale_secs)"
+    IFS='|' read -r w_hb_age w_hb_ts w_hb_state <<< "$(_agent_heartbeat_snapshot "witness" "$rig_name")"
+    IFS='|' read -r r_hb_age r_hb_ts r_hb_state <<< "$(_agent_heartbeat_snapshot "refinery" "$rig_name")"
+    refinery_badge="$r_alive"
+    if [[ "$w_alive" == "on" && "$w_hb_state" == "ok" && "$w_hb_age" =~ ^[0-9]+$ && "$w_hb_age" -gt "$agent_hb_stale_secs" ]]; then
+      w_alive="degraded"
+    elif [[ "$w_alive" == "on" && "$w_hb_state" != "ok" ]]; then
+      w_alive="degraded"
+    fi
+    refinery_queue_count="$(_merge_queue_count_for_rig "$rig_name")"
+    refinery_oldest_age="$(_merge_queue_oldest_age_for_rig "$rig_name")"
+    if [[ "$refinery_badge" == "on" && "$r_hb_state" == "ok" && "$r_hb_age" =~ ^[0-9]+$ && "$r_hb_age" -gt "$agent_hb_stale_secs" ]]; then
+      refinery_badge="degraded"
+    elif [[ "$refinery_badge" == "on" && "$r_hb_state" != "ok" ]]; then
+      refinery_badge="degraded"
+    fi
+    if [[ "$refinery_badge" == "on" && "$refinery_queue_count" =~ ^[0-9]+$ && "$refinery_queue_count" -gt 0 && "$r_hb_state" != "ok" ]]; then
+      refinery_badge="degraded"
+    fi
     printf "  %-16s %s\n" "witness/$rig_name"  "$(_status_badge "$w_alive")"
-    printf "  %-16s %s\n" "refinery/$rig_name" "$(_status_badge "$r_alive")"
+    if [[ "$w_hb_state" == "ok" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $w_hb_ts (${w_hb_age}s ago, stale>${agent_hb_stale_secs}s)" "$(_reset)"
+    fi
+    printf "  %-16s %s\n" "refinery/$rig_name" "$(_status_badge "$refinery_badge")"
+    if [[ "$r_hb_state" == "ok" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $r_hb_ts (${r_hb_age}s ago, stale>${agent_hb_stale_secs}s)" "$(_reset)"
+    elif [[ "$r_alive" == "on" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "heartbeat: ${r_hb_state:-missing} (stale>${agent_hb_stale_secs}s)" "$(_reset)"
+    fi
+    if [[ "$refinery_queue_count" =~ ^[0-9]+$ && "$refinery_queue_count" -gt 0 ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "queue watchdog: pending=${refinery_queue_count} oldest=${refinery_oldest_age}s" "$(_reset)"
+    fi
   done
 
   local mayor_alive="off"
@@ -8704,6 +8837,16 @@ HEARTBEAT
         log_event "DEACON_RESTART_REFINERY rig=$rig_name"
         cmd_refinery_start "$rig_name"
         actions=$((actions + 1))
+      else
+        local refinery_watch_action refinery_watch_reason refinery_queue_count refinery_oldest_age refinery_hb_age refinery_hb_ts refinery_hb_state refinery_hb_stale_secs
+        IFS='|' read -r refinery_watch_action refinery_watch_reason refinery_queue_count refinery_oldest_age refinery_hb_age refinery_hb_ts refinery_hb_state refinery_hb_stale_secs <<< "$(_deacon_refinery_watchdog_state "$rig_name")"
+        if [[ "$refinery_watch_action" == "restart" ]]; then
+          echo "[deacon] refinery/$rig_name watchdog restart — reason=$refinery_watch_reason queue_count=$refinery_queue_count oldest_queue_age=${refinery_oldest_age}s heartbeat_state=${refinery_hb_state:-missing} heartbeat_age=${refinery_hb_age}s"
+          log_event "DEACON_RESTART_REFINERY rig=$rig_name reason=$refinery_watch_reason queue_count=$refinery_queue_count oldest_queue_age=${refinery_oldest_age}s heartbeat_state=${refinery_hb_state:-missing} heartbeat_age=${refinery_hb_age}s heartbeat_threshold=${refinery_hb_stale_secs}s last_heartbeat=\"$(_escape_quotes "${refinery_hb_ts:-}")\""
+          cmd_refinery_stop "$rig_name" 2>/dev/null || true
+          cmd_refinery_start "$rig_name"
+          actions=$((actions + 1))
+        fi
       fi
     done
 
