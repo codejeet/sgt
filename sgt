@@ -3248,14 +3248,12 @@ _refinery_post_merge_verify_and_receipt() {
   outcome="mismatch"
   retry_decision="retry-post-merge-revalidate"
 
-  if [[ "$pr_state" == "MERGED" && "$issue_state" == "OPEN" && "$branch_deleted" == "true" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
+  if [[ "$pr_state" == "MERGED" && "$branch_deleted" == "true" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
+    # Accept CLOSED issues — GitHub auto-closes via "Closes #N" in PR body
     outcome="success"
     retry_decision="no-op"
-  elif [[ "$pr_state" == "MERGED" && "$issue_state" != "OPEN" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
-    # GitHub auto-closes linked issues from "Closes #N" in PR body — issue_state=CLOSED
-    # is expected after merge, not a failure. Treat as success for notification purposes.
-    outcome="success"
-    retry_decision="no-op-issue-auto-closed"
+  elif [[ "$pr_state" == "MERGED" && "$issue_state" != "OPEN" && "$branch_deleted" != "true" ]]; then
+    retry_decision="no-op-manual-issue-state-drift"
   elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "unknown" ]]; then
     retry_decision="retry-post-merge-revalidate"
   elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "false" ]]; then
@@ -6285,6 +6283,9 @@ PSTATE
       return 1
     fi
   fi
+
+  # ── 6. Notify OpenClaw agent ──
+  _notify_openclaw "[SGT Sling] dispatched rig=$rig issue=#$issue_number title=\"$(_escape_quotes "$task")\" polecat=$pname session=$session_name issue_url=$issue_url" "$rig"
 
   info ""
   info "polecat $pname dispatched"
