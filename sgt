@@ -40,6 +40,7 @@ SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-
 SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
 SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 minutes
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
+SGT_RIG_CONFIG="$SGT_CONFIG/rig-config"
 SGT_PLAN_REQUESTS="$SGT_CONFIG/plan-requests"
 SGT_PLAN_STATE_DIR="$SGT_CONFIG/plan-state"
 SGT_ACCEPTANCE_BLOCKERS="$SGT_CONFIG/acceptance-blockers"
@@ -4260,17 +4261,21 @@ EOF
 }
 
 _openclaw_sender_route() {
-  local notify_out="" agent="" channel="" to="" reply_to=""
+  local rig="${1:-}" notify_out="" agent="" channel="" to="" reply_to=""
+  # Fallback chain: rig-specific notify_agent > global default > 'main'
+  if [[ -n "$rig" ]]; then
+    agent="$(_rig_notify_agent_read "$rig" 2>/dev/null || true)"
+  fi
   notify_out="$(_openclaw_notify_config_read || true)"
   if [[ -n "$notify_out" ]]; then
     local fields=()
     while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
-    agent="${fields[0]:-}"
+    [[ -n "$agent" ]] || agent="${fields[0]:-}"
     channel="${fields[1]:-}"
     to="${fields[2]:-}"
     reply_to="${fields[3]:-}"
   fi
-  [[ -n "$agent" ]] || agent="gastown"
+  [[ -n "$agent" ]] || agent="main"
   [[ -n "$channel" ]] || channel="last"
   echo "${agent}|${channel}|${to}|${reply_to}"
 }
@@ -5282,6 +5287,11 @@ cmd_create_plan() {
 
   local requester request_id
   requester="$(_resolve_requesting_openclaw_agent_id "$explicit_agent")"
+  # Persist --agent as per-rig notify_agent default
+  if [[ -n "$explicit_agent" ]]; then
+    _rig_notify_agent_write "$rig" "$explicit_agent" || true
+    log_event "RIG_NOTIFY_AGENT_SET rig=$rig agent=$explicit_agent source=create-plan"
+  fi
   _ensure_context_file "$rig" >/dev/null
   request_id="$(_plan_request_write "$rig" "$prompt" "$requester" "$prompt_source")"
   _context_append_plan_request "$rig" "$request_id" "$requester" "$prompt"
@@ -5293,6 +5303,31 @@ cmd_create_plan() {
   info "plan request recorded: $request_id"
   info "context updated: $(_context_file_path "$rig")"
   info "mayor notified: create-plan:${rig}:${request_id}"
+}
+
+cmd_config_notify() {
+  local rig="${1:-}" agent_id="${2:-}"
+  [[ -n "$rig" ]] || die "usage: sgt config notify <rig> <agent-id>"
+  [[ -n "$agent_id" ]] || {
+    # Read mode: show current notify_agent for this rig
+    ensure_init
+    ensure_rig "$rig"
+    local current
+    current="$(_rig_notify_agent_read "$rig" 2>/dev/null || true)"
+    if [[ -n "$current" ]]; then
+      info "rig $rig notify_agent: $current"
+    else
+      local global_agent
+      global_agent="$(_openclaw_sender_route "$rig" | cut -d'|' -f1)"
+      info "rig $rig notify_agent: (none — effective: $global_agent)"
+    fi
+    return 0
+  }
+  ensure_init
+  ensure_rig "$rig"
+  _rig_notify_agent_write "$rig" "$agent_id" || die "failed to write rig config for $rig"
+  log_event "RIG_NOTIFY_AGENT_SET rig=$rig agent=$agent_id source=config-notify"
+  info "rig $rig notify_agent set to: $agent_id"
 }
 
 cmd_create_blocker() {
@@ -5398,6 +5433,71 @@ cmd_plan_tick() {
   info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched completion=$completion_rollup status=$completion_status)"
 }
 
+# ─── Per-rig notification config ──────────────────────────────────────
+# Stored at ~/.sgt/rig-config/<rig>.json with at least { "notify_agent": "<id>" }
+
+_rig_config_path() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || return 1
+  echo "$SGT_RIG_CONFIG/${rig}.json"
+}
+
+_rig_notify_agent_read() {
+  local rig="${1:-}" config_path="" py_bin=""
+  [[ -n "$rig" ]] || return 1
+  config_path="$(_rig_config_path "$rig")"
+  [[ -f "$config_path" ]] || return 1
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  "$py_bin" -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r") as f:
+        data = json.load(f)
+    v = data.get("notify_agent", "")
+    if v:
+        print(str(v).strip())
+        sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+' "$config_path" 2>/dev/null
+}
+
+_rig_notify_agent_write() {
+  local rig="${1:-}" agent_id="${2:-}" config_path="" py_bin=""
+  [[ -n "$rig" && -n "$agent_id" ]] || return 1
+  config_path="$(_rig_config_path "$rig")"
+  mkdir -p "$SGT_RIG_CONFIG"
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  "$py_bin" -c '
+import json, sys, os
+path, agent = sys.argv[1], sys.argv[2]
+data = {}
+if os.path.isfile(path):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        pass
+data["notify_agent"] = agent
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$config_path" "$agent_id" 2>/dev/null
+}
+
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
 _openclaw_notify_config_read() {
   local notify_out="" py_bin="" py_parse_notify='import json, sys
@@ -5436,19 +5536,13 @@ print(get(["reply_to", "reply-to", "replyTo"]))'
 }
 
 _notify_openclaw() {
-  local message="${1:-}"
+  local message="${1:-}" rig="${2:-}"
   [[ -n "$message" ]] || return 0
-  local agent="" channel="" to="" reply_to="" notify_out=""
-  notify_out="$(_openclaw_notify_config_read || true)"
-  [[ -n "$notify_out" ]] || return 0
-  local fields=()
-  while IFS= read -r line; do fields+=("$line"); done <<< "$notify_out"
-  agent="${fields[0]:-}"
-  channel="${fields[1]:-}"
-  to="${fields[2]:-}"
-  reply_to="${fields[3]:-}"
-  [[ -n "$agent" ]] || agent="gastown"
-  [[ -n "$channel" ]] || channel="last"
+  local route agent="" channel="" to="" reply_to=""
+  route="$(_openclaw_sender_route "$rig")"
+  IFS='|' read -r agent channel to reply_to <<< "$route"
+  [[ -n "$agent" ]] || return 0
+  command -v openclaw &>/dev/null || return 0
 
   local cmd=(openclaw agent --agent "$agent" --deliver --message "$message" --channel "$channel")
   [[ -n "$to" ]] && cmd+=(--to "$to")
@@ -5456,12 +5550,13 @@ _notify_openclaw() {
 
   "${cmd[@]}" &>/dev/null &
   disown 2>/dev/null
-  log_event "OPENCLAW_NOTIFY agent=$agent channel=$channel to=$to reply_to=$reply_to message=$message"
+  log_event "OPENCLAW_NOTIFY agent=$agent channel=$channel to=$to reply_to=$reply_to rig=$rig message=$message"
 }
 
 _mayor_notify_rigger() {
   local message="${1:-}"
   local suppress_decision_log="${2:-0}"
+  local notify_rig="${3:-}"
   local agent="" channel="" to="" reply_to="" notify_out="" target="" message_key="" state_file=""
   local attempt_count=0 retry_used=0 last_outcome="none" last_reason="none" last_matcher="unknown" escalated=0
   local verify_outcome="" verify_reason="" verify_matcher="" verify_details="" decision_outcome="" attempt=0 should_retry=0
@@ -5495,7 +5590,15 @@ _mayor_notify_rigger() {
   channel="${fields[1]:-}"
   to="${fields[2]:-}"
   reply_to="${fields[3]:-}"
-  [[ -n "$agent" ]] || agent="gastown"
+  # Per-rig notify_agent override (fallback chain: rig > global > main)
+  if [[ -n "$notify_rig" ]]; then
+    local rig_agent
+    rig_agent="$(_rig_notify_agent_read "$notify_rig" 2>/dev/null || true)"
+    if [[ -n "$rig_agent" ]]; then
+      agent="$rig_agent"
+    fi
+  fi
+  [[ -n "$agent" ]] || agent="main"
   [[ -n "$channel" ]] || channel="last"
   if [[ -n "$to" ]]; then
     target="${to}|channel=${channel}"
@@ -5939,7 +6042,7 @@ cmd_sling() {
   shift
 
   local task="" convoy="" labels=() branch_prefix="sgt" auto_merge=false
-  local backend="$(_ai_backend_default)"
+  local backend="$(_ai_backend_default)" explicit_agent=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -5947,6 +6050,7 @@ cmd_sling() {
       --label)   labels+=("$2"); shift 2 ;;
       --auto-merge) auto_merge=true; shift ;;
       --backend) backend="$2"; shift 2 ;;
+      --agent)   explicit_agent="$2"; shift 2 ;;
       *)         task="${task:+$task }$1"; shift ;;
     esac
   done
@@ -6102,6 +6206,12 @@ BACKEND=$backend
 CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
+
+  # ── 4b. Persist --agent as per-rig notify_agent ──
+  if [[ -n "$explicit_agent" ]]; then
+    _rig_notify_agent_write "$rig" "$explicit_agent" || true
+    log_event "RIG_NOTIFY_AGENT_SET rig=$rig agent=$explicit_agent source=sling"
+  fi
 
   if [[ -n "$mayor_dispatch_trigger_key" ]]; then
     local claim_rc
@@ -7706,7 +7816,7 @@ REVIEWMD
   if [[ "$review_class" == "approve" ]]; then
     echo "[refinery/$rig] PR #$pr APPROVED"
     log_event "REFINERY_REVIEW_APPROVED pr=#$pr"
-    _notify_openclaw "[SGT Refinery] review approved rig=$rig repo=$owner_repo pr=#$pr title=\"$pr_title_field\" issue=#$issue pr_url=$pr_url issue_url=$issue_url"
+    _notify_openclaw "[SGT Refinery] review approved rig=$rig repo=$owner_repo pr=#$pr title=\"$pr_title_field\" issue=#$issue pr_url=$pr_url issue_url=$issue_url" "$rig"
     gh pr comment "$pr" --repo "$repo" \
       --body "[sgt-refinery] **APPROVED** — reviewed and cleared for merge." 2>/dev/null || true
     return 0
@@ -7717,7 +7827,7 @@ REVIEWMD
     log_event "REFINERY_REVIEW_REJECTED pr=#$pr reason=$reject_reason"
     local reject_summary
     reject_summary=$(echo "$reject_reason" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g' | cut -c1-160)
-    _notify_openclaw "[SGT Refinery] review rejected rig=$rig pr=#$pr issue=#$issue reason=$reject_summary"
+    _notify_openclaw "[SGT Refinery] review rejected rig=$rig pr=#$pr issue=#$issue reason=$reject_summary" "$rig"
 
     gh pr comment "$pr" --repo "$repo" \
       --body "[sgt-refinery] **REJECTED** — Implementation incomplete.
@@ -7899,7 +8009,7 @@ STATE
 
   echo "[refinery/$rig] CI failing on PR #$pr — spawning self-heal polecat=$fix_polecat (issue #$issue)"
   log_event "REFINERY_CI_SELF_HEAL_SPAWN rig=$rig repo=$(_repo_owner_repo "$repo") pr=#$pr issue=#$issue head=$head_sha polecat=$fix_polecat sig=\"$(_escape_quotes "$sig")\""
-  _notify_openclaw "[SGT Refinery] CI self-heal: rig=$rig pr=#$pr issue=#$issue spawning polecat=$fix_polecat branch=$branch head=$head_sha sig=\"$(_escape_quotes "$sig")\""
+  _notify_openclaw "[SGT Refinery] CI self-heal: rig=$rig pr=#$pr issue=#$issue spawning polecat=$fix_polecat branch=$branch head=$head_sha sig=\"$(_escape_quotes "$sig")\"" "$rig"
 
   # Create worktree on the existing branch
   git -C "$rpath" fetch origin 2>/dev/null || true
@@ -8279,7 +8389,7 @@ _refinery_loop() {
                 verified_merged_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$mq_head_sha}"
                 echo "[refinery/$rig] PR #$mq_pr merged successfully"
                 log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
-                _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+                _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig" "$rig" "$rig"
                 _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$verified_merged_sha")"
                 rm -f "$f"
               else
@@ -8300,7 +8410,7 @@ _refinery_loop() {
               verified_merged_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$mq_head_sha}"
               echo "[refinery/$rig] PR #$mq_pr merged successfully"
               log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
-              _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+              _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig" "$rig"
               _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$verified_merged_sha")"
               rm -f "$f"
             else
@@ -8522,7 +8632,7 @@ _refinery_loop() {
             merge_expected_head_sha="$verified_merged_sha"
             echo "[refinery/$rig] PR #$mq_pr merged successfully"
             log_event "REFINERY_MERGED pr=#$mq_pr issue=#$mq_issue"
-            _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url"
+            _notify_openclaw "[SGT Refinery] merged rig=$rig repo=$mq_owner_repo pr=#$mq_pr title=\"$mq_pr_title_field\" issue=#$mq_issue pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig"
             _wake_mayor "merged:pr#$mq_pr:#$mq_issue:$rig|repo=$mq_owner_repo|title=$mq_wake_title|pr_url=$mq_pr_url|issue_url=$mq_issue_url|merged_head=$(_escape_wake_value "$merge_expected_head_sha")"
             rm -f "$f"
           else
@@ -8535,7 +8645,7 @@ _refinery_loop() {
           fi
           echo "[refinery/$rig] merge failed: $merge_result"
           log_event "REFINERY_MERGE_FAILED pr=#$mq_pr attempt=$merge_attempt/$max_attempts class=$merge_error_class transient=$merge_error_transient error=\"$(_escape_quotes "$merge_result")\""
-          _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url"
+          _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig"
           gh pr comment "$mq_pr" --repo "$mq_repo" \
             --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
         fi
@@ -8570,7 +8680,7 @@ _refinery_loop() {
             _merge_queue_set_field "$f" "REVIEW_UNCLEAR_ESCALATED_AT" "$unclear_escalated_at" || true
             echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR retry cap reached — escalating once (attempts=${unclear_retry_count}/${unclear_retry_max} class=$unclear_class)"
             log_event "REFINERY_REVIEW_UNCLEAR_ESCALATED pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max class=$unclear_class reason=\"$(_escape_quotes "$unclear_reason")\" next_action_hint=\"$(_escape_quotes "$next_action_hint")\""
-            _notify_openclaw "[SGT Refinery] unclear-review saturated rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max class=$unclear_class last_reason=\"$(_escape_quotes "$unclear_reason")\" next_action=\"$(_escape_quotes "$next_action_hint")\" pr_url=$mq_pr_url issue_url=$mq_issue_url"
+            _notify_openclaw "[SGT Refinery] unclear-review saturated rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max class=$unclear_class last_reason=\"$(_escape_quotes "$unclear_reason")\" next_action=\"$(_escape_quotes "$next_action_hint")\" pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig"
           else
             echo "[refinery/$rig] PR #$mq_pr REVIEW_UNCLEAR retry cap already escalated — holding"
             log_event "REFINERY_REVIEW_UNCLEAR_ESCALATION_DEDUPE pr=#$mq_pr issue=#$mq_issue attempts=$unclear_retry_count/$unclear_retry_max class=$unclear_class reason=\"$(_escape_quotes "$unclear_reason")\""
@@ -9916,7 +10026,7 @@ _mayor_loop() {
           if [[ "$agent_hb_age" -gt "$agent_hb_stale_secs" ]]; then
             issues_found+="  - ${agent}/$rname heartbeat stale (stale_seconds=${agent_hb_age}s threshold>${agent_hb_stale_secs}s last_heartbeat=${agent_hb_ts})\n"
             if _mayor_should_notify_agent_heartbeat_watchdog "$agent" "$rname"; then
-              _mayor_notify_rigger "mayor escalated: ${agent}/$rname heartbeat stale stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=${agent_hb_ts} runbook_action=notify"
+              _mayor_notify_rigger "mayor escalated: ${agent}/$rname heartbeat stale stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=${agent_hb_ts} runbook_action=notify" "0" "$rname"
               actions_taken+="  - escalated stale ${agent}/$rname heartbeat (stale_seconds=${agent_hb_age}s)\n"
               log_event "MAYOR_AGENT_HEARTBEAT_NOTIFY agent=$agent rig=$rname stale_seconds=${agent_hb_age} threshold=${agent_hb_stale_secs} last_heartbeat=$(_escape_quotes "$agent_hb_ts") dedupe_window=$(_mayor_agent_heartbeat_dedupe_secs)"
             else
@@ -9959,7 +10069,7 @@ _mayor_loop() {
       review_watchdog_notes+="  - queue=${rw_queue} rig=${rw_rig} pr=#${rw_pr} state=${rw_state} age=${rw_age}s threshold>=${rw_threshold}s since=${rw_since}\n"
       needs_ai=true
       if _mayor_should_notify_review_watchdog "$rw_rig" "$rw_repo" "$rw_pr" "$rw_state" "$rw_since" "$rw_head"; then
-        _mayor_notify_rigger "mayor escalated: refinery review stalled rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s threshold=${rw_threshold}s pr_url=$rw_pr_url issue_url=$rw_issue_url"
+        _mayor_notify_rigger "mayor escalated: refinery review stalled rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s threshold=${rw_threshold}s pr_url=$rw_pr_url issue_url=$rw_issue_url" "0" "$rw_rig"
         actions_taken+="  - escalated stalled refinery review for PR #$rw_pr ($rw_owner_repo, age=${rw_age}s)\n"
         log_event "MAYOR_REVIEW_WATCHDOG_NOTIFY rig=$rw_rig repo=$rw_owner_repo pr=#$rw_pr issue=#$rw_issue state=$rw_state age=${rw_age}s threshold=${rw_threshold}s"
       else
@@ -9983,7 +10093,7 @@ _mayor_loop() {
       issues_found+="  - required CI check stale on PR #$cw_pr (${cw_owner_repo}) check=${cw_check} state=${cw_state} stale_seconds=${cw_age}s threshold>=${cw_threshold}s check_url=${cw_check_url}\n"
       needs_ai=true
       if _mayor_should_notify_ci_check_watchdog "$cw_key"; then
-        _mayor_notify_rigger "mayor escalated: required check stale rig=$cw_rig repo=$cw_owner_repo pr=#$cw_pr check=$cw_check state=$cw_state stale_seconds=${cw_age} threshold=${cw_threshold} check_url=${cw_check_url} pr_url=${cw_pr_url} runbook_action=retry"
+        _mayor_notify_rigger "mayor escalated: required check stale rig=$cw_rig repo=$cw_owner_repo pr=#$cw_pr check=$cw_check state=$cw_state stale_seconds=${cw_age} threshold=${cw_threshold} check_url=${cw_check_url} pr_url=${cw_pr_url} runbook_action=retry" "0" "$cw_rig"
         actions_taken+="  - escalated stale required check for PR #$cw_pr ($cw_owner_repo, check=${cw_check}, stale_seconds=${cw_age})\n"
         log_event "MAYOR_CI_CHECK_WATCHDOG_NOTIFY rig=$cw_rig repo=$cw_owner_repo pr=#$cw_pr check=\"$(_escape_quotes "$cw_check")\" state=$cw_state stale_seconds=${cw_age} threshold=${cw_threshold} check_url=\"$(_escape_quotes "$cw_check_url")\" dedupe_window=${ci_watch_dedupe}"
       else
@@ -10046,7 +10156,7 @@ _mayor_loop() {
         if _mayor_should_notify_critical_alert "$rname" "$repo" "$critical_issues"; then
           local critical_alert
           critical_alert="$(_mayor_critical_alert_message "$rname" "$repo" "$critical_issues")"
-          _mayor_notify_rigger "$critical_alert"
+          _mayor_notify_rigger "$critical_alert" "0" "$rname"
         else
           local critical_cooldown
           critical_cooldown="$(_critical_alert_cooldown_secs)"
@@ -11740,6 +11850,14 @@ main() {
         plan) cmd_create_plan "$@" ;;
         blocker) cmd_create_blocker "$@" ;;
         *)    die "unknown create command: $sub (try: plan, blocker)" ;;
+      esac
+      ;;
+    config)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        notify) cmd_config_notify "$@" ;;
+        *)      die "unknown config command: $sub (try: notify)" ;;
       esac
       ;;
     sling)          cmd_sling "$@" ;;
