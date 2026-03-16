@@ -64,7 +64,13 @@ if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then
   done
   case "$json_fields" in
     labels) echo "sgt-authorized" ;;
-    state) echo "OPEN" ;;
+    state)
+      if [[ "$MODE" == "issue_auto_closed" ]]; then
+        echo "CLOSED"
+      else
+        echo "OPEN"
+      fi
+      ;;
     title) echo "Post merge verification issue" ;;
     body) echo "Issue body" ;;
     *) echo "" ;;
@@ -309,6 +315,26 @@ fi
         return 1
       fi
       ;;
+    issue_auto_closed)
+      # GitHub auto-closes linked issues from "Closes #N" in PR body.
+      # The merge should still be treated as success for notification purposes.
+      if [[ "$(cat "$merge_calls")" != "1" ]]; then
+        echo "expected one merge call for issue_auto_closed" >&2
+        return 1
+      fi
+      if [[ -f "$home_dir/sgt/.sgt/merge-queue/test-pr123" ]]; then
+        echo "expected queue removal on verified success despite issue auto-close" >&2
+        return 1
+      fi
+      if ! grep -q '^OUTCOME=success$' "$receipt_file"; then
+        echo "expected success outcome in receipt despite issue being auto-closed" >&2
+        return 1
+      fi
+      if ! grep -q 'merged successfully' "$home_dir/sgt/refinery-pass1.out"; then
+        echo "expected merged-success signal despite issue auto-close" >&2
+        return 1
+      fi
+      ;;
     *)
       echo "unsupported mode: $mode" >&2
       return 1
@@ -326,5 +352,6 @@ fi
 run_case normal_merge
 run_case stale_api_lag
 run_case partial_receipt_replay
+run_case issue_auto_closed
 
 echo "ALL TESTS PASSED"
