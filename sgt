@@ -3251,8 +3251,11 @@ _refinery_post_merge_verify_and_receipt() {
   if [[ "$pr_state" == "MERGED" && "$issue_state" == "OPEN" && "$branch_deleted" == "true" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
     outcome="success"
     retry_decision="no-op"
-  elif [[ "$pr_state" == "MERGED" && "$issue_state" != "OPEN" ]]; then
-    retry_decision="no-op-manual-issue-state-drift"
+  elif [[ "$pr_state" == "MERGED" && "$issue_state" != "OPEN" && -n "$merged_sha" && "$merged_sha" != "none" ]]; then
+    # GitHub auto-closes linked issues from "Closes #N" in PR body — issue_state=CLOSED
+    # is expected after merge, not a failure. Treat as success for notification purposes.
+    outcome="success"
+    retry_decision="no-op-issue-auto-closed"
   elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "unknown" ]]; then
     retry_decision="retry-post-merge-revalidate"
   elif [[ "$pr_state" == "MERGED" && "$branch_deleted" == "false" ]]; then
