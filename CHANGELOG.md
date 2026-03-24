@@ -2,12 +2,9 @@
 
 ## Unreleased
 
-- Verified Mayor context-compaction acceptance on latest `master` commit `bb6478e1ce0427f27e40d4de6adff2ccad82fcd7`: `./test_mayor_context_compaction_latest_main_proof.sh` and `./test_mayor_briefing_budget_contract.sh` both passed, confirming the configured budget stayed under cap while protected facts and operator-visible budget telemetry survived compaction.
-- Mayor briefing assembly now enforces a configurable prompt budget (`SGT_MAYOR_PROMPT_BUDGET_TOKENS`, default `60000`) with protected-fact sections for active work state, acceptance blockers, pending requests, and repo-plan status.
-- Briefing generation now compacts repeated recent activity / decision churn, records budget usage plus kept-vs-summarized sections inside `~/.sgt/mayor-briefing.md`, and emits structured `MAYOR_BRIEFING_BUDGET` telemetry for operators.
-- `sgt status` and `sgt status --json` now surface the latest mayor briefing budget snapshot so operators can see target/used/protected tokens plus kept-vs-summarized sections without opening the briefing file manually.
-- Added regression coverage for the mayor prompt-budget contract in `test_mayor_briefing_budget_contract.sh`.
-- Added `test_mayor_context_compaction_latest_main_proof.sh` as the dedicated latest-main proof entrypoint for Mayor context compaction, and documented it alongside the broader self-test convoy proof bundle.
+- Removed stale Mayor prompt-budget/context-compaction docs and regression hooks that no longer matched runtime behavior.
+- README and shared rig context now describe Mayor briefing generation as it actually exists on `master`: a fresh briefing file with system status, recent activity, queue state, issues/PRs, plan requests, repo plans, escalation rules, and recent decisions.
+- Dropped the nonexistent Mayor budget/compaction proof scripts from repo-owned proof bundles and wake-replay regression aggregation.
 - Mayor notify receipt failures now fail open after durable escalation logging, preventing `sgt mayor notify` false-negatives from converting successful mayor AI work into `ai-fail-closed` restart churn; `sgt status` surfaces the latest notify warning and `sgt trail` classifies `[work]` vs `[retry-noise]`.
 - Plan-state acceptance snapshots now clear stale terminal timestamps/reasons when `acceptance.status` changes, so `blocked -> verified/waived` transitions cannot preserve old `blocked_at` or `blocked_reason` data.
 - Added deterministic regression coverage for the full acceptance lifecycle in `test_plan_completion_acceptance_lifecycle.sh`, covering task exhaustion plus `pending -> blocked -> verified -> waived` rollups.

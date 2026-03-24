@@ -188,26 +188,12 @@ Run this on a fresh checkout of the latest `master`/mainline commit when you wan
 ./test_self_test_convoy_latest_main_proof.sh
 ```
 
-That proof bundle covers acceptance lifecycle state, worker completion-context relay, mayor follow-up behavior, and the mayor briefing budget/compaction contract on a latest-main checkout.
+That proof bundle covers acceptance lifecycle state, worker completion-context relay, and mayor follow-up behavior on a latest-main checkout.
 
 This proof path intentionally bundles the three convoy checks that matter:
 - `test_plan_completion_acceptance_lifecycle.sh` proves repo plans keep `tasks exhausted + acceptance pending/blocked/verified/waived` states deterministic.
 - `test_worker_prompt_completion_context.sh` proves workers receive the larger completion condition plus acceptance context.
 - `test_mayor_completion_condition_regression.sh` proves mayor does not go idle-green when only intermediate tasks merged and latest-main acceptance is still unmet.
-
-### Mayor context compaction latest-main proof path
-
-Run this on a fresh checkout of the latest `master`/mainline commit when you want the narrow proof for Mayor prompt-budget and context-compaction acceptance:
-
-```bash
-./test_mayor_context_compaction_latest_main_proof.sh
-```
-
-That proof path runs `test_mayor_briefing_budget_contract.sh` and proves all of the acceptance points specific to Mayor compaction on latest main:
-- briefing assembly stays within the configured token budget
-- protected facts survive compaction, including open issues/PRs, blockers, plan state, and durable latest-main proof context
-- repeated watchdog churn is summarized instead of appended raw
-- operator-visible telemetry remains available in `MAYOR_BRIEFING_BUDGET`, `sgt status`, and `sgt status --json`
 
 ### Manual control
 
@@ -263,18 +249,16 @@ Mayor AI briefing generation also has a strict freshness gate:
   - `generated_at: <ISO-8601 timestamp>`
   - `generated_at_epoch: <unix-seconds>`
 - Mayor validates briefing age against `SGT_MAYOR_BRIEFING_STALE_SECS` (default `5` seconds).
-- Mayor now also enforces a prompt-budget contract on the generated briefing:
-  - default budget: `SGT_MAYOR_PROMPT_BUDGET_TOKENS=60000` (keeps the effective context well below 100k unless explicitly overridden)
-  - protected sections always survive in the briefing metadata/assembly: system status, merge queue, open issues, open PRs, active acceptance blockers, pending plan requests, and repo-plan state
-  - noisy history (`Recent Activity`, `Recent Mayor Decisions`, durable-context notes, escalation JSON) is compacted or omitted before protected facts are dropped
-  - the briefing file now records `budget_target_tokens`, `budget_used_tokens_est`, `budget_kept_sections`, `budget_summarized_sections`, and `budget_omitted_sections`
-  - mayor emits structured `MAYOR_BRIEFING_BUDGET ...` telemetry so operators can see what was kept versus summarized
-  - `sgt status` now surfaces the latest briefing budget snapshot directly under the mayor agent, including target/used/protected tokens plus kept/summarized/omitted sections and the source briefing path
-- Operator inspection path for compaction telemetry:
-  - quick check: run `sgt status` and inspect the mayor `briefing budget:` / `budget sections:` lines
-  - machine-readable check: run `sgt status --json` and read `agents[].briefing_budget` for the `mayor` entry
-  - raw source of truth: open `~/.sgt/mayor-briefing.md` to inspect the embedded `budget_*` metadata and the actual compacted briefing body
-  - event stream: filter `~/.sgt/sgt.log` or `sgt trail` for `MAYOR_BRIEFING_BUDGET` to see per-cycle budget telemetry
+- The generated briefing currently contains:
+  - system status output
+  - recent activity (`tail -30` from the main log)
+  - merge queue state
+  - open `sgt-authorized` issues for each rig
+  - open PRs for each rig
+  - pending plan requests
+  - repo-plan file paths
+  - escalation rules JSON when present
+  - recent mayor decisions when present
 - If the briefing is stale/invalid, mayor performs one immediate auto-refresh and re-check.
 - If freshness still fails after refresh, mayor aborts that AI cycle (`MAYOR_AI_CYCLE aborted reason=stale-briefing`) instead of sending stale context to the model.
 - Structured freshness telemetry is emitted on each path:
