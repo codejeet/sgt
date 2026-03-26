@@ -42,6 +42,9 @@ if [[ "$args" == *" pr list "* ]]; then
     lookup_race)
       echo ""
       ;;
+    dead_no_pr_open)
+      echo ""
+      ;;
     *)
       echo "unknown gh mode: $mode" >&2
       exit 1
@@ -54,6 +57,9 @@ if [[ "$args" == *" issue view "* && "$args" == *" --json state "* ]]; then
   case "$mode" in
     lookup_race)
       echo "CLOSED"
+      ;;
+    dead_no_pr_open)
+      echo "OPEN"
       ;;
     *)
       echo "OPEN"
@@ -196,6 +202,60 @@ fi
 if ! grep -q "MAYOR POLECAT CLEANUP reason_code=sweep-pr-lookup-race-issue-closed polecat=test-race1111" "$SGT_ROOT/.sgt/mayor-decisions.log"; then
   echo "expected decision-log reason code for fallback cleanup path" >&2
   cat "$SGT_ROOT/.sgt/mayor-decisions.log" >&2
+  exit 1
+fi
+'
+
+"${ENV_PREFIX[@]}" bash --noprofile --norc -c '
+set -euo pipefail
+
+worktree="$SGT_ROOT/polecats/test-open-no-pr"
+mkdir -p "$worktree"
+cat > "$SGT_ROOT/.sgt/polecats/test-open-no-pr" <<STATE
+RIG=test
+REPO=https://github.com/acme/demo
+ISSUE=72
+BRANCH=sgt/test-open-no-pr
+WORKTREE=$worktree
+SESSION=sgt-test-open-no-pr
+DEFAULT_BRANCH=master
+STATE
+
+set +e
+SGT_TEST_GH_MODE=dead_no_pr_open sgt sweep > "$SGT_ROOT/sweep-open-no-pr.out" 2> "$SGT_ROOT/sweep-open-no-pr.err"
+sweep_rc=$?
+set -e
+
+if [[ "$sweep_rc" -ne 0 ]]; then
+  echo "expected sweep to clean dead no-PR residue and succeed, got exit $sweep_rc" >&2
+  exit 1
+fi
+
+if [[ -s "$SGT_ROOT/sweep-open-no-pr.err" ]]; then
+  echo "expected no stderr for dead no-PR cleanup path" >&2
+  cat "$SGT_ROOT/sweep-open-no-pr.err" >&2
+  exit 1
+fi
+
+if ! grep -q "completed (fallback: reason_code=sweep-dead-no-pr-open-issue) — cleaning up" "$SGT_ROOT/sweep-open-no-pr.out"; then
+  echo "expected explicit dead no-PR cleanup line in sweep output" >&2
+  cat "$SGT_ROOT/sweep-open-no-pr.out" >&2
+  exit 1
+fi
+
+if [[ -f "$SGT_ROOT/.sgt/polecats/test-open-no-pr" ]]; then
+  echo "expected dead no-PR cleanup to remove polecat state file" >&2
+  exit 1
+fi
+
+if [[ -d "$worktree" ]]; then
+  echo "expected dead no-PR cleanup to remove polecat worktree" >&2
+  exit 1
+fi
+
+if ! grep -q "SWEEP_RESILIENT_CLEANUP reason_code=sweep-dead-no-pr-open-issue polecat=test-open-no-pr" "$SGT_ROOT/sgt.log"; then
+  echo "expected dead no-PR resilient cleanup activity log entry" >&2
+  cat "$SGT_ROOT/sgt.log" >&2
   exit 1
 fi
 '
