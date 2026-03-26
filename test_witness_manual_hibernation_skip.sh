@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_witness_stalled_followup_guard.sh — Stalled worker cleanup must leave durable replacement follow-up when re-dispatch fails.
+# test_witness_manual_hibernation_skip.sh — Witness must not re-sling or escalate stalled work for a manually hibernated rig.
 
 set -euo pipefail
 
@@ -38,14 +38,27 @@ TMUX_ACTIVE_FILE="$TMP_ROOT/tmux-active"
 GH_COMMENT_FILE="$TMP_ROOT/gh-comments"
 WAKE_FILE="$TMP_ROOT/wake-events"
 BLOCKER_FILE="$TMP_ROOT/blockers"
-CONTEXT_FILE="$TMP_ROOT/context.log"
+RESLING_FILE="$TMP_ROOT/resling-calls"
 
 printf 'https://github.com/acme/demo\n' > "$SGT_ROOT/.sgt-rig-one-repo"
 echo "0" > "$TMUX_ACTIVE_FILE"
 : > "$GH_COMMENT_FILE"
 : > "$WAKE_FILE"
 : > "$BLOCKER_FILE"
-: > "$CONTEXT_FILE"
+: > "$RESLING_FILE"
+
+cat > "$SGT_MAYOR_RIG_ACTIVITY_DIR/rig-one.state" <<'STATE'
+STATE=hibernated
+LAST_REASON=quiet window
+CHANGED_AT=2026-03-26T00:00:00Z
+CHANGED_EPOCH=1
+HIBERNATION_MODE=manual
+LAST_MEANINGFUL_AT=
+LAST_MEANINGFUL_EPOCH=
+LAST_MEANINGFUL_REASON=
+LAST_WAKE_AT=
+LAST_WAKE_REASON=
+STATE
 
 log_event() {
   printf '%s\n' "${1:-}" >> "$SGT_LOG"
@@ -74,18 +87,11 @@ _repo_issue_url() {
 _escape_quotes() { printf '%s' "$1"; }
 _context_python_bin() { return 1; }
 _context_index_build() { :; }
-_ensure_context_file() {
-  echo "$CONTEXT_FILE"
-}
-_context_append_acceptance_blocker() {
-  printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$CONTEXT_FILE"
-}
+_ensure_context_file() { echo "$TMP_ROOT/context.log"; }
+_context_append_acceptance_blocker() { :; }
 _acceptance_blocker_write() {
-  local rig="$1" evidence="$2" requester="$3" source="$4"
-  printf '%s\n' "$evidence" > "$TMP_ROOT/evidence.md"
-  printf 'blocker-123\n' > /dev/null
-  printf '%s|%s|%s|%s\n' "$rig" "$requester" "$source" "blocker-123" >> "$BLOCKER_FILE"
-  printf 'blocker-123\n'
+  printf '%s\n' "unexpected-blocker" >> "$BLOCKER_FILE"
+  printf 'unexpected-blocker\n'
 }
 _wake_mayor() {
   printf '%s\n' "$1" >> "$WAKE_FILE"
@@ -96,7 +102,10 @@ _wake_refinery() { :; }
 _pr_head_sha() { echo "deadbeef"; }
 _merge_queue_enqueue_polecat() { return 1; }
 _ai_backend_default() { echo "codex"; }
-_resling_existing_issue() { return 1; }
+_resling_existing_issue() {
+  printf '%s\n' "$*" >> "$RESLING_FILE"
+  return 1
+}
 
 tmux() {
   if [[ "${1:-}" == "has-session" ]]; then
@@ -167,7 +176,6 @@ REPO=https://github.com/acme/demo
 STATE
 }
 
-echo "=== witness stalled worker follow-up guard ==="
 make_polecat "rig-one-stalled" "sgt/rig-one-stalled"
 echo "0" > "$TMUX_ACTIVE_FILE"
 run_witness_once
@@ -176,30 +184,21 @@ if [[ -f "$SGT_POLECATS/rig-one-stalled" ]]; then
   echo "expected stalled polecat state file to be removed after cleanup" >&2
   exit 1
 fi
-if ! grep -q 'WITNESS_STALLED rig-one-stalled issue=#177' "$SGT_LOG"; then
-  echo "expected stalled worker detection log" >&2
-  cat "$SGT_LOG" >&2
+if [[ -s "$RESLING_FILE" ]]; then
+  echo "expected witness not to attempt re-sling while rig is manually hibernated" >&2
+  cat "$RESLING_FILE" >&2
   exit 1
 fi
-if ! grep -q 'WITNESS_STALLED_FOLLOWUP_REQUIRED polecat=rig-one-stalled rig=rig-one issue=#177 blocker_id=blocker-123 reason_code=witness-stalled-resling-failed' "$SGT_LOG"; then
-  echo "expected durable follow-up log when re-sling fails" >&2
-  cat "$SGT_LOG" >&2
-  exit 1
-fi
-if ! grep -q 'acceptance-blocker:rig-one:blocker-123' "$WAKE_FILE"; then
-  echo "expected mayor wake for stalled-worker acceptance blocker" >&2
-  cat "$WAKE_FILE" >&2
-  exit 1
-fi
-if ! grep -q 'blocker-123' "$BLOCKER_FILE"; then
-  echo "expected acceptance blocker creation for stalled worker" >&2
+if [[ -s "$BLOCKER_FILE" ]]; then
+  echo "expected witness not to create acceptance blocker while rig is manually hibernated" >&2
   cat "$BLOCKER_FILE" >&2
   exit 1
 fi
-if ! grep -q 'Do not close this incident without replacement work item/PR' "$GH_COMMENT_FILE"; then
-  echo "expected issue comment to block silent closure without replacement work" >&2
-  cat "$GH_COMMENT_FILE" >&2
+if [[ -s "$WAKE_FILE" ]]; then
+  echo "expected witness not to wake mayor for replacement work while rig is manually hibernated" >&2
+  cat "$WAKE_FILE" >&2
   exit 1
 fi
+grep -q 'WITNESS_RESLING_SKIP rig-one-stalled rig=rig-one issue=#177 reason_code=manual-hibernation' "$SGT_LOG"
 
 echo "ALL TESTS PASSED"
