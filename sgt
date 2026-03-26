@@ -6516,6 +6516,35 @@ _ai_session_cmd() {
   printf '%s' "$backend_cmd"
 }
 
+_ai_session_cmd_from_file() {
+  # Print a command that runs the selected backend using a prompt file instead of
+  # embedding the full prompt text into the tmux command string.
+  # Usage: _ai_session_cmd_from_file <backend> <prompt_file> [output_log]
+  local backend="$1" prompt_file="$2" output_log="${3:-}"
+  local backend_cmd prompt_basename
+  prompt_basename="$(basename "$prompt_file")"
+  case "$backend" in
+    claude)
+      backend_cmd="$(printf 'unset CLAUDECODE; IS_SANDBOX=1 claude %q --dangerously-skip-permissions' "Read ${prompt_basename} and follow it exactly.")"
+      ;;
+    codex)
+      backend_cmd="$(printf 'OPENAI_BASE_URL= OPENAI_API_BASE= OPENAI_HOST= codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --color auto - < %q' "$prompt_file")"
+      ;;
+    *)
+      die "unknown backend: $backend"
+      ;;
+  esac
+  if [[ -n "$output_log" ]]; then
+    if command -v script >/dev/null 2>&1; then
+      printf 'rm -f %q; script -qefc %q %q' "$output_log" "$backend_cmd" "$output_log"
+      return 0
+    fi
+    printf 'rm -f %q; %s' "$output_log" "$backend_cmd"
+    return 0
+  fi
+  printf '%s' "$backend_cmd"
+}
+
 _ai_promptfile() {
   # Run a backend using a prompt read from a file; echoes agent output to stdout.
   # Usage: _ai_promptfile <backend> <workdir> <prompt_file>
@@ -6975,13 +7004,15 @@ PSTATE
   # ── 5. Spawn AI agent in tmux ──
   info "spawning polecat $pname in tmux session $session_name..."
 
-  local polecat_prompt
+  local polecat_prompt polecat_prompt_file
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
+  _write_polecat_runtime_prompt_file "$worktree" "$polecat_prompt"
+  polecat_prompt_file="./$(basename "$(_polecat_runtime_prompt_file "$worktree")")"
 
   local tmux_error dispatch_reason_code
   if ! tmux_error="$(
     tmux new-session -d -s "$session_name" -c "$worktree" \
-      "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
+      "$( _ai_session_cmd_from_file "$backend" "$polecat_prompt_file" "./.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
       2>&1
   )"; then
     dispatch_reason_code="tmux-new-session-failed"
@@ -8651,12 +8682,14 @@ CREATED=$(date -Iseconds)
 STATUS=running
 PSTATE
 
-  local polecat_prompt
+  local polecat_prompt polecat_prompt_file
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
+  _write_polecat_runtime_prompt_file "$worktree" "$polecat_prompt"
+  polecat_prompt_file="./$(basename "$(_polecat_runtime_prompt_file "$worktree")")"
   local tmux_error dispatch_reason_code
   if ! tmux_error="$(
     tmux new-session -d -s "$session_name" -c "$worktree" \
-      "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
+      "$( _ai_session_cmd_from_file "$backend" "$polecat_prompt_file" "./.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
       2>&1
   )"; then
     dispatch_reason_code="tmux-new-session-failed"
@@ -12885,6 +12918,19 @@ _build_polecat_runtime_prompt() {
   fi
   prompt+="$readme_prompt"
   printf '%s' "$prompt"
+}
+
+_polecat_runtime_prompt_file() {
+  local worktree="$1"
+  printf '%s/.sgt-polecat-prompt.md\n' "$worktree"
+}
+
+_write_polecat_runtime_prompt_file() {
+  local worktree="$1" prompt="$2"
+  local prompt_file
+  prompt_file="$(_polecat_runtime_prompt_file "$worktree")"
+  printf '%s' "$prompt" > "$prompt_file"
+  chmod 600 "$prompt_file" 2>/dev/null || true
 }
 
 _write_polecat_claude_md() {

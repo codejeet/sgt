@@ -198,6 +198,7 @@ _acceptance_blocker_write "demo" "Verified acceptance is still red after merge."
 cmd_sling "demo" "Inject completion context into worker prompts" --backend codex >/dev/null
 first_polecat="${_SGT_LAST_SLING_POLECAT:?missing first polecat}"
 first_claude="$HOME/sgt/polecats/$first_polecat/CLAUDE.md"
+first_prompt="$HOME/sgt/polecats/$first_polecat/.sgt-polecat-prompt.md"
 
 grep -q '## Rig Completion Context' "$first_claude" || { echo "missing rig completion context in sling CLAUDE" >&2; exit 1; }
 grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$first_claude" || { echo "missing completion condition in sling CLAUDE" >&2; exit 1; }
@@ -207,10 +208,15 @@ grep -q '\*\*Acceptance details\*\*: Fresh-state verification is still required 
 grep -q '\*\*Unresolved acceptance blockers\*\*: yes (1 active)' "$first_claude" || { echo "missing acceptance blocker summary in sling CLAUDE" >&2; exit 1; }
 grep -q 'merged intermediate work is not rig completion' "$first_claude" || { echo "missing merged-work rule in sling CLAUDE" >&2; exit 1; }
 
-grep -q 'Rig Completion Context' "$HOME/tmux.log" || { echo "missing rig completion context in sling runtime prompt" >&2; exit 1; }
-grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log" || { echo "missing completion condition in sling runtime prompt" >&2; exit 1; }
-grep -q 'Acceptance rollup' "$HOME/tmux.log" || { echo "missing acceptance rollup in sling runtime prompt" >&2; exit 1; }
-grep -q 'Fresh-state verification is still required after merges.' "$HOME/tmux.log" || { echo "missing acceptance details in sling runtime prompt" >&2; exit 1; }
+grep -q 'Rig Completion Context' "$first_prompt" || { echo "missing rig completion context in sling runtime prompt file" >&2; exit 1; }
+grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$first_prompt" || { echo "missing completion condition in sling runtime prompt file" >&2; exit 1; }
+grep -q 'Acceptance rollup' "$first_prompt" || { echo "missing acceptance rollup in sling runtime prompt file" >&2; exit 1; }
+grep -q 'Fresh-state verification is still required after merges.' "$first_prompt" || { echo "missing acceptance details in sling runtime prompt file" >&2; exit 1; }
+grep -q '\.sgt-polecat-prompt\.md' "$HOME/tmux.log" || { echo "expected tmux launch to reference prompt file for sling" >&2; exit 1; }
+if grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log"; then
+  echo "expected tmux launch to avoid embedding full sling runtime prompt" >&2
+  exit 1
+fi
 
 rm -f "$HOME/sgt/.sgt/polecats/$first_polecat"
 rm -rf "$HOME/sgt/polecats/$first_polecat"
@@ -219,6 +225,7 @@ rm -f "$HOME/tmux.log"
 _resling_existing_issue "demo" "1" "Inject completion context into worker prompts" "https://github.com/acme/demo" "codex" "" "test-resling" "test-resling:issue-1"
 second_polecat="${_RESLING_LAST_POLECAT:?missing reslung polecat}"
 second_claude="$HOME/sgt/polecats/$second_polecat/CLAUDE.md"
+second_prompt="$HOME/sgt/polecats/$second_polecat/.sgt-polecat-prompt.md"
 
 grep -q '## Rig Completion Context' "$second_claude" || { echo "missing rig completion context in resling CLAUDE" >&2; exit 1; }
 grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$second_claude" || { echo "missing completion condition in resling CLAUDE" >&2; exit 1; }
@@ -227,10 +234,15 @@ grep -q '\*\*Acceptance rollup\*\*: pending' "$second_claude" || { echo "missing
 grep -q '\*\*Acceptance details\*\*: Fresh-state verification is still required after merges.' "$second_claude" || { echo "missing acceptance details in resling CLAUDE" >&2; exit 1; }
 grep -q '\*\*Unresolved acceptance blockers\*\*: yes (1 active)' "$second_claude" || { echo "missing acceptance blocker summary in resling CLAUDE" >&2; exit 1; }
 
-grep -q 'Rig Completion Context' "$HOME/tmux.log" || { echo "missing rig completion context in resling runtime prompt" >&2; exit 1; }
-grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log" || { echo "missing completion condition in resling runtime prompt" >&2; exit 1; }
-grep -q 'Acceptance rollup' "$HOME/tmux.log" || { echo "missing acceptance rollup in resling runtime prompt" >&2; exit 1; }
-grep -q 'Fresh-state verification is still required after merges.' "$HOME/tmux.log" || { echo "missing acceptance details in resling runtime prompt" >&2; exit 1; }
+grep -q 'Rig Completion Context' "$second_prompt" || { echo "missing rig completion context in resling runtime prompt file" >&2; exit 1; }
+grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$second_prompt" || { echo "missing completion condition in resling runtime prompt file" >&2; exit 1; }
+grep -q 'Acceptance rollup' "$second_prompt" || { echo "missing acceptance rollup in resling runtime prompt file" >&2; exit 1; }
+grep -q 'Fresh-state verification is still required after merges.' "$second_prompt" || { echo "missing acceptance details in resling runtime prompt file" >&2; exit 1; }
+grep -q '\.sgt-polecat-prompt\.md' "$HOME/tmux.log" || { echo "expected tmux launch to reference prompt file for resling" >&2; exit 1; }
+if grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log"; then
+  echo "expected tmux launch to avoid embedding full resling runtime prompt" >&2
+  exit 1
+fi
 
 echo "ALL TESTS PASSED"
 BASH
