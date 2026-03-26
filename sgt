@@ -1079,6 +1079,7 @@ _mayor_rig_activity_refresh() {
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local prior prior_state prior_reason prior_changed_at prior_changed_epoch prior_mode prior_meaningful_at prior_meaningful_epoch prior_meaningful_reason prior_wake_at prior_wake_reason
   local state hibernation_mode last_reason last_meaningful_at last_meaningful_epoch last_meaningful_reason last_wake_at last_wake_reason now_iso now_epoch auto_hibernate_secs idle_age
+  local prior_hibernated=0 current_hibernated=0
   _mayor_rig_activity_enabled || return 0
   snapshot="$(_mayor_rig_activity_snapshot "$rig")"
   IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
@@ -1126,7 +1127,18 @@ _mayor_rig_activity_refresh() {
     hibernation_mode="auto"
     last_reason="${prior_reason:-auto-hibernated}"
   fi
+  if [[ "$prior_state" == "hibernated" && "${prior_mode:-none}" != "none" ]]; then
+    prior_hibernated=1
+  fi
+  if [[ "$state" == "hibernated" && "${hibernation_mode:-none}" != "none" ]]; then
+    current_hibernated=1
+  fi
   _mayor_rig_activity_state_write "$rig" "$state" "$last_reason" "$hibernation_mode" "$last_meaningful_at" "$last_meaningful_epoch" "$last_meaningful_reason" "$last_wake_at" "$last_wake_reason"
+  if (( current_hibernated == 1 && prior_hibernated == 0 )); then
+    _rig_hibernation_sync_agents "$rig" "hibernate" "$last_reason" || true
+  elif (( current_hibernated == 0 && prior_hibernated == 1 )); then
+    _rig_hibernation_sync_agents "$rig" "unhibernate" "$last_reason" || true
+  fi
 }
 
 _mayor_rig_hibernated() {
@@ -1134,6 +1146,43 @@ _mayor_rig_hibernated() {
   _mayor_rig_activity_enabled || return 1
   IFS='|' read -r state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
   [[ "$state" == "hibernated" && "$mode" != "none" ]]
+}
+
+_rig_hibernation_sync_agents() {
+  local rig="${1:-}" action="${2:-}" reason="${3:-}"
+  local witness_session refinery_session changed=0
+  [[ -n "$rig" && -n "$action" ]] || return 1
+  witness_session="sgt-witness-${rig}"
+  refinery_session="sgt-refinery-${rig}"
+  case "$action" in
+    hibernate)
+      if tmux has-session -t "$witness_session" 2>/dev/null; then
+        cmd_witness_stop "$rig" >/dev/null 2>&1 || true
+        changed=1
+      fi
+      if tmux has-session -t "$refinery_session" 2>/dev/null; then
+        cmd_refinery_stop "$rig" >/dev/null 2>&1 || true
+        changed=1
+      fi
+      ;;
+    unhibernate)
+      if ! tmux has-session -t "$refinery_session" 2>/dev/null; then
+        cmd_refinery_start "$rig" >/dev/null 2>&1 || true
+        changed=1
+      fi
+      if ! tmux has-session -t "$witness_session" 2>/dev/null; then
+        cmd_witness_start "$rig" >/dev/null 2>&1 || true
+        changed=1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  if (( changed > 0 )); then
+    log_event "RIG_HIBERNATION_AGENT_SYNC rig=$rig action=$action reason=\"$(_escape_quotes "${reason:-unspecified}")\""
+  fi
+  return 0
 }
 
 _mayor_rig_activity_ensure_state() {
@@ -1162,6 +1211,7 @@ _mayor_rig_set_manual_hibernation() {
         "$last_meaningful_reason" \
         "$last_wake_at" \
         "$last_wake_reason"
+      _rig_hibernation_sync_agents "$rig" "hibernate" "${reason:-manual hibernation}" || true
       ;;
     unhibernate)
       _mayor_rig_activity_state_write \
@@ -1174,6 +1224,7 @@ _mayor_rig_set_manual_hibernation() {
         "$last_meaningful_reason" \
         "$last_wake_at" \
         "$last_wake_reason"
+      _rig_hibernation_sync_agents "$rig" "unhibernate" "${reason:-manual unhibernate}" || true
       ;;
   esac
 }
@@ -9379,6 +9430,19 @@ HEARTBEAT
       [[ -f "$rig_file" ]] || continue
       local rig_name
       rig_name="$(basename "$rig_file")"
+
+      if _mayor_rig_hibernated "$rig_name"; then
+        local witness_session refinery_session
+        witness_session="sgt-witness-${rig_name}"
+        refinery_session="sgt-refinery-${rig_name}"
+        if tmux has-session -t "$witness_session" 2>/dev/null || tmux has-session -t "$refinery_session" 2>/dev/null; then
+          echo "[deacon] $rig_name is hibernated — stopping witness/refinery"
+          log_event "DEACON_ENFORCE_HIBERNATION rig=$rig_name"
+          _rig_hibernation_sync_agents "$rig_name" "hibernate" "deacon enforced hibernation" || true
+          actions=$((actions + 1))
+        fi
+        continue
+      fi
 
       # Check witness
       if ! tmux has-session -t "sgt-witness-${rig_name}" 2>/dev/null; then

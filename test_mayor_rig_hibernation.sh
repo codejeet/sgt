@@ -37,11 +37,36 @@ cat > "$MOCK_BIN/tmux" <<'TMUX'
 #!/usr/bin/env bash
 set -euo pipefail
 
+SESSIONS_DIR="${SGT_TMUX_SESSIONS_DIR:?}"
+
 if [[ "${1:-}" == "has-session" ]]; then
-  exit 1
+  [[ "${2:-}" == "-t" ]] || exit 1
+  [[ -f "$SESSIONS_DIR/${3:-}" ]]
+  exit $?
 fi
 
-if [[ "${1:-}" == "new-session" || "${1:-}" == "kill-session" ]]; then
+if [[ "${1:-}" == "new-session" ]]; then
+  session=""
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      -s)
+        session="${2:-}"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  [[ -n "$session" ]] || exit 1
+  : > "$SESSIONS_DIR/$session"
+  exit 0
+fi
+
+if [[ "${1:-}" == "kill-session" ]]; then
+  [[ "${2:-}" == "-t" ]] || exit 1
+  rm -f "$SESSIONS_DIR/${3:-}"
   exit 0
 fi
 
@@ -56,6 +81,7 @@ COMMON_ENV=(
   PATH="$MOCK_BIN:$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
   TERM="${TERM:-xterm}"
   SGT_ROOT="$HOME_DIR/sgt"
+  SGT_TMUX_SESSIONS_DIR="$TMP_ROOT/tmux-sessions"
 )
 
 "${COMMON_ENV[@]}" bash --noprofile --norc <<'BASH'
@@ -63,12 +89,17 @@ set -euo pipefail
 
 sgt init >/dev/null
 printf 'https://github.com/acme/demo\n' > "$SGT_ROOT/.sgt/rigs/demo"
+mkdir -p "$SGT_TMUX_SESSIONS_DIR"
+: > "$SGT_TMUX_SESSIONS_DIR/sgt-witness-demo"
+: > "$SGT_TMUX_SESSIONS_DIR/sgt-refinery-demo"
 
 sgt mayor hibernate demo "quiet window" >/tmp/sgt-mayor-hibernate.out
 status_line="$(sgt mayor rig-status demo)"
 [[ "$status_line" == *"state=hibernated"* ]]
 [[ "$status_line" == *"mode=manual"* ]]
 [[ "$status_line" == *"reason=quiet window"* ]]
+[[ ! -f "$SGT_TMUX_SESSIONS_DIR/sgt-witness-demo" ]]
+[[ ! -f "$SGT_TMUX_SESSIONS_DIR/sgt-refinery-demo" ]]
 
 json_file="$HOME/status.json"
 sgt status --json > "$json_file"
@@ -89,6 +120,8 @@ status_line="$(sgt mayor rig-status demo)"
 [[ "$status_line" == *"state=idle"* ]]
 [[ "$status_line" == *"mode=none"* ]]
 [[ "$status_line" == *"reason=resume work"* ]]
+[[ -f "$SGT_TMUX_SESSIONS_DIR/sgt-witness-demo" ]]
+[[ -f "$SGT_TMUX_SESSIONS_DIR/sgt-refinery-demo" ]]
 BASH
 
 bash -s "$SGT_SCRIPT" "$TMP_ROOT" <<'BASH'
@@ -116,6 +149,7 @@ eval "$(extract_fn _mayor_rig_activity_state_read)"
 eval "$(extract_fn _mayor_rig_activity_state_write)"
 eval "$(extract_fn _mayor_wake_reason_is_meaningful)"
 eval "$(extract_fn _mayor_rig_hibernated)"
+eval "$(extract_fn _rig_hibernation_sync_agents)"
 eval "$(extract_fn _mayor_rig_set_manual_hibernation)"
 eval "$(extract_fn _mayor_rig_maybe_unhibernate_for_event)"
 
@@ -123,6 +157,13 @@ export SGT_CONFIG="$TMP_ROOT/helper-config"
 export SGT_MAYOR_RIG_ACTIVITY_DIR="$SGT_CONFIG/mayor-rig-activity"
 export SGT_LOG="$TMP_ROOT/helper.log"
 mkdir -p "$SGT_CONFIG"
+
+SYNC_LOG="$TMP_ROOT/sync.log"
+cmd_witness_stop() { echo "witness-stop:$1" >> "$SYNC_LOG"; }
+cmd_refinery_stop() { echo "refinery-stop:$1" >> "$SYNC_LOG"; }
+cmd_refinery_start() { echo "refinery-start:$1" >> "$SYNC_LOG"; }
+cmd_witness_start() { echo "witness-start:$1" >> "$SYNC_LOG"; }
+tmux() { return 1; }
 
 _mayor_rig_set_manual_hibernation demo hibernate "manual pause"
 _mayor_rig_hibernated demo
@@ -132,6 +173,8 @@ IFS='|' read -r state reason _changed_at _changed_epoch mode _meaningful_at _mea
 [[ "$state" == "idle" ]]
 [[ "$mode" == "none" ]]
 [[ "$reason" == "auto-wake: merged:pr#77:#40:demo"* ]]
+grep -q '^refinery-start:demo$' "$SYNC_LOG"
+grep -q '^witness-start:demo$' "$SYNC_LOG"
 BASH
 
 echo "PASS: mayor rig hibernation regression"
