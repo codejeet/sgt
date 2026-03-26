@@ -4373,6 +4373,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import urllib.request
 
 rig, context_path, index_path, model, api_key = sys.argv[1:6]
@@ -4428,14 +4429,23 @@ doc = {
     "model": model,
     "source_path": context_path,
     "source_mtime": int(os.path.getmtime(context_path)),
-    "indexed_at": __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    "indexed_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "entries": entries,
 }
 
-tmp_path = index_path + ".tmp"
-with open(tmp_path, "w", encoding="utf-8") as fh:
-    json.dump(doc, fh, ensure_ascii=True)
-os.replace(tmp_path, index_path)
+index_dir = os.path.dirname(index_path) or "."
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=".index.", suffix=".json.tmp", dir=index_dir)
+try:
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, index_path)
+finally:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
 print(index_path)
 PY
 }
@@ -4449,7 +4459,7 @@ _context_index_is_fresh() {
 }
 
 _context_search_run() {
-  local rig="${1:-}" query="${2:-}" index_path py_bin model api_key context_file
+  local rig="${1:-}" query="${2:-}" index_path py_bin model api_key context_file search_rc retrying err_file
   [[ -n "$query" ]] || die "usage: sgt context search <rig> <query>"
   context_file="$(_ensure_context_file "$rig")"
   if ! _context_index_is_fresh "$rig"; then
@@ -4460,7 +4470,11 @@ _context_search_run() {
   _require_context_api_key
   model="$(_context_embedding_model)"
   api_key="${OPENAI_API_KEY:-}"
-  "$py_bin" - "$rig" "$index_path" "$model" "$api_key" "$query" <<'PY'
+  retrying=0
+  err_file="$(mktemp)"
+  while true; do
+    set +e
+    "$py_bin" - "$rig" "$index_path" "$model" "$api_key" "$query" 2>"$err_file" <<'PY'
 import json
 import math
 import sys
@@ -4468,8 +4482,12 @@ import urllib.request
 
 rig, index_path, model, api_key, query = sys.argv[1:6]
 
-with open(index_path, "r", encoding="utf-8") as fh:
-    index = json.load(fh)
+try:
+    with open(index_path, "r", encoding="utf-8") as fh:
+        index = json.load(fh)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"malformed context index at {index_path}: {exc}", file=sys.stderr)
+    raise SystemExit(86)
 
 entries = index.get("entries") or []
 if not entries:
@@ -4519,6 +4537,27 @@ for score, entry in top:
     text = entry.get("text") or ""
     print(f"{score:.3f}\t{date}\tline {line}\t{text}")
 PY
+    search_rc=$?
+    set -e
+    if [[ "$search_rc" -eq 0 ]]; then
+      cat "$err_file" >&2
+      rm -f "$err_file"
+      return 0
+    fi
+    if [[ "$search_rc" -eq 86 ]] && [[ "$retrying" -eq 0 ]]; then
+      retrying=1
+      warn "context index for rig '$rig' was malformed; rebuilding"
+      _context_index_build "$rig" >/dev/null || die "failed to rebuild malformed context index for rig '$rig'"
+      continue
+    fi
+    if [[ "$search_rc" -eq 86 ]]; then
+      rm -f "$err_file"
+      die "context index for rig '$rig' is malformed and rebuild did not recover it"
+    fi
+    cat "$err_file" >&2
+    rm -f "$err_file"
+    return "$search_rc"
+  done
 }
 
 cmd_context() {

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `sgt context index` now writes through unique fsynced temp files before `os.replace`, avoiding concurrent rebuild corruption of `~/.sgt/context/<rig>/index.json`.
+- `sgt context search` now detects malformed context indexes, warns once, rebuilds from `SGT_CONTEXT.md`, and retries instead of surfacing a raw JSON decode traceback.
+- Added deterministic malformed-index recovery coverage to `test_context_cli.sh` with a mocked embeddings API.
 - Removed stale Mayor prompt-budget/context-compaction docs and regression hooks that no longer matched runtime behavior.
 - README and shared rig context now describe Mayor briefing generation as it actually exists on `master`: a fresh briefing file with system status, recent activity, queue state, issues/PRs, plan requests, repo plans, escalation rules, and recent decisions.
 - Dropped the nonexistent Mayor budget/compaction proof scripts from repo-owned proof bundles and wake-replay regression aggregation.
