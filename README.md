@@ -513,6 +513,11 @@ export SGT_MAYOR_LOCK_LEASE_SECS=720
 
 Default lease is `SGT_MAYOR_INTERVAL + 120` seconds.
 
+Optional per-rig Mayor architecture:
+- Set `SGT_MAYOR_ARCHITECTURE=per-rig` to run one Mayor tmux session per rig instead of one shared `sgt-mayor`.
+- In that mode, sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises each `sgt-mayor-<rig>` independently, and `sgt status` / `sgt status --json` expose entries like `mayor/pmkb` or `mayor/sgt`.
+- `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
+
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
 
@@ -521,7 +526,7 @@ export SGT_DEACON_HEARTBEAT_STALE_SECS=300
 ```
 
 - Mayor also checks this heartbeat age and proactively restarts deacon when the heartbeat is missing/invalid/stale.
-- Deacon also supervises the mayor tmux session and restarts it if `sgt-mayor` disappears.
+- Deacon also supervises the mayor tmux session in shared mode, or each `sgt-mayor-<rig>` session in per-rig mode, and restarts missing/stale Mayor sessions automatically.
 - Mayor shutdown/exit paths emit a durable `MAYOR_STOP` receipt with `reason_code`, `exit_code`, `signal`, and `unexpected` fields so silent exits remain visible in logs/decision history.
 - `sgt status` now shows deacon heartbeat age + health (`healthy|stale|unknown`) and the active stale threshold.
 - `sgt status` render guardrails are non-fatal: terminal width falls back safely in non-TTY/sparse envs, and polecat metadata races/misses are surfaced as actionable warning lines (for example, retry `sgt status` or run `sgt nuke <polecat>` if stale) while `sgt status` still exits `0`.
