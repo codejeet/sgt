@@ -104,7 +104,7 @@ fi
 check_file_contains "mayor usage includes command synopsis" "$BASE_OUT" '^Usage: sgt mayor <command> \[args\]$'
 check_file_contains "unknown mayor subcommand exits 1" "$BAD_RC" '^1$'
 check_equals "unknown mayor subcommand writes no stdout" "$(wc -c <"$BAD_OUT" | tr -d ' ')" "0"
-check_file_contains "unknown mayor subcommand error is explicit" "$BAD_ERR" '^sgt: unknown mayor command: nope \(try: help, start, stop, notify, request, merge\)$'
+check_file_contains "unknown mayor subcommand error is explicit" "$BAD_ERR" '^sgt: unknown mayor command: nope \(try: help, start, stop, notify, hibernate, unhibernate, rig-status, request, merge\)$'
 
 check_file_contains "mayor command keeps start subcommand" "$SGT_SCRIPT" 'start\)[[:space:]]+cmd_mayor_start'
 check_file_contains "mayor command keeps stop subcommand" "$SGT_SCRIPT" 'stop\)[[:space:]]+cmd_mayor_stop'
