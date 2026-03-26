@@ -35,10 +35,13 @@ SGT_MAYOR_NOTIFY_ALERT_STATE="$SGT_CONFIG/mayor-notify-alert.state"
 SGT_MAYOR_REVIEW_WATCHDOG_STATE="$SGT_CONFIG/mayor-review-watchdog.state"
 SGT_MAYOR_CI_CHECK_WATCHDOG_STATE="$SGT_CONFIG/mayor-ci-check-watchdog.state"
 SGT_MAYOR_AGENT_HEARTBEAT_WATCHDOG_STATE="$SGT_CONFIG/mayor-agent-heartbeat-watchdog.state"
+SGT_MAYOR_RIG_ACTIVITY_DIR="$SGT_CONFIG/mayor-rig-activity"
 SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}" # 15 minutes
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
 SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 minutes
+SGT_MAYOR_RIG_ACTIVITY="${SGT_MAYOR_RIG_ACTIVITY:-1}" # 1=track per-rig mayor activity state
+SGT_MAYOR_RIG_AUTO_HIBERNATE_SECS="${SGT_MAYOR_RIG_AUTO_HIBERNATE_SECS:-0}" # 0=disabled
 SGT_NOTIFY="$SGT_CONFIG/notify.json"
 SGT_RIG_CONFIG="$SGT_CONFIG/rig-config"
 SGT_PLAN_REQUESTS="$SGT_CONFIG/plan-requests"
@@ -872,6 +875,318 @@ _dedupe_wake_reasons() {
 _wake_requires_dispatch_decision() {
   local reason="${1:-}"
   [[ "$reason" == merged:* || "$reason" == dog-approved:* ]]
+}
+
+_mayor_rig_activity_enabled() {
+  [[ "${SGT_MAYOR_RIG_ACTIVITY:-1}" == "1" ]]
+}
+
+_mayor_rig_auto_hibernate_secs() {
+  local raw="${SGT_MAYOR_RIG_AUTO_HIBERNATE_SECS:-0}"
+  [[ "$raw" =~ ^[0-9]+$ ]] || raw=0
+  printf '%s\n' "$raw"
+}
+
+_mayor_rig_activity_file() {
+  local rig="${1:-}"
+  printf '%s/%s.state\n' "$SGT_MAYOR_RIG_ACTIVITY_DIR" "$rig"
+}
+
+_mayor_rig_activity_state_read() {
+  local rig="${1:-}" state_file state last_reason changed_at changed_epoch hibernation_mode last_meaningful_at last_meaningful_epoch last_meaningful_reason last_wake_at last_wake_reason
+  state_file="$(_mayor_rig_activity_file "$rig")"
+  state=""
+  last_reason=""
+  changed_at=""
+  changed_epoch=""
+  hibernation_mode=""
+  last_meaningful_at=""
+  last_meaningful_epoch=""
+  last_meaningful_reason=""
+  last_wake_at=""
+  last_wake_reason=""
+  if [[ -f "$state_file" ]]; then
+    while IFS='=' read -r k v; do
+      case "$k" in
+        STATE) state="$v" ;;
+        LAST_REASON) last_reason="$v" ;;
+        CHANGED_AT) changed_at="$v" ;;
+        CHANGED_EPOCH) changed_epoch="$v" ;;
+        HIBERNATION_MODE) hibernation_mode="$v" ;;
+        LAST_MEANINGFUL_AT) last_meaningful_at="$v" ;;
+        LAST_MEANINGFUL_EPOCH) last_meaningful_epoch="$v" ;;
+        LAST_MEANINGFUL_REASON) last_meaningful_reason="$v" ;;
+        LAST_WAKE_AT) last_wake_at="$v" ;;
+        LAST_WAKE_REASON) last_wake_reason="$v" ;;
+      esac
+    done < "$state_file"
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "${state:-unknown}" \
+    "${last_reason:-}" \
+    "${changed_at:-}" \
+    "${changed_epoch:-}" \
+    "${hibernation_mode:-none}" \
+    "${last_meaningful_at:-}" \
+    "${last_meaningful_epoch:-}" \
+    "${last_meaningful_reason:-}" \
+    "${last_wake_at:-}" \
+    "${last_wake_reason:-}"
+}
+
+_mayor_rig_activity_state_write() {
+  local rig="${1:-}" state="${2:-idle}" last_reason="${3:-}" hibernation_mode="${4:-none}" last_meaningful_at="${5:-}" last_meaningful_epoch="${6:-}" last_meaningful_reason="${7:-}" last_wake_at="${8:-}" last_wake_reason="${9:-}"
+  local state_file state_tmp now_epoch now_iso previous changed_at changed_epoch previous_state previous_hibernation
+  mkdir -p "$SGT_MAYOR_RIG_ACTIVITY_DIR"
+  state_file="$(_mayor_rig_activity_file "$rig")"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  previous="$(_mayor_rig_activity_state_read "$rig")"
+  IFS='|' read -r previous_state _ changed_at changed_epoch previous_hibernation _ _ _ _previous_wake_at _previous_wake_reason <<< "$previous"
+  if [[ "$previous_state" != "$state" || "$previous_hibernation" != "$hibernation_mode" ]]; then
+    changed_at="$now_iso"
+    changed_epoch="$now_epoch"
+  fi
+  [[ -n "$changed_at" ]] || changed_at="$now_iso"
+  [[ "$changed_epoch" =~ ^[0-9]+$ ]] || changed_epoch="$now_epoch"
+  state_tmp="${state_file}.tmp.$$"
+  cat > "$state_tmp" <<EOF
+STATE=$state
+LAST_REASON=$(_escape_wake_value "$last_reason")
+CHANGED_AT=$changed_at
+CHANGED_EPOCH=$changed_epoch
+HIBERNATION_MODE=$hibernation_mode
+LAST_MEANINGFUL_AT=$last_meaningful_at
+LAST_MEANINGFUL_EPOCH=$last_meaningful_epoch
+LAST_MEANINGFUL_REASON=$(_escape_wake_value "$last_meaningful_reason")
+LAST_WAKE_AT=$last_wake_at
+LAST_WAKE_REASON=$(_escape_wake_value "$last_wake_reason")
+EOF
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_wake_reason_rig() {
+  local reason="${1:-}" rig=""
+  if [[ -n "$reason" ]]; then
+    rig="$(_wake_field "$reason" "rig")"
+  fi
+  if [[ -n "$rig" ]]; then
+    printf '%s\n' "$rig"
+    return 0
+  fi
+  if [[ "$reason" =~ ^merged:pr#[0-9]+:#[0-9]+:([^|]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^dog-approved:[^:]+:#[0-9]+:([^|]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^orphan-pr:#[0-9]+:(.+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^acceptance-blocker:([^:]+): ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^stalled-unreplaced:([^:]+): ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf '%s\n' ""
+  fi
+}
+
+_mayor_wake_reason_is_meaningful() {
+  local reason="${1:-}"
+  case "$reason" in
+    ""|periodic)
+      return 1
+      ;;
+    * )
+      return 0
+      ;;
+  esac
+}
+
+_mayor_wake_reason_targets_rig() {
+  local reason="${1:-}" rig="${2:-}"
+  [[ -n "$rig" ]] || return 1
+  [[ "$(_mayor_wake_reason_rig "$reason")" == "$rig" ]]
+}
+
+_mayor_rig_activity_snapshot() {
+  local rig="${1:-}" repo open_prs open_authorized active_polecats merge_queue pending_plan_requests plan_rollup plan_status actionable state reason
+  repo="$(rig_repo "$rig" 2>/dev/null || true)"
+  open_prs=0
+  open_authorized=0
+  if [[ -n "$repo" ]]; then
+    open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || true)"
+    open_authorized="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number --jq 'length' 2>/dev/null || true)"
+  fi
+  [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=0
+  [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=0
+  active_polecats="$(_active_polecat_count "$rig" 2>/dev/null || true)"
+  [[ "$active_polecats" =~ ^[0-9]+$ ]] || active_polecats=0
+  merge_queue="$(_merge_queue_count_for_rig "$rig" 2>/dev/null || true)"
+  [[ "$merge_queue" =~ ^[0-9]+$ ]] || merge_queue=0
+  pending_plan_requests=0
+  while IFS='|' read -r request_id request_rig _request_status _requested_at _requester _prompt_file; do
+    [[ -n "$request_id" ]] || continue
+    [[ "$request_rig" == "$rig" ]] || continue
+    pending_plan_requests=$((pending_plan_requests + 1))
+  done < <(_plan_request_list_pending)
+  plan_rollup="not_declared"
+  plan_status="not_declared"
+  if [[ -f "$(_plan_state_path "$rig")" ]]; then
+    local plan_snapshot
+    plan_snapshot="$(python3 - "$(_plan_state_path "$rig")" <<'PY'
+import json
+import sys
+
+state = {}
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    state = {}
+
+completion = state.get("completion") or {}
+print(f"{completion.get('rollup', 'not_declared')}|{completion.get('status', 'not_declared')}")
+PY
+)"
+    if [[ "$plan_snapshot" == *"|"* ]]; then
+      IFS='|' read -r plan_rollup plan_status <<< "$plan_snapshot"
+    fi
+  fi
+  actionable=0
+  if (( open_prs > 0 || open_authorized > 0 || active_polecats > 0 || merge_queue > 0 || pending_plan_requests > 0 )); then
+    actionable=1
+  fi
+  state="idle"
+  reason="no actionable work"
+  if (( actionable > 0 )); then
+    state="active"
+    reason="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} pending_plan_requests=${pending_plan_requests}"
+  elif [[ "$plan_rollup" == "blocked-pending-external" ]]; then
+    reason="blocked pending external condition"
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$state" \
+    "$reason" \
+    "$open_authorized" \
+    "$open_prs" \
+    "$active_polecats" \
+    "$merge_queue" \
+    "$pending_plan_requests" \
+    "${plan_rollup}|${plan_status}"
+}
+
+_mayor_rig_activity_refresh() {
+  local rig="${1:-}" wake_reason="${2:-periodic}" force_event="${3:-0}"
+  local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
+  local prior prior_state prior_reason prior_changed_at prior_changed_epoch prior_mode prior_meaningful_at prior_meaningful_epoch prior_meaningful_reason prior_wake_at prior_wake_reason
+  local state hibernation_mode last_reason last_meaningful_at last_meaningful_epoch last_meaningful_reason last_wake_at last_wake_reason now_iso now_epoch auto_hibernate_secs idle_age
+  _mayor_rig_activity_enabled || return 0
+  snapshot="$(_mayor_rig_activity_snapshot "$rig")"
+  IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
+  prior="$(_mayor_rig_activity_state_read "$rig")"
+  IFS='|' read -r prior_state prior_reason prior_changed_at prior_changed_epoch prior_mode prior_meaningful_at prior_meaningful_epoch prior_meaningful_reason prior_wake_at prior_wake_reason <<< "$prior"
+  state="$snapshot_state"
+  hibernation_mode="${prior_mode:-none}"
+  last_reason="$snapshot_reason"
+  last_meaningful_at="${prior_meaningful_at:-}"
+  last_meaningful_epoch="${prior_meaningful_epoch:-}"
+  last_meaningful_reason="${prior_meaningful_reason:-}"
+  last_wake_at="${prior_wake_at:-}"
+  last_wake_reason="${prior_wake_reason:-}"
+  now_iso="$(date -Iseconds)"
+  now_epoch="$(date +%s)"
+  if [[ "$force_event" == "1" ]] && _mayor_wake_reason_is_meaningful "$wake_reason"; then
+    last_wake_at="$now_iso"
+    last_wake_reason="$wake_reason"
+  fi
+  if [[ "$snapshot_state" == "active" ]]; then
+    last_meaningful_at="$now_iso"
+    last_meaningful_epoch="$now_epoch"
+    last_meaningful_reason="$snapshot_reason"
+    hibernation_mode="none"
+  fi
+  if [[ "$prior_mode" == "manual" && "$snapshot_state" != "active" ]]; then
+    state="hibernated"
+    last_reason="${prior_reason:-manual hibernation}"
+    hibernation_mode="manual"
+  fi
+  auto_hibernate_secs="$(_mayor_rig_auto_hibernate_secs)"
+  if [[ "$snapshot_state" != "active" && "$prior_mode" != "manual" && "$auto_hibernate_secs" -gt 0 ]]; then
+    if [[ "$last_meaningful_epoch" =~ ^[0-9]+$ ]]; then
+      idle_age=$((now_epoch - last_meaningful_epoch))
+    else
+      idle_age="$auto_hibernate_secs"
+    fi
+    if (( idle_age >= auto_hibernate_secs )); then
+      state="hibernated"
+      hibernation_mode="auto"
+      last_reason="auto-hibernated: ${snapshot_reason} idle_seconds=${idle_age}"
+    fi
+  elif [[ "$snapshot_state" != "active" && "$prior_mode" == "auto" ]]; then
+    state="hibernated"
+    hibernation_mode="auto"
+    last_reason="${prior_reason:-auto-hibernated}"
+  fi
+  _mayor_rig_activity_state_write "$rig" "$state" "$last_reason" "$hibernation_mode" "$last_meaningful_at" "$last_meaningful_epoch" "$last_meaningful_reason" "$last_wake_at" "$last_wake_reason"
+}
+
+_mayor_rig_hibernated() {
+  local rig="${1:-}" state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_rest
+  _mayor_rig_activity_enabled || return 1
+  IFS='|' read -r state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+  [[ "$state" == "hibernated" && "$mode" != "none" ]]
+}
+
+_mayor_rig_activity_ensure_state() {
+  local rig="${1:-}" state _reason _changed_at _changed_epoch _mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason
+  _mayor_rig_activity_enabled || return 0
+  IFS='|' read -r state _reason _changed_at _changed_epoch _mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+  if [[ "$state" == "unknown" ]]; then
+    _mayor_rig_activity_refresh "$rig" "periodic" "0" || true
+  fi
+}
+
+_mayor_rig_set_manual_hibernation() {
+  local rig="${1:-}" mode="${2:-hibernate}" reason="${3:-}"
+  local prior state last_reason changed_at changed_epoch prior_mode last_meaningful_at last_meaningful_epoch last_meaningful_reason last_wake_at last_wake_reason
+  prior="$(_mayor_rig_activity_state_read "$rig")"
+  IFS='|' read -r state last_reason changed_at changed_epoch prior_mode last_meaningful_at last_meaningful_epoch last_meaningful_reason last_wake_at last_wake_reason <<< "$prior"
+  case "$mode" in
+    hibernate)
+      _mayor_rig_activity_state_write \
+        "$rig" \
+        "hibernated" \
+        "${reason:-manual hibernation}" \
+        "manual" \
+        "$last_meaningful_at" \
+        "$last_meaningful_epoch" \
+        "$last_meaningful_reason" \
+        "$last_wake_at" \
+        "$last_wake_reason"
+      ;;
+    unhibernate)
+      _mayor_rig_activity_state_write \
+        "$rig" \
+        "idle" \
+        "${reason:-manual unhibernate}" \
+        "none" \
+        "$last_meaningful_at" \
+        "$last_meaningful_epoch" \
+        "$last_meaningful_reason" \
+        "$last_wake_at" \
+        "$last_wake_reason"
+      ;;
+  esac
+}
+
+_mayor_rig_maybe_unhibernate_for_event() {
+  local rig="${1:-}" event_reason="${2:-}"
+  [[ -n "$rig" ]] || return 1
+  if _mayor_rig_hibernated "$rig" && _mayor_wake_reason_is_meaningful "$event_reason"; then
+    _mayor_rig_set_manual_hibernation "$rig" "unhibernate" "auto-wake: $event_reason"
+    log_event "MAYOR_RIG_UNHIBERNATE rig=$rig mode=event reason=\"$(_escape_quotes "$event_reason")\""
+    return 0
+  fi
+  return 1
 }
 
 _mayor_action_fence_enabled() {
@@ -6392,7 +6707,7 @@ _json_print_array() {
 
 cmd_status_json() {
   ensure_init
-  local -a agents=() dogs=() crew=() merge_queue=() polecats=()
+  local -a agents=() dogs=() crew=() merge_queue=() polecats=() mayor_rigs=()
   local daemon_alive="off" daemon_pid="" daemon_pid_json
   if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
     daemon_alive="on"
@@ -6426,6 +6741,12 @@ cmd_status_json() {
     tmux has-session -t "sgt-refinery-${rig_name}" 2>/dev/null && r_alive="on"
     agents+=("{\"name\":$(_json_quote "witness/$rig_name"),\"rig\":$(_json_quote "$rig_name"),\"status\":$(_json_quote "$w_alive")}")
     agents+=("{\"name\":$(_json_quote "refinery/$rig_name"),\"rig\":$(_json_quote "$rig_name"),\"status\":$(_json_quote "$r_alive")}")
+    if _mayor_rig_activity_enabled; then
+      _mayor_rig_activity_ensure_state "$rig_name"
+      local mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason
+      IFS='|' read -r mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason <<< "$(_mayor_rig_activity_state_read "$rig_name")"
+      mayor_rigs+=("{\"rig\":$(_json_quote "$rig_name"),\"state\":$(_json_quote "$mr_state"),\"reason\":$(_json_quote "$mr_reason"),\"changed_at\":$(_json_quote "$mr_changed_at"),\"changed_epoch\":$(_json_quote "$mr_changed_epoch"),\"hibernation_mode\":$(_json_quote "$mr_mode"),\"last_meaningful_at\":$(_json_quote "$mr_meaningful_at"),\"last_meaningful_epoch\":$(_json_quote "$mr_meaningful_epoch"),\"last_meaningful_reason\":$(_json_quote "$mr_meaningful_reason"),\"last_wake_at\":$(_json_quote "$mr_wake_at"),\"last_wake_reason\":$(_json_quote "$mr_wake_reason")}")
+    fi
   done
 
   local mayor_alive="off"
@@ -6599,6 +6920,9 @@ cmd_status_json() {
   printf '  "merge_queue": '
   _json_print_array "${merge_queue[@]}"
   printf ',\n'
+  printf '  "mayor_rigs": '
+  _json_print_array "${mayor_rigs[@]}"
+  printf ',\n'
   printf '  "polecats": '
   _json_print_array "${polecats[@]}"
   printf ',\n'
@@ -6753,6 +7077,32 @@ _cmd_status_human() {
     printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "review watchdog: ${review_watch_count} stalled REVIEW_UNCLEAR (oldest=${review_watch_oldest}s threshold>=${review_watch_threshold}s)" "$(_reset)"
   else
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
+  fi
+  if _mayor_rig_activity_enabled; then
+    _section "Mayor Rigs"
+    local mayor_rig_count=0
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      mayor_rig_count=$((mayor_rig_count + 1))
+      local rig_name mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason
+      rig_name="$(basename "$rig_file")"
+      _mayor_rig_activity_ensure_state "$rig_name"
+      IFS='|' read -r mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason <<< "$(_mayor_rig_activity_state_read "$rig_name")"
+      printf "  %-16s %s  %s%s%s\n" "$rig_name" "$(_status_badge "$mr_state")" "$(_dim)" "mode=${mr_mode:-none}" "$(_reset)"
+      if [[ -n "$mr_reason" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "reason: $mr_reason" "$(_reset)"
+      fi
+      if [[ -n "$mr_changed_at" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "since: $mr_changed_at" "$(_reset)"
+      fi
+      if [[ -n "$mr_meaningful_at" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "last meaningful: $mr_meaningful_at (${mr_meaningful_reason:-unknown})" "$(_reset)"
+      fi
+      if [[ -n "$mr_wake_at" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "last wake: $mr_wake_at (${mr_wake_reason:-unknown})" "$(_reset)"
+      fi
+    done
+    [[ "$mayor_rig_count" -eq 0 ]] && printf "  %s%s%s\n" "$(_dim)" "none" "$(_reset)"
   fi
 
   _section "Dogs"
@@ -9917,6 +10267,7 @@ _mayor_loop() {
     local wake_reason=""
     local wake_events=()
     local cycle_events=()
+    local -A cycle_target_rigs=()
     read -t "$SGT_MAYOR_INTERVAL" -u 3 wake_reason 2>/dev/null || true
     if [[ -n "$wake_reason" ]]; then
       echo "[mayor] woken by event: $wake_reason"
@@ -9950,8 +10301,15 @@ _mayor_loop() {
     local review_watchdog_notes=""
 
     if [[ "$wake_reason" != "periodic" ]]; then
-      local event_reason wake_summary event_key now_ts last_seen age skip_reason claim_rc duplicate_key
+      local event_reason wake_summary event_key now_ts last_seen age skip_reason claim_rc duplicate_key target_rig
       for event_reason in "${cycle_events[@]+"${cycle_events[@]}"}"; do
+        target_rig="$(_mayor_wake_reason_rig "$event_reason")"
+        if [[ -n "$target_rig" ]]; then
+          cycle_target_rigs["$target_rig"]=1
+          if _mayor_rig_maybe_unhibernate_for_event "$target_rig" "$event_reason"; then
+            actions_taken+="  - auto-woke hibernated rig $target_rig (event=$event_reason)\n"
+          fi
+        fi
         event_key="$(_wake_trigger_key "$event_reason")"
         now_ts="$(date +%s)"
         if [[ -n "$event_key" ]]; then
@@ -10079,6 +10437,9 @@ _mayor_loop() {
       [[ -f "$rig_file" ]] || continue
       local rname
       rname="$(basename "$rig_file")"
+      if _mayor_rig_hibernated "$rname" && [[ -z "${cycle_target_rigs[$rname]+x}" ]]; then
+        continue
+      fi
       for agent in witness refinery; do
         local agent_session
         agent_session="sgt-${agent}-${rname}"
@@ -10209,6 +10570,9 @@ _mayor_loop() {
       [[ -f "$rig_file" ]] || continue
       local rname repo critical_issues
       rname="$(basename "$rig_file")"
+      if _mayor_rig_hibernated "$rname" && [[ -z "${cycle_target_rigs[$rname]+x}" ]]; then
+        continue
+      fi
       repo="$(cat "$rig_file")"
       critical_issues=$(
         {
@@ -10242,6 +10606,9 @@ _mayor_loop() {
       [[ -f "$rig_file" ]] || continue
       local rname plan_path plan_tick_summary plan_total plan_completed plan_inflight plan_dispatched plan_completion_rollup plan_completion_status plan_completion_condition plan_completion_details plan_completion_blocked_reason plan_dispatch_failures plan_pending_ready plan_pending_blocked plan_last_failure_reason
       rname="$(basename "$rig_file")"
+      if _mayor_rig_hibernated "$rname" && [[ -z "${cycle_target_rigs[$rname]+x}" ]]; then
+        continue
+      fi
       plan_path="$(_plan_file_path "$rname")"
       [[ -f "$plan_path" ]] || continue
       if plan_tick_summary="$(_plan_tick_run "$rname" "mayor" 2>/dev/null | grep '^PLAN_TICK|' | tail -n 1)"; then
@@ -10318,6 +10685,9 @@ _mayor_loop() {
       [[ -f "$rig_file" ]] || continue
       local rname repo
       rname="$(basename "$rig_file")"
+      if _mayor_rig_hibernated "$rname" && [[ -z "${cycle_target_rigs[$rname]+x}" ]]; then
+        continue
+      fi
       repo="$(cat "$rig_file")"
       local orphan_prs
       orphan_prs=$(gh pr list --repo "$repo" --state open \
@@ -10384,6 +10754,20 @@ _mayor_loop() {
     done
 
     _mayor_dispatch_verify_replay || true
+
+    # Refresh operator-visible per-rig mayor activity state after this cycle.
+    if _mayor_rig_activity_enabled; then
+      for rig_file in "$SGT_RIGS"/*; do
+        [[ -f "$rig_file" ]] || continue
+        local activity_rig
+        activity_rig="$(basename "$rig_file")"
+        if [[ -n "${cycle_target_rigs[$activity_rig]+x}" ]]; then
+          _mayor_rig_activity_refresh "$activity_rig" "$wake_reason" "1" || true
+        else
+          _mayor_rig_activity_refresh "$activity_rig" "$wake_reason" "0" || true
+        fi
+      done
+    fi
 
     # === Decision & Log ===
     if [[ -z "$issues_found" && -z "$actions_taken" ]]; then
@@ -10597,6 +10981,49 @@ cmd_mayor_request_complete() {
   info "plan request completed: $request_id"
 }
 
+cmd_mayor_hibernate() {
+  local rig="${1:-}" reason="${2:-}"
+  [[ -n "$rig" ]] || die "usage: sgt mayor hibernate <rig> [reason]"
+  ensure_init
+  ensure_rig "$rig"
+  _mayor_rig_set_manual_hibernation "$rig" "hibernate" "${reason:-manual hibernation}"
+  log_event "MAYOR_RIG_HIBERNATE rig=$rig mode=manual reason=\"$(_escape_quotes "${reason:-manual hibernation}")\""
+  info "mayor hibernated rig $rig"
+}
+
+cmd_mayor_unhibernate() {
+  local rig="${1:-}" reason="${2:-}"
+  [[ -n "$rig" ]] || die "usage: sgt mayor unhibernate <rig> [reason]"
+  ensure_init
+  ensure_rig "$rig"
+  _mayor_rig_set_manual_hibernation "$rig" "unhibernate" "${reason:-manual unhibernate}"
+  log_event "MAYOR_RIG_UNHIBERNATE rig=$rig mode=manual reason=\"$(_escape_quotes "${reason:-manual unhibernate}")\""
+  info "mayor unhibernated rig $rig"
+}
+
+cmd_mayor_rig_status() {
+  local rig="${1:-}"
+  ensure_init
+  if [[ -n "$rig" ]]; then
+    ensure_rig "$rig"
+    _mayor_rig_activity_ensure_state "$rig"
+    local state reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
+    IFS='|' read -r state reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+    printf '%s state=%s mode=%s since=%s reason=%s\n' "$rig" "${state:-unknown}" "${mode:-none}" "${changed_at:-unknown}" "${reason:-none}"
+    [[ -n "$meaningful_at" ]] && printf '  last_meaningful=%s reason=%s\n' "$meaningful_at" "${meaningful_reason:-unknown}"
+    [[ -n "$wake_at" ]] && printf '  last_wake=%s reason=%s\n' "$wake_at" "${wake_reason:-unknown}"
+    return 0
+  fi
+
+  local rig_file count=0
+  for rig_file in "$SGT_RIGS"/*; do
+    [[ -f "$rig_file" ]] || continue
+    count=$((count + 1))
+    cmd_mayor_rig_status "$(basename "$rig_file")"
+  done
+  [[ "$count" -gt 0 ]] || info "no rigs configured"
+}
+
 cmd_mayor_merge() {
   local pr="${1:-}" repo="" use_auto="false"
   shift || true
@@ -10684,6 +11111,11 @@ Commands:
   start                   Start mayor (AI coordinator)
   stop                    Stop mayor
   notify "<message>"      Send mayor notification to configured channels
+  hibernate <rig> [reason]
+                          Mark a rig hibernated until manual or event wake
+  unhibernate <rig> [reason]
+                          Clear rig hibernation state
+  rig-status [rig]        Show per-rig mayor activity / hibernation state
   request list            List pending plan requests
   request ask <id> "<question>"
                           Ask the requesting OpenClaw agent for clarification
@@ -11788,7 +12220,8 @@ Agent Commands:
   deacon start|stop             Control the health monitor
   witness start|stop <rig>      Control per-rig polecat monitor
   refinery start|stop <rig>     Control per-rig merge queue
-  mayor [help|start|stop|notify|request|merge]  Control the AI coordinator
+  mayor [help|start|stop|notify|hibernate|unhibernate|rig-status|request|merge]
+                                Control the AI coordinator
   wake-mayor [reason]           Wake the mayor on demand (event-driven)
   nudge <target> <message>      Send message to agent's tmux session
 
@@ -11986,11 +12419,14 @@ main() {
     mayor)
       local sub="${1:-}"
       shift 2>/dev/null || true
-      case "$sub" in
+    case "$sub" in
         ""|help|--help|-h) cmd_mayor_help ;;
         start)   cmd_mayor_start ;;
         stop)    cmd_mayor_stop ;;
         notify)  cmd_mayor_notify "$@" ;;
+        hibernate) cmd_mayor_hibernate "$@" ;;
+        unhibernate) cmd_mayor_unhibernate "$@" ;;
+        rig-status|status) cmd_mayor_rig_status "$@" ;;
         request)
           local request_sub="${1:-}"
           shift 2>/dev/null || true
@@ -12002,7 +12438,7 @@ main() {
           esac
           ;;
         merge)   cmd_mayor_merge "$@" ;;
-        *)       die "unknown mayor command: $sub (try: help, start, stop, notify, request, merge)" ;;
+        *)       die "unknown mayor command: $sub (try: help, start, stop, notify, hibernate, unhibernate, rig-status, request, merge)" ;;
       esac
       ;;
     plan)
