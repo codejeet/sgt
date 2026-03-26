@@ -1077,6 +1077,8 @@ _mayor_wake_reason_rig() {
     printf '%s\n' "${BASH_REMATCH[1]}"
   elif [[ "$reason" =~ ^stalled-unreplaced:([^:]+): ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^backend-limit:([^:]+): ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
   else
     printf '%s\n' ""
   fi
@@ -6412,6 +6414,24 @@ _ai_cmd() {
   esac
 }
 
+_ai_session_cmd() {
+  # Print a command that runs the selected backend in an interactive tty session and,
+  # when possible, mirrors terminal output into a durable log for later witness forensics.
+  # Usage: _ai_session_cmd <backend> <prompt> [output_log]
+  local backend="$1" prompt="$2" output_log="${3:-}"
+  local backend_cmd
+  backend_cmd="$(_ai_cmd "$backend" "$prompt")"
+  if [[ -n "$output_log" ]]; then
+    if command -v script >/dev/null 2>&1; then
+      printf 'rm -f %q; script -qefc %q %q' "$output_log" "$backend_cmd" "$output_log"
+      return 0
+    fi
+    printf 'rm -f %q; %s' "$output_log" "$backend_cmd"
+    return 0
+  fi
+  printf '%s' "$backend_cmd"
+}
+
 _ai_promptfile() {
   # Run a backend using a prompt read from a file; echoes agent output to stdout.
   # Usage: _ai_promptfile <backend> <workdir> <prompt_file>
@@ -6488,12 +6508,36 @@ _has_sgt_authorized() {
   echo "$labels" | grep -qx "sgt-authorized"
 }
 
+_issue_has_label() {
+  local repo="${1:-}" issue="${2:-}" label="${3:-}"
+  [[ -n "$repo" && -n "$issue" && -n "$label" ]] || return 1
+  local labels
+  labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)
+  echo "$labels" | grep -qx "$label"
+}
+
+_issue_backend_dispatch_limited_reason() {
+  local repo="${1:-}" issue="${2:-}"
+  [[ -n "$repo" && -n "$issue" ]] || return 1
+  if _issue_has_label "$repo" "$issue" "codex-usage-limit"; then
+    printf '%s\n' "codex_usage_limit"
+    return 0
+  fi
+  if _issue_has_label "$repo" "$issue" "backend-limited"; then
+    printf '%s\n' "backend_usage_limit"
+    return 0
+  fi
+  return 1
+}
+
 # Best-effort label metadata for auto-created labels.
 _label_description_for_name() {
   local label="${1:-}" norm
   norm="$(_normalize_label "$label")"
   case "$norm" in
     sgt-authorized) echo "Authorized for sgt processing — do not apply manually" ;;
+    backend-limited) echo "Blocked on AI backend quota or availability; do not auto-resling" ;;
+    codex-usage-limit) echo "Codex worker hit usage limit before opening a PR" ;;
     plan) echo "Tracks repo-plan managed work" ;;
     plan-*) echo "Tracks a repo-plan task" ;;
     critical) echo "Critical priority work" ;;
@@ -6507,6 +6551,8 @@ _label_color_for_name() {
   norm="$(_normalize_label "$label")"
   case "$norm" in
     sgt-authorized) echo "0E8A16" ;;
+    backend-limited) echo "BFD4F2" ;;
+    codex-usage-limit) echo "D4C5F9" ;;
     plan|plan-*) echo "1D76DB" ;;
     critical) echo "B60205" ;;
     high) echo "D93F0B" ;;
@@ -6812,6 +6858,7 @@ ISSUE=$issue_number
 ISSUE_URL=$issue_url
 BRANCH=$branch
 WORKTREE=$worktree
+OUTPUT_LOG=$worktree/.sgt-agent-output.log
 SESSION=$session_name
 DEFAULT_BRANCH=$default_branch
 AUTO_MERGE=$auto_merge
@@ -6848,7 +6895,7 @@ PSTATE
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
 
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc"
 
   # Auto-accept Claude Code workspace trust dialog if it appears
   if [[ "$backend" == "claude" ]]; then
@@ -7873,7 +7920,7 @@ _sweep_watchdog_find_open_pr_for_issue() {
 
 _sweep_watchdog_resling_open_authorized_issues() {
   local rig="${1:-}" repo="${2:-}"
-  local issue_rows issue_number issue_title existing_polecat open_pr
+  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason
   local source_event source_event_key
   source_event="sweep-watchdog"
   [[ -n "$rig" && -n "$repo" ]] || return 0
@@ -7888,6 +7935,10 @@ _sweep_watchdog_resling_open_authorized_issues() {
     source_event_key="${source_event}:${rig}:issue#${issue_number}"
     if existing_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$existing_polecat" ]]; then
       log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=active-polecat-existing polecat=$existing_polecat source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
+    if backend_limited_reason="$(_issue_backend_dispatch_limited_reason "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$backend_limited_reason" ]]; then
+      log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$backend_limited_reason source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
       continue
     fi
     open_pr="$(_sweep_watchdog_find_open_pr_for_issue "$repo" "$issue_number" || true)"
@@ -8123,6 +8174,31 @@ _witness_pr_meta() {
     --jq 'if length == 0 then "" else "\(.[0].number // "")\t\(.[0].state // "")" end' 2>/dev/null || true
 }
 
+_polecat_output_log_path() {
+  local output_log="${1:-}" worktree="${2:-}"
+  if [[ -n "$output_log" ]]; then
+    printf '%s\n' "$output_log"
+  elif [[ -n "$worktree" ]]; then
+    printf '%s/.sgt-agent-output.log\n' "$worktree"
+  else
+    printf '%s\n' ""
+  fi
+}
+
+_witness_dead_polecat_backend_limit() {
+  local backend="${1:-}" output_log="${2:-}" worktree="${3:-}"
+  local log_path match_text
+  [[ "$backend" == "codex" ]] || return 1
+  log_path="$(_polecat_output_log_path "$output_log" "$worktree")"
+  [[ -n "$log_path" && -f "$log_path" ]] || return 1
+  match_text="You've hit your usage limit"
+  if head -c 16384 "$log_path" 2>/dev/null | grep -a -F -q "$match_text"; then
+    printf '%s|%s|%s\n' "codex_usage_limit" "$backend" "$match_text"
+    return 0
+  fi
+  return 1
+}
+
 _witness_loop() {
   local rig="$1"
   local repo
@@ -8145,8 +8221,8 @@ _witness_loop() {
       pname="$(basename "$f")"
 
       # Source in subshell to avoid polluting
-      local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge
-      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND)=' "$f")"
+      local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge p_output_log
+      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND|OUTPUT_LOG)=' "$f")"
       p_session="$SESSION"
       p_branch="$BRANCH"
       p_issue="$ISSUE"
@@ -8154,6 +8230,7 @@ _witness_loop() {
       p_created="$CREATED"
       p_repo="$REPO"
       p_auto_merge="${AUTO_MERGE:-false}"
+      p_output_log="${OUTPUT_LOG:-}"
 
       local alive=false
       tmux has-session -t "$p_session" 2>/dev/null && alive=true
@@ -8233,6 +8310,27 @@ _witness_loop() {
           rm -f "$f"
 
         else
+          local backend_limit_meta backend_limit_reason backend_limit_name backend_limit_match
+          if backend_limit_meta="$(_witness_dead_polecat_backend_limit "${BACKEND:-}" "$p_output_log" "$p_worktree")"; then
+            IFS='|' read -r backend_limit_reason backend_limit_name backend_limit_match <<< "$backend_limit_meta"
+            echo "[witness/$rig] $pname hit backend limit ($backend_limit_reason) — blocking issue #$p_issue"
+            log_event "WITNESS_BACKEND_LIMIT $pname issue=#$p_issue backend=$backend_limit_name reason_code=$backend_limit_reason match=\"$(_escape_quotes "$backend_limit_match")\""
+            _wake_refinery "$rig" "backend-limit:$pname:#$p_issue:$backend_limit_reason"
+
+            if [[ -d "$p_worktree" ]]; then
+              local rpath
+              rpath="$(rig_path "$rig")"
+              git -C "$rpath" worktree remove --force "$p_worktree" 2>/dev/null || rm -rf "$p_worktree"
+            fi
+            git -C "$(rig_path "$rig")" push origin --delete "$p_branch" 2>/dev/null || true
+            rm -f "$f"
+
+            local issue_title
+            issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+            _witness_record_backend_limit_followup "$rig" "$p_repo" "$p_issue" "$issue_title" "$pname" "${backend_limit_name:-${BACKEND:-unknown}}" "$backend_limit_reason" "$backend_limit_match"
+            continue
+          fi
+
           # Dead with no PR — stalled/zombie
           echo "[witness/$rig] $pname is STALLED (dead, no PR)"
           log_event "WITNESS_STALLED $pname issue=#$p_issue"
@@ -8390,6 +8488,13 @@ _resling_existing_issue() {
     return 1
   fi
 
+  local backend_limited_reason=""
+  if backend_limited_reason="$(_issue_backend_dispatch_limited_reason "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$backend_limited_reason" ]]; then
+    echo "[resling] issue #$issue_number is backend-limited — skipping"
+    log_event "RESLING_SKIP_BACKEND_LIMIT issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} reason_code=$backend_limited_reason"
+    return 1
+  fi
+
   local existing_issue_polecat=""
   if existing_issue_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number"); then
     echo "[resling] issue #$issue_number already has active polecat $existing_issue_polecat — skipping duplicate re-sling"
@@ -8438,6 +8543,7 @@ ISSUE=$issue_number
 ISSUE_URL=https://github.com/${repo#https://github.com/}/issues/$issue_number
 BRANCH=$branch
 WORKTREE=$worktree
+OUTPUT_LOG=$worktree/.sgt-agent-output.log
 SESSION=$session_name
 DEFAULT_BRANCH=$default_branch
 AUTO_MERGE=false
@@ -8449,7 +8555,7 @@ PSTATE
   local polecat_prompt
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
   tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_cmd "$backend" "$polecat_prompt" ); echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null"
+    "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc"
 
   # Auto-accept Claude Code workspace trust dialog if it appears
   if [[ "$backend" == "claude" ]]; then
@@ -10611,6 +10717,50 @@ _witness_record_stalled_followup() {
     comment_body="[sgt-witness] Polecat \`$polecat_name\` stalled and automatic re-dispatch failed. Mayor has been notified for manual replacement work. Do not close this incident without replacement work item/PR."
     _wake_mayor "stalled-unreplaced:${rig}:#${issue_number}"
     log_event "WITNESS_STALLED_FOLLOWUP_REQUIRED polecat=$polecat_name rig=$rig issue=#$issue_number blocker_id=unavailable reason_code=$reason_code repo=$(_escape_quotes "${owner_repo:-$repo}")"
+  fi
+
+  gh issue comment "$issue_number" --repo "$repo" --body "$comment_body" 2>/dev/null || true
+  return 0
+}
+
+_witness_record_backend_limit_followup() {
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}" issue_title="${4:-}" polecat_name="${5:-}" backend="${6:-unknown}" reason_code="${7:-backend_usage_limit}" matched_text="${8:-}"
+  local requester title evidence blocker_id owner_repo issue_url comment_body
+
+  [[ -n "$rig" && -n "$repo" && -n "$issue_number" && -n "$polecat_name" ]] || return 1
+
+  requester="witness"
+  owner_repo="$(_repo_owner_repo "$repo")"
+  issue_url="$(_repo_issue_url "$repo" "$issue_number")"
+  title="Polecat blocked by backend usage limit for issue #$issue_number"
+  printf -v evidence '%s\n\nA polecat hit a known backend/quota limit before opening a PR.\n\n- Rig: %s\n- Repo: %s\n- Issue: #%s\n- Issue URL: %s\n- Issue title: %s\n- Polecat: %s\n- Backend: %s\n- Reason code: %s\n- Matched first output: %s\n\nRequired follow-up:\n- leave this issue blocked until backend quota resets or an operator explicitly changes backend policy\n- do not auto-resling while the issue is marked backend-limited\n' \
+    "$title" \
+    "$rig" \
+    "${owner_repo:-$repo}" \
+    "$issue_number" \
+    "${issue_url:-unknown}" \
+    "${issue_title:-unknown}" \
+    "$polecat_name" \
+    "$backend" \
+    "$reason_code" \
+    "${matched_text:-unknown}"
+
+  _ensure_labels_exist "$repo" "backend-limited" "${backend}-usage-limit" >/dev/null 2>&1 || true
+  gh issue edit "$issue_number" --repo "$repo" --add-label "backend-limited" --add-label "${backend}-usage-limit" >/dev/null 2>&1 || true
+
+  blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
+  if [[ -n "$blocker_id" ]]; then
+    _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence" || true
+    if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+      _context_index_build "$rig" >/dev/null 2>&1 || true
+    fi
+    _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
+    comment_body="[sgt-witness] Polecat \`$polecat_name\` hit a known backend limit before opening a PR. Marked the issue backend-limited with reason_code=\`$reason_code\` on backend \`$backend\` after matching first output \`$matched_text\`. Recorded acceptance blocker \`$blocker_id\` and notified mayor. Do not auto-resling until quota resets or backend policy changes."
+    log_event "WITNESS_BACKEND_LIMIT_BLOCKED polecat=$polecat_name rig=$rig issue=#$issue_number blocker_id=$blocker_id backend=$backend reason_code=$reason_code repo=$(_escape_quotes "${owner_repo:-$repo}") match=\"$(_escape_quotes "${matched_text:-}")\""
+  else
+    comment_body="[sgt-witness] Polecat \`$polecat_name\` hit a known backend limit before opening a PR. Marked the issue backend-limited with reason_code=\`$reason_code\` on backend \`$backend\` after matching first output \`$matched_text\`. Mayor has been notified. Do not auto-resling until quota resets or backend policy changes."
+    _wake_mayor "backend-limit:${rig}:#${issue_number}"
+    log_event "WITNESS_BACKEND_LIMIT_BLOCKED polecat=$polecat_name rig=$rig issue=#$issue_number blocker_id=unavailable backend=$backend reason_code=$reason_code repo=$(_escape_quotes "${owner_repo:-$repo}") match=\"$(_escape_quotes "${matched_text:-}")\""
   fi
 
   gh issue comment "$issue_number" --repo "$repo" --body "$comment_body" 2>/dev/null || true

@@ -18,6 +18,8 @@ extract_fn() {
 }
 
 eval "$(extract_fn _witness_record_stalled_followup)"
+eval "$(extract_fn _polecat_output_log_path)"
+eval "$(extract_fn _witness_dead_polecat_backend_limit)"
 eval "$(extract_fn _witness_pr_meta)"
 eval "$(extract_fn _witness_loop)"
 eval "$(extract_fn _mayor_rig_activity_enabled)"

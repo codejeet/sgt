@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_witness_stalled_followup_guard.sh — Stalled worker cleanup must leave durable replacement follow-up when re-dispatch fails.
+# test_witness_codex_usage_limit_block.sh — Witness must block Codex usage-limit failures instead of re-slinging them.
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ extract_fn() {
   ' "$SGT_SCRIPT"
 }
 
-eval "$(extract_fn _witness_record_stalled_followup)"
+eval "$(extract_fn _witness_record_backend_limit_followup)"
 eval "$(extract_fn _polecat_output_log_path)"
 eval "$(extract_fn _witness_dead_polecat_backend_limit)"
 eval "$(extract_fn _witness_pr_meta)"
@@ -38,15 +38,21 @@ mkdir -p "$SGT_POLECATS" "$SGT_ACCEPTANCE_BLOCKERS" "$SGT_MAYOR_RIG_ACTIVITY_DIR
 
 TMUX_ACTIVE_FILE="$TMP_ROOT/tmux-active"
 GH_COMMENT_FILE="$TMP_ROOT/gh-comments"
+GH_EDIT_FILE="$TMP_ROOT/gh-edits"
 WAKE_FILE="$TMP_ROOT/wake-events"
 BLOCKER_FILE="$TMP_ROOT/blockers"
+RESLING_FILE="$TMP_ROOT/resling-calls"
+LABEL_FILE="$TMP_ROOT/labels"
 CONTEXT_FILE="$TMP_ROOT/context.log"
 
 printf 'https://github.com/acme/demo\n' > "$SGT_ROOT/.sgt-rig-one-repo"
 echo "0" > "$TMUX_ACTIVE_FILE"
 : > "$GH_COMMENT_FILE"
+: > "$GH_EDIT_FILE"
 : > "$WAKE_FILE"
 : > "$BLOCKER_FILE"
+: > "$RESLING_FILE"
+: > "$LABEL_FILE"
 : > "$CONTEXT_FILE"
 
 log_event() {
@@ -76,21 +82,19 @@ _repo_issue_url() {
 _escape_quotes() { printf '%s' "$1"; }
 _context_python_bin() { return 1; }
 _context_index_build() { :; }
-_ensure_context_file() {
-  echo "$CONTEXT_FILE"
-}
+_ensure_context_file() { echo "$CONTEXT_FILE"; }
 _context_append_acceptance_blocker() {
   printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$CONTEXT_FILE"
 }
 _acceptance_blocker_write() {
-  local rig="$1" evidence="$2" requester="$3" source="$4"
-  printf '%s\n' "$evidence" > "$TMP_ROOT/evidence.md"
-  printf 'blocker-123\n' > /dev/null
-  printf '%s|%s|%s|%s\n' "$rig" "$requester" "$source" "blocker-123" >> "$BLOCKER_FILE"
-  printf 'blocker-123\n'
+  printf '%s|%s|%s|%s\n' "$1" "$3" "$4" "blocker-usage-limit" >> "$BLOCKER_FILE"
+  printf 'blocker-usage-limit\n'
 }
 _wake_mayor() {
   printf '%s\n' "$1" >> "$WAKE_FILE"
+}
+_ensure_labels_exist() {
+  printf '%s\n' "$*" >> "$LABEL_FILE"
 }
 
 _write_agent_heartbeat() { :; }
@@ -98,7 +102,10 @@ _wake_refinery() { :; }
 _pr_head_sha() { echo "deadbeef"; }
 _merge_queue_enqueue_polecat() { return 1; }
 _ai_backend_default() { echo "codex"; }
-_resling_existing_issue() { return 1; }
+_resling_existing_issue() {
+  printf '%s\n' "$*" >> "$RESLING_FILE"
+  return 0
+}
 
 tmux() {
   if [[ "${1:-}" == "has-session" ]]; then
@@ -139,8 +146,12 @@ gh() {
     printf '%s\n' "$args" >> "$GH_COMMENT_FILE"
     return 0
   fi
+  if [[ "$args" == *" issue edit "* ]]; then
+    printf '%s\n' "$args" >> "$GH_EDIT_FILE"
+    return 0
+  fi
   if [[ "$args" == *" issue view "* ]]; then
-    printf 'Stalled issue title\n'
+    printf 'Blocked issue title\n'
     return 0
   fi
   echo "mock gh unsupported: $*" >&2
@@ -159,49 +170,43 @@ make_polecat() {
   local branch="$2"
   local worktree="$TMP_ROOT/worktrees/$name"
   mkdir -p "$worktree"
+  printf "You've hit your usage limit\n" > "$worktree/.sgt-agent-output.log"
   cat > "$SGT_POLECATS/$name" <<STATE
 SESSION=sgt-$name
 BRANCH=$branch
 ISSUE=177
 WORKTREE=$worktree
+OUTPUT_LOG=$worktree/.sgt-agent-output.log
 CREATED=2026-03-10T00:00:00Z
 REPO=https://github.com/acme/demo
+BACKEND=codex
 STATE
 }
 
-echo "=== witness stalled worker follow-up guard ==="
 make_polecat "rig-one-stalled" "sgt/rig-one-stalled"
 echo "0" > "$TMUX_ACTIVE_FILE"
 run_witness_once
 
 if [[ -f "$SGT_POLECATS/rig-one-stalled" ]]; then
-  echo "expected stalled polecat state file to be removed after cleanup" >&2
+  echo "expected quota-limited polecat state file to be removed after cleanup" >&2
   exit 1
 fi
-if ! grep -q 'WITNESS_STALLED rig-one-stalled issue=#177' "$SGT_LOG"; then
-  echo "expected stalled worker detection log" >&2
+if grep -q 'WITNESS_STALLED' "$SGT_LOG"; then
+  echo "expected usage-limit path to avoid generic WITNESS_STALLED classification" >&2
   cat "$SGT_LOG" >&2
   exit 1
 fi
-if ! grep -q 'WITNESS_STALLED_FOLLOWUP_REQUIRED polecat=rig-one-stalled rig=rig-one issue=#177 blocker_id=blocker-123 reason_code=witness-stalled-resling-failed' "$SGT_LOG"; then
-  echo "expected durable follow-up log when re-sling fails" >&2
-  cat "$SGT_LOG" >&2
+grep -q 'WITNESS_BACKEND_LIMIT rig-one-stalled issue=#177 backend=codex reason_code=codex_usage_limit' "$SGT_LOG"
+grep -q 'WITNESS_BACKEND_LIMIT_BLOCKED polecat=rig-one-stalled rig=rig-one issue=#177 blocker_id=blocker-usage-limit backend=codex reason_code=codex_usage_limit' "$SGT_LOG"
+if [[ -s "$RESLING_FILE" ]]; then
+  echo "expected usage-limit path not to attempt automatic re-sling" >&2
+  cat "$RESLING_FILE" >&2
   exit 1
 fi
-if ! grep -q 'acceptance-blocker:rig-one:blocker-123' "$WAKE_FILE"; then
-  echo "expected mayor wake for stalled-worker acceptance blocker" >&2
-  cat "$WAKE_FILE" >&2
-  exit 1
-fi
-if ! grep -q 'blocker-123' "$BLOCKER_FILE"; then
-  echo "expected acceptance blocker creation for stalled worker" >&2
-  cat "$BLOCKER_FILE" >&2
-  exit 1
-fi
-if ! grep -q 'Do not close this incident without replacement work item/PR' "$GH_COMMENT_FILE"; then
-  echo "expected issue comment to block silent closure without replacement work" >&2
-  cat "$GH_COMMENT_FILE" >&2
-  exit 1
-fi
+grep -q 'acceptance-blocker:rig-one:blocker-usage-limit' "$WAKE_FILE"
+grep -q 'backend-limited' "$GH_EDIT_FILE"
+grep -q 'codex-usage-limit' "$GH_EDIT_FILE"
+grep -q "You've hit your usage limit" "$GH_COMMENT_FILE"
+grep -q 'Do not auto-resling until quota resets or backend policy changes' "$GH_COMMENT_FILE"
 
 echo "ALL TESTS PASSED"
