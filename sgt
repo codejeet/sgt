@@ -1196,12 +1196,13 @@ _mayor_rig_activity_refresh() {
     last_meaningful_at="$now_iso"
     last_meaningful_epoch="$now_epoch"
     last_meaningful_reason="$snapshot_reason"
-    hibernation_mode="none"
   fi
-  if [[ "$prior_mode" == "manual" && "$snapshot_state" != "active" ]]; then
+  if [[ "$prior_mode" == "manual" ]]; then
     state="hibernated"
     last_reason="${prior_reason:-manual hibernation}"
     hibernation_mode="manual"
+  elif [[ "$snapshot_state" == "active" ]]; then
+    hibernation_mode="none"
   fi
   auto_hibernate_secs="$(_mayor_rig_auto_hibernate_secs)"
   if [[ "$snapshot_state" != "active" && "$prior_mode" != "manual" && "$auto_hibernate_secs" -gt 0 ]]; then
@@ -1239,6 +1240,23 @@ _mayor_rig_hibernated() {
   _mayor_rig_activity_enabled || return 1
   IFS='|' read -r state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
   [[ "$state" == "hibernated" && "$mode" != "none" ]]
+}
+
+_mayor_rig_hibernation_mode() {
+  local rig="${1:-}" state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason
+  _mayor_rig_activity_enabled || return 1
+  IFS='|' read -r state _reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+  if [[ "$state" == "hibernated" && -n "$mode" && "$mode" != "none" ]]; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  return 1
+}
+
+_mayor_rig_manually_hibernated() {
+  local rig="${1:-}" mode=""
+  mode="$(_mayor_rig_hibernation_mode "$rig" 2>/dev/null || true)"
+  [[ "$mode" == "manual" ]]
 }
 
 _rig_hibernation_sync_agents() {
@@ -1325,7 +1343,7 @@ _mayor_rig_set_manual_hibernation() {
 _mayor_rig_maybe_unhibernate_for_event() {
   local rig="${1:-}" event_reason="${2:-}"
   [[ -n "$rig" ]] || return 1
-  if _mayor_rig_hibernated "$rig" && _mayor_wake_reason_is_meaningful "$event_reason"; then
+  if [[ "$(_mayor_rig_hibernation_mode "$rig" 2>/dev/null || true)" == "auto" ]] && _mayor_wake_reason_is_meaningful "$event_reason"; then
     _mayor_rig_set_manual_hibernation "$rig" "unhibernate" "auto-wake: $event_reason"
     log_event "MAYOR_RIG_UNHIBERNATE rig=$rig mode=event reason=\"$(_escape_quotes "$event_reason")\""
     return 0
@@ -5695,6 +5713,10 @@ _plan_tick_run() {
 
   local dispatch_budget=$((max_in_flight - inflight))
   (( dispatch_budget < 0 )) && dispatch_budget=0
+  if _mayor_rig_manually_hibernated "$rig"; then
+    dispatch_budget=0
+    log_event "PLAN_TICK_SKIP_DISPATCH rig=$rig source=$tick_source reason_code=manual-hibernation"
+  fi
   local deps_ok dep_id label sling_out blocker_id failure_reason_code sling_log
   for task_id in "${task_ids[@]}"; do
     [[ "$dispatch_budget" -gt 0 ]] || break
@@ -6644,6 +6666,11 @@ cmd_sling() {
   [[ -n "$task" ]] || die "no task description provided"
   ensure_init
   ensure_rig "$rig"
+  if _mayor_rig_manually_hibernated "$rig"; then
+    echo "[sling] rig $rig is manually hibernated — skipping dispatch"
+    log_event "SLING_SKIP_HIBERNATED rig=$rig mode=manual title=\"$(_escape_quotes "$task")\""
+    return 1
+  fi
 
   case "$backend" in claude|codex) ;; *) die "invalid backend $backend (expected claude|codex)" ;; esac
 
@@ -7850,6 +7877,10 @@ _sweep_watchdog_resling_open_authorized_issues() {
   local source_event source_event_key
   source_event="sweep-watchdog"
   [[ -n "$rig" && -n "$repo" ]] || return 0
+  if _mayor_rig_manually_hibernated "$rig"; then
+    log_event "SWEEP_WATCHDOG_RESLING_SKIP rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=manual-hibernation source_event=$source_event"
+    return 0
+  fi
   issue_rows="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --limit 100 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)"
   [[ -n "$issue_rows" ]] || return 0
   while IFS=$'\t' read -r issue_number issue_title; do
@@ -8224,6 +8255,11 @@ _witness_loop() {
           local issue_title
           issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
           if [[ -n "$issue_title" ]]; then
+            if _mayor_rig_manually_hibernated "$rig"; then
+              echo "[witness/$rig] rig manually hibernated — leaving stalled issue #$p_issue parked"
+              log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=manual-hibernation"
+              continue
+            fi
             echo "[witness/$rig] re-slinging issue #$p_issue: $issue_title"
             log_event "WITNESS_RESLING $pname issue=#$p_issue"
 
@@ -8325,6 +8361,11 @@ _resling_existing_issue() {
   local canonical_repo resolve_meta resolve_code resolve_reason
   source_event_key="$(_wake_trigger_key "$source_event_key")"
   [[ -n "$source_event_key" ]] || source_event_key="${source_event:-unknown}"
+  if _mayor_rig_manually_hibernated "$rig"; then
+    echo "[resling] rig $rig is manually hibernated — skipping issue #$issue_number"
+    log_event "RESLING_SKIP_HIBERNATED issue=#$issue_number rig=$rig mode=manual source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+    return 1
+  fi
 
   if ! canonical_repo="$(_resolve_rig_repo_canonical "resling-dispatch" "$rig" "$repo" "1")"; then
     resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
@@ -10667,9 +10708,13 @@ _mayor_loop() {
       for event_reason in "${cycle_events[@]+"${cycle_events[@]}"}"; do
         target_rig="$(_mayor_wake_reason_rig "$event_reason")"
         if [[ -n "$target_rig" ]]; then
-          cycle_target_rigs["$target_rig"]=1
-          if _mayor_rig_maybe_unhibernate_for_event "$target_rig" "$event_reason"; then
-            actions_taken+="  - auto-woke hibernated rig $target_rig (event=$event_reason)\n"
+          if _mayor_rig_manually_hibernated "$target_rig"; then
+            actions_taken+="  - kept manually hibernated rig $target_rig asleep (event=$event_reason)\n"
+          else
+            cycle_target_rigs["$target_rig"]=1
+            if _mayor_rig_maybe_unhibernate_for_event "$target_rig" "$event_reason"; then
+              actions_taken+="  - auto-woke hibernated rig $target_rig (event=$event_reason)\n"
+            fi
           fi
         fi
         event_key="$(_wake_trigger_key "$event_reason")"
@@ -11498,7 +11543,7 @@ Commands:
   stop [rig]              Stop mayor; in per-rig mode, stops all rig mayors unless a rig is given
   notify "<message>"      Send mayor notification to configured channels
   hibernate <rig> [reason]
-                          Mark a rig hibernated until manual or event wake
+                          Mark a rig hibernated until explicit manual unhibernate
   unhibernate <rig> [reason]
                           Clear rig hibernation state
   rig-status [rig]        Show per-rig mayor activity / hibernation state

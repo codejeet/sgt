@@ -147,8 +147,12 @@ eval "$(extract_fn _mayor_rig_activity_enabled)"
 eval "$(extract_fn _mayor_rig_activity_file)"
 eval "$(extract_fn _mayor_rig_activity_state_read)"
 eval "$(extract_fn _mayor_rig_activity_state_write)"
+eval "$(extract_fn _mayor_rig_auto_hibernate_secs)"
 eval "$(extract_fn _mayor_wake_reason_is_meaningful)"
+eval "$(extract_fn _mayor_rig_activity_refresh)"
 eval "$(extract_fn _mayor_rig_hibernated)"
+eval "$(extract_fn _mayor_rig_hibernation_mode)"
+eval "$(extract_fn _mayor_rig_manually_hibernated)"
 eval "$(extract_fn _rig_hibernation_sync_agents)"
 eval "$(extract_fn _mayor_rig_set_manual_hibernation)"
 eval "$(extract_fn _mayor_rig_maybe_unhibernate_for_event)"
@@ -159,22 +163,40 @@ export SGT_LOG="$TMP_ROOT/helper.log"
 mkdir -p "$SGT_CONFIG"
 
 SYNC_LOG="$TMP_ROOT/sync.log"
+: > "$SYNC_LOG"
 cmd_witness_stop() { echo "witness-stop:$1" >> "$SYNC_LOG"; }
 cmd_refinery_stop() { echo "refinery-stop:$1" >> "$SYNC_LOG"; }
 cmd_refinery_start() { echo "refinery-start:$1" >> "$SYNC_LOG"; }
 cmd_witness_start() { echo "witness-start:$1" >> "$SYNC_LOG"; }
 tmux() { return 1; }
+_mayor_rig_activity_snapshot() { printf '%s\n' 'active|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-in-progress|pending'; }
 
 _mayor_rig_set_manual_hibernation demo hibernate "manual pause"
 _mayor_rig_hibernated demo
+_mayor_rig_manually_hibernated demo
 
-_mayor_rig_maybe_unhibernate_for_event demo 'merged:pr#77:#40:demo|repo=acme/demo|title=Wake'
+_mayor_rig_activity_refresh demo periodic 0
 IFS='|' read -r state reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read demo)"
-[[ "$state" == "idle" ]]
-[[ "$mode" == "none" ]]
-[[ "$reason" == "auto-wake: merged:pr#77:#40:demo"* ]]
-grep -q '^refinery-start:demo$' "$SYNC_LOG"
-grep -q '^witness-start:demo$' "$SYNC_LOG"
+[[ "$state" == "hibernated" ]]
+[[ "$mode" == "manual" ]]
+[[ "$reason" == "manual pause" ]]
+
+if _mayor_rig_maybe_unhibernate_for_event demo 'merged:pr#77:#40:demo|repo=acme/demo|title=Wake'; then
+  echo "manual hibernation should not auto-unhibernate on event wake" >&2
+  exit 1
+fi
+IFS='|' read -r state reason _changed_at _changed_epoch mode _meaningful_at _meaningful_epoch _meaningful_reason _wake_at _wake_reason <<< "$(_mayor_rig_activity_state_read demo)"
+[[ "$state" == "hibernated" ]]
+[[ "$mode" == "manual" ]]
+[[ "$reason" == "manual pause" ]]
+if grep -q '^refinery-start:demo$' "$SYNC_LOG"; then
+  echo "manual hibernation should not restart refinery on event wake" >&2
+  exit 1
+fi
+if grep -q '^witness-start:demo$' "$SYNC_LOG"; then
+  echo "manual hibernation should not restart witness on event wake" >&2
+  exit 1
+fi
 BASH
 
 echo "PASS: mayor rig hibernation regression"
