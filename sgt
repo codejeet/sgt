@@ -2011,6 +2011,33 @@ _mayor_stale_polecat_pr_snapshot() {
   echo "$snapshot"
 }
 
+_cleanup_failed_polecat_dispatch() {
+  local pfile="${1:-}" pname="${2:-}" rig="${3:-}" branch="${4:-}" session="${5:-}" worktree="${6:-}"
+  local rpath=""
+
+  if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session" 2>/dev/null || true
+  fi
+
+  if [[ -n "$rig" ]]; then
+    rpath="$(rig_path "$rig" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$worktree" && -d "$worktree" ]]; then
+    if [[ -n "$rpath" ]]; then
+      git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree" 2>/dev/null || true
+    else
+      rm -rf "$worktree" 2>/dev/null || true
+    fi
+  fi
+
+  rm -f "$pfile" 2>/dev/null || true
+
+  if [[ -n "$rpath" && -n "$branch" ]]; then
+    git -C "$rpath" branch -D "$branch" 2>/dev/null || true
+  fi
+}
+
 _mayor_cleanup_stale_polecat() {
   local pfile="${1:-}" pname="${2:-}" rig="${3:-}" repo="${4:-}" issue="${5:-}" branch="${6:-}" session="${7:-}" worktree="${8:-}" reason_code="${9:-}" issue_state="${10:-}" pr_number="${11:-}" pr_state="${12:-}"
   local owner_repo key key_id fence_dir cleanup_marker decision_marker action
@@ -2125,11 +2152,69 @@ _mayor_reconcile_stale_polecats() {
       reason_code="stale-pr-merged"
     elif [[ "$pr_state" == "CLOSED" ]]; then
       reason_code="stale-pr-closed"
+    elif [[ "$pr_number" == "0" && "$issue_state" == "OPEN" ]]; then
+      reason_code="stale-no-pr-dead-session"
     fi
     [[ -n "$reason_code" ]] || continue
 
     _mayor_cleanup_stale_polecat "$pfile" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "$worktree" "$reason_code" "$issue_state" "$pr_number" "$pr_state"
   done
+}
+
+_polecat_start_grace_secs() {
+  local raw="${SGT_POLECAT_START_GRACE_SECS:-15}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw="15"
+  fi
+  echo "$raw"
+}
+
+_polecat_counts_as_active() {
+  local pfile="${1:-}" rig_filter="${2:-}"
+  local pname snapshot rig repo issue branch session worktree status created
+  local created_epoch now_epoch grace_secs age_secs
+
+  [[ -f "$pfile" ]] || return 1
+  pname="$(basename "$pfile")"
+  if [[ -n "$rig_filter" && "$pname" != "${rig_filter}-"* ]]; then
+    return 1
+  fi
+
+  snapshot="$(
+    (
+      source "$pfile"
+      printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "${RIG:-}" "${REPO:-}" "${ISSUE:-}" "${BRANCH:-}" "${SESSION:-}" "${WORKTREE:-}" "${STATUS:-}" "${CREATED:-}"
+    ) 2>/dev/null
+  )"
+  IFS='|' read -r rig repo issue branch session worktree status created <<< "$snapshot"
+
+  if [[ -n "$rig_filter" && -n "$rig" && "$rig" != "$rig_filter" ]]; then
+    return 1
+  fi
+
+  if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+    return 0
+  fi
+
+  if [[ "$status" == "running" && -n "$worktree" && -d "$worktree" ]]; then
+    grace_secs="$(_polecat_start_grace_secs)"
+    created_epoch="$(date -d "$created" +%s 2>/dev/null || true)"
+    now_epoch="$(date +%s)"
+    if [[ "$created_epoch" =~ ^[0-9]+$ && "$now_epoch" =~ ^[0-9]+$ ]]; then
+      age_secs=$((now_epoch - created_epoch))
+      if (( age_secs >= 0 && age_secs <= grace_secs )); then
+        return 0
+      fi
+    fi
+  fi
+
+  if [[ -n "$worktree" && ! -d "$worktree" ]]; then
+    rm -f "$pfile" 2>/dev/null || true
+    log_event "POLECAT_COUNT_AUTO_PRUNE polecat=$pname reason_code=dead-session-missing-worktree rig=${rig:-unknown} issue=#${issue:-unknown} branch=\"$(_escape_quotes "$branch")\""
+  fi
+
+  return 1
 }
 
 _mayor_wake_dedupe_ttl_secs() {
@@ -2401,12 +2486,11 @@ _active_polecat_count() {
     return 0
   }
 
-  local pf pname
+  local pf
   for pf in "$SGT_POLECATS"/*; do
     [[ -f "$pf" ]] || continue
-    pname="$(basename "$pf")"
-    if [[ -n "$rig" ]]; then
-      [[ "$pname" == "${rig}-"* ]] || continue
+    if ! _polecat_counts_as_active "$pf" "$rig"; then
+      continue
     fi
     count=$((count + 1))
   done
@@ -6894,8 +6978,20 @@ PSTATE
   local polecat_prompt
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
 
-  tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc"
+  local tmux_error dispatch_reason_code
+  if ! tmux_error="$(
+    tmux new-session -d -s "$session_name" -c "$worktree" \
+      "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
+      2>&1
+  )"; then
+    dispatch_reason_code="tmux-new-session-failed"
+    if [[ "${tmux_error,,}" == *"command too long"* ]]; then
+      dispatch_reason_code="command-too-long"
+    fi
+    _cleanup_failed_polecat_dispatch "$SGT_POLECATS/$pname" "$pname" "$rig" "$branch" "$session_name" "$worktree"
+    log_event "SLING_SPAWN_FAILED polecat=$pname rig=$rig issue=#$issue_number branch=$branch reason_code=$dispatch_reason_code detail=\"$(_escape_quotes "${tmux_error:-tmux new-session returned non-zero exit status}")\""
+    die "failed to spawn polecat '$pname': ${tmux_error:-tmux new-session returned non-zero exit status}"
+  fi
 
   # Auto-accept Claude Code workspace trust dialog if it appears
   if [[ "$backend" == "claude" ]]; then
@@ -7885,12 +7981,15 @@ _sweep_try_resilient_cleanup() {
   fi
 
   issue_state="$(gh issue view "$issue" --repo "$canonical_repo" --json state --jq '.state // ""' 2>/dev/null || true)"
-  if [[ "$issue_state" != "CLOSED" ]]; then
-    log_event "SWEEP_RESILIENT_SKIP polecat=$pname issue=#${issue:-unknown} reason_code=issue-not-closed issue_state=${issue_state:-unknown}"
+  if [[ "$issue_state" == "CLOSED" ]]; then
+    cleanup_reason="sweep-pr-lookup-race-issue-closed"
+  elif [[ "$issue_state" == "OPEN" ]]; then
+    cleanup_reason="sweep-dead-no-pr-open-issue"
+  else
+    log_event "SWEEP_RESILIENT_SKIP polecat=$pname issue=#${issue:-unknown} reason_code=issue-not-actionable issue_state=${issue_state:-unknown}"
     return 1
   fi
 
-  cleanup_reason="sweep-pr-lookup-race-issue-closed"
   cleanup_line="$(_mayor_cleanup_stale_polecat "$pfile" "$pname" "$rig" "$repo" "$issue" "$branch" "$session" "$worktree" "$cleanup_reason" "$issue_state" "" "UNAVAILABLE" 2>/dev/null || true)"
   if [[ "$cleanup_line" == CLEANED\|* ]]; then
     owner_repo="$(_repo_owner_repo "$repo")"
@@ -8554,8 +8653,21 @@ PSTATE
 
   local polecat_prompt
   polecat_prompt="$(_build_polecat_runtime_prompt "$rig" "$issue_number" "$task" "$branch" "$rpath")"
-  tmux new-session -d -s "$session_name" -c "$worktree" \
-    "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc"
+  local tmux_error dispatch_reason_code
+  if ! tmux_error="$(
+    tmux new-session -d -s "$session_name" -c "$worktree" \
+      "$( _ai_session_cmd "$backend" "$polecat_prompt" "$worktree/.sgt-agent-output.log" ); rc=\$?; echo '[SGT] polecat exited'; sgt _wake-refinery '${rig}' 'polecat-done:${pname}:#${issue_number}' 2>/dev/null; exit \$rc" \
+      2>&1
+  )"; then
+    dispatch_reason_code="tmux-new-session-failed"
+    if [[ "${tmux_error,,}" == *"command too long"* ]]; then
+      dispatch_reason_code="command-too-long"
+    fi
+    _cleanup_failed_polecat_dispatch "$SGT_POLECATS/$pname" "$pname" "$rig" "$branch" "$session_name" "$worktree"
+    log_event "RESLING_SPAWN_FAILED polecat=$pname rig=$rig issue=#$issue_number branch=$branch source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" reason_code=$dispatch_reason_code detail=\"$(_escape_quotes "${tmux_error:-tmux new-session returned non-zero exit status}")\""
+    echo "[resling] dispatch failed ($source_event) for issue #$issue_number — ${tmux_error:-tmux new-session returned non-zero exit status}" >&2
+    return 1
+  fi
 
   # Auto-accept Claude Code workspace trust dialog if it appears
   if [[ "$backend" == "claude" ]]; then

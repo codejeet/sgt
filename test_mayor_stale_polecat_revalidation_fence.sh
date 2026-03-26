@@ -299,4 +299,42 @@ if [[ -f "$closed_polecat_file" ]]; then
   exit 1
 fi
 
+# Case 7: dead session + open issue + no PR => cleanup failed-dispatch residue.
+no_pr_polecat_file="$SGT_POLECATS/rig-one-cat-nopr"
+no_pr_worktree="$SGT_ROOT/worktree/rig-one-cat-nopr"
+mkdir -p "$no_pr_worktree"
+cat > "$no_pr_polecat_file" <<PSTATE
+RIG=rig-one
+REPO=https://github.com/acme/demo
+ISSUE=117
+BRANCH=sgt/rig-one-cat-nopr
+SESSION=sgt-rig-one-cat-nopr
+WORKTREE=$no_pr_worktree
+STATUS=running
+PSTATE
+GH_PR_NUMBER="0"
+GH_PR_STATE=""
+GH_ISSUE_STATE="OPEN"
+mapfile -t case7_lines < <(_mayor_reconcile_stale_polecats)
+if [[ "${#case7_lines[@]}" -ne 1 ]]; then
+  echo "expected exactly one dead-no-pr stale cleanup action" >&2
+  exit 1
+fi
+if [[ "${case7_lines[0]}" != CLEANED\|rig-one-cat-nopr\|stale-no-pr-dead-session\|* ]]; then
+  echo "unexpected dead-no-pr cleanup payload: ${case7_lines[0]}" >&2
+  exit 1
+fi
+if [[ -f "$no_pr_polecat_file" ]]; then
+  echo "expected dead-no-pr polecat state file to be removed" >&2
+  exit 1
+fi
+if [[ -d "$no_pr_worktree" ]]; then
+  echo "expected dead-no-pr polecat worktree to be removed" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'MAYOR_POLECAT_CLEANUP reason_code=stale-no-pr-dead-session polecat=rig-one-cat-nopr' "$SGT_LOG" || true)" -ne 1 ]]; then
+  echo "expected dead-no-pr cleanup activity log entry" >&2
+  exit 1
+fi
+
 echo "ALL TESTS PASSED"
