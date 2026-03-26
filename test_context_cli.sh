@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_context_cli.sh — Validate context help/syntax and missing OPENAI_API_KEY failures.
+# test_context_cli.sh — Validate context CLI help/syntax, missing-key failures, and malformed-index recovery.
 
 set -euo pipefail
 
@@ -12,6 +12,55 @@ trap 'rm -rf "$TMP_HOME"' EXIT
 mkdir -p "$TMP_HOME/.local/bin"
 cp "$SGT_SCRIPT" "$TMP_HOME/.local/bin/sgt"
 chmod +x "$TMP_HOME/.local/bin/sgt"
+MOCK_PYTHONPATH="$TMP_HOME/mock-python"
+mkdir -p "$MOCK_PYTHONPATH"
+
+cat >"$MOCK_PYTHONPATH/sitecustomize.py" <<'PY'
+import json
+import urllib.request
+
+
+class _MockResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _embed_text(text):
+    total = sum(ord(ch) for ch in text)
+    length = len(text)
+    return [float(length or 1), float((total % 97) + 1), float((total % 53) + 1)]
+
+
+_real_urlopen = urllib.request.urlopen
+
+
+def _mock_urlopen(req, timeout=60):
+    url = getattr(req, "full_url", "")
+    if url == "https://api.openai.com/v1/embeddings":
+        payload = json.loads(req.data.decode("utf-8"))
+        input_value = payload.get("input")
+        if isinstance(input_value, list):
+            texts = input_value
+        else:
+            texts = [input_value]
+        body = {
+            "data": [{"embedding": _embed_text(text or "")} for text in texts],
+        }
+        return _MockResponse(json.dumps(body).encode("utf-8"))
+    return _real_urlopen(req, timeout=timeout)
+
+
+urllib.request.urlopen = _mock_urlopen
+PY
 
 run_cmd() {
   local command="$1"
@@ -25,6 +74,26 @@ run_cmd() {
     HOME="$TMP_HOME" \
     PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     TERM="${TERM:-xterm}" \
+    bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+  echo "$rc" >"$rc_file"
+}
+
+run_cmd_mock_embeddings() {
+  local command="$1"
+  local out_file="$2"
+  local err_file="$3"
+  local rc_file="$4"
+  local rc
+
+  set +e
+  env -i \
+    HOME="$TMP_HOME" \
+    PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    TERM="${TERM:-xterm}" \
+    OPENAI_API_KEY="test-key" \
+    PYTHONPATH="$MOCK_PYTHONPATH" \
     bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
   rc=$?
   set -e
@@ -77,8 +146,11 @@ INDEX_RC="$(mktemp)"
 SEARCH_OUT="$(mktemp)"
 SEARCH_ERR="$(mktemp)"
 SEARCH_RC="$(mktemp)"
+RECOVER_OUT="$(mktemp)"
+RECOVER_ERR="$(mktemp)"
+RECOVER_RC="$(mktemp)"
 
-trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC"' EXIT
+trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC"' EXIT
 
 run_cmd "sgt context" "$BASE_OUT" "$BASE_ERR" "$BASE_RC"
 run_cmd "sgt context --help" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC"
@@ -132,6 +204,12 @@ check_equals "context index without key writes no stdout" "$(wc -c <"$INDEX_OUT"
 check_equals "context search without key writes no stdout" "$(wc -c <"$SEARCH_OUT" | tr -d ' ')" "0"
 check_file_contains "context index missing key error is explicit" "$INDEX_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
 check_file_contains "context search missing key error is explicit" "$SEARCH_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+
+run_cmd_mock_embeddings "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown' >/dev/null && sgt context index demo >/dev/null && printf '%s' '}{broken-json' >> \"\$HOME/sgt/.sgt/context/demo/index.json\" && sgt context search demo 'watchdog cooldown'" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC"
+
+check_file_contains "context search recovers from malformed index exits 0" "$RECOVER_RC" '^0$'
+check_file_contains "context search recovery warns explicitly" "$RECOVER_ERR" "^⚠ context index for rig 'demo' was malformed; rebuilding$"
+check_file_contains "context search recovery returns the matching entry" "$RECOVER_OUT" 'watchdog cooldown'
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1
