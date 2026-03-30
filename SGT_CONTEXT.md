@@ -209,3 +209,37 @@ This is a feature request against the `sgt` repo / Mayor control-plane behavior.
 - 2026-03-26T09:45:58+01:00 — 2026-03-26: Manual rig hibernation is now authoritative until explicit : activity refresh preserves manual mode across mayor restarts, event-targeted mayor cycles no longer bypass manual hibernation, and dispatch fences now block sling, plan tick dispatch, sweep watchdog resling, witness stalled-worker resling, and direct resling helper dispatch while leaving passive status/logging intact. Regression coverage: test_mayor_rig_hibernation.sh, test_manual_hibernation_dispatch_fences.sh, test_witness_manual_hibernation_skip.sh.
 - 2026-03-26T09:46:05+01:00 — 2026-03-26: Manual rig hibernation is now authoritative until explicit sgt mayor unhibernate. Activity refresh preserves manual mode across mayor restarts, event-targeted mayor cycles no longer bypass manual hibernation, and dispatch fences now block sling, plan tick dispatch, sweep watchdog resling, witness stalled-worker resling, and direct resling helper dispatch while leaving passive status/logging intact. Regression coverage: test_mayor_rig_hibernation.sh, test_manual_hibernation_dispatch_fences.sh, test_witness_manual_hibernation_skip.sh.
 - 2026-03-26T20:18:42+01:00 — Observed PMKB canonical issue #679 enter a witness resling loop because Codex workers were hitting backend usage limits and exiting before opening a PR. Operator diagnosis: the underlying signature is the first Codex output containing 'You've hit your usage limit'. Current SGT behavior misclassifies this as generic WITNESS_STALLED dead/no-PR and immediately re-slings again, creating issue-comment spam and repeated dead polecats. Desired fix: detect codex usage-limit text from first message/output, classify as explicit backend/quota-limited blocker (for example reason_code=codex_usage_limit or backend_usage_limit), suppress immediate resling loops, and surface one operator-readable blocked state/comment instead of repeated stalled comments.
+- 2026-03-26T20:27:09+01:00 — Codex polecat sessions now persist terminal output to .sgt-agent-output.log so witness can detect first-output quota failures. When the first captured Codex output contains 'You've hit your usage limit', witness classifies the death as reason_code=codex_usage_limit, labels the issue backend-limited + codex-usage-limit, records an acceptance blocker, and sweep/resling paths skip further auto-resling for that issue.
+- 2026-03-26T22:37:24+01:00 — 2026-03-26 live controller bug: after PMKB dead-polecat cleanup, watchdog reslings for #693/#691 can die with 'command too long', and Mayor consistency revalidation can stay wedged on mismatch_categories=polecat-liveness even when sgt status shows no tracked polecats. snapshot open_polecats stayed > live open_polecats after nuke/sweep/manual dispatch retries, blocking fresh dispatch for #679/#693. Need self-healing stale polecat accounting after failed spawn / cleanup and clean handling for oversized command assembly.
+- 2026-03-26T22:55:43+01:00 — Acceptance blocker sgt-acceptance-1774562143-94f532df reported by witness: Replacement work required after stalled polecat for issue #251
+
+### Acceptance Blocker sgt-acceptance-1774562143-94f532df
+
+- Reported at: 2026-03-26T22:55:43+01:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #251
+
+```markdown
+Replacement work required after stalled polecat for issue #251
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #251
+- Issue URL: https://github.com/codejeet/sgt/issues/251
+- Issue title: Fix stale polecat-liveness mismatch after failed dispatch cleanup
+- Polecat: sgt-c093b3ac
+- Failure reason: witness-stalled-resling-failed
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-03-26T22:57:25+01:00 — 2026-03-26 post-#251 deploy blocker: stale polecat bookkeeping now recovers correctly, but real PMKB redispatches for #696/#693/#679 still fail at launch with RESLING_SPAWN_FAILED reason_code=command-too-long. Need to stop embedding oversized polecat launch payloads directly into tmux command strings; use file/stdin/wrapper launch instead and add regression coverage.
+- 2026-03-26T23:16:30+01:00 — 2026-03-26 issue #254: polecat sling/resling launches now write the runtime worker prompt to .sgt-polecat-prompt.md in the worktree and start tmux with a short file-based backend command, preventing command-too-long redispatch failures while leaving failed-spawn cleanup bookkeeping unchanged. Regression coverage: test_oversized_dispatch_payload_prompt_file.sh plus updated worker prompt runtime assertions.
+- 2026-03-26T23:29:54+01:00 — Acceptance blocker sgt-acceptance-1774562143-94f532df resolved.
+
+## 2026-03-30
+- 2026-03-30T01:58:00+02:00 — 2026-03-30 operator requested a first-class 'sgt mayor refresh' command: soft-reset Mayor transient context/workspace automatically, generate a durable handoff markdown/doc from current Mayor context before reset, preserve durable board state, and print the handoff artifact path on success. Manual production baseline came from the 2026-03-30 ~01:49 CET soft reset flow (stop, archive transient Mayor files, start, wake).

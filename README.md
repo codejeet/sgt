@@ -517,6 +517,7 @@ Optional per-rig Mayor architecture:
 - Set `SGT_MAYOR_ARCHITECTURE=per-rig` to run one Mayor tmux session per rig instead of one shared `sgt-mayor`.
 - In that mode, sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises each `sgt-mayor-<rig>` independently, and `sgt status` / `sgt status --json` expose entries like `mayor/pmkb` or `mayor/sgt`.
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
+- `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
