@@ -170,6 +170,15 @@ a {
   font-size: 13px;
 }
 
+.voice-chip {
+  border-radius: 999px;
+}
+
+.voice-chip.active {
+  border-color: rgba(157, 247, 125, 0.35);
+  background: rgba(157, 247, 125, 0.12);
+}
+
 .pill-dot {
   width: 10px;
   height: 10px;
@@ -263,6 +272,7 @@ a {
 
 .roster-list,
 .rig-list,
+.alert-rail,
 .blocker-board,
 .queue-list,
 .topology-list {
@@ -272,6 +282,7 @@ a {
 
 .roster-item,
 .rig-item,
+.alert-card,
 .blocker-card,
 .queue-item,
 .hero-card,
@@ -406,6 +417,11 @@ a {
   margin-top: 16px;
 }
 
+.alert-rail {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-bottom: 14px;
+}
+
 .subpanel {
   min-width: 0;
 }
@@ -419,6 +435,7 @@ a {
 }
 
 .blocker-board:empty::before,
+.alert-rail:empty::before,
 .queue-list:empty::before,
 .stream-grid:empty::before,
 .roster-list:empty::before,
@@ -431,6 +448,35 @@ a {
   color: var(--muted);
   border: 1px dashed var(--line);
   border-radius: 14px;
+}
+
+.alert-card {
+  padding: 14px;
+  border-left: 3px solid var(--line-strong);
+  background:
+    linear-gradient(180deg, rgba(77, 214, 255, 0.08), rgba(8, 28, 41, 0.78)),
+    rgba(8, 28, 41, 0.78);
+}
+
+.alert-card.alert-critical {
+  border-left-color: rgba(255, 107, 107, 0.9);
+  background:
+    linear-gradient(135deg, rgba(255, 107, 107, 0.22), transparent 58%),
+    rgba(8, 28, 41, 0.82);
+}
+
+.alert-card.alert-good {
+  border-left-color: rgba(157, 247, 125, 0.9);
+  background:
+    linear-gradient(135deg, rgba(157, 247, 125, 0.16), transparent 58%),
+    rgba(8, 28, 41, 0.82);
+}
+
+.alert-card.alert-warning {
+  border-left-color: rgba(248, 184, 74, 0.9);
+  background:
+    linear-gradient(135deg, rgba(248, 184, 74, 0.18), transparent 58%),
+    rgba(8, 28, 41, 0.82);
 }
 
 .blocker-card {

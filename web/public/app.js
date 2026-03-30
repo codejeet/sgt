@@ -1,4 +1,5 @@
 const COMPACT_KEY = "sgt_web_compact";
+const VOICE_MUTE_KEY = "sgt_web_voice_muted";
 
 const appState = {
   ws: null,
@@ -14,6 +15,10 @@ const appState = {
   desiredTargets: new Set(),
   streams: new Map(),
   sections: ["overview", "streams", "topology", "dispatch", "logs"],
+  voiceMuted: true,
+  alertIdsSeen: new Set(),
+  alertsBootstrapped: false,
+  activeAnnouncement: null,
 };
 
 const refs = {
@@ -21,6 +26,8 @@ const refs = {
   connLabel: document.getElementById("connLabel"),
   lastUpdated: document.getElementById("lastUpdated"),
   lastLog: document.getElementById("lastLog"),
+  voiceMuteBtn: document.getElementById("voiceMuteBtn"),
+  voiceStatus: document.getElementById("voiceStatus"),
   compactBtn: document.getElementById("compactBtn"),
   refreshSnapshotBtn: document.getElementById("refreshSnapshotBtn"),
   navButtons: Array.from(document.querySelectorAll(".nav-btn")),
@@ -31,6 +38,7 @@ const refs = {
   rigCountLabel: document.getElementById("rigCountLabel"),
   rigMatrix: document.getElementById("rigMatrix"),
   blockerSummary: document.getElementById("blockerSummary"),
+  alertRail: document.getElementById("alertRail"),
   blockerBoard: document.getElementById("blockerBoard"),
   overviewHero: document.getElementById("overviewHero"),
   queueBoard: document.getElementById("queueBoard"),
@@ -67,6 +75,7 @@ initialize();
 
 function initialize() {
   setCompact(localStorage.getItem(COMPACT_KEY) === "1");
+  setVoiceMuted(localStorage.getItem(VOICE_MUTE_KEY) !== "0");
   bindEvents();
   detectTopologyMode();
   loadRigs();
@@ -78,6 +87,7 @@ function initialize() {
 function bindEvents() {
   refs.compactBtn.addEventListener("click", () => setCompact(!document.body.classList.contains("compact")));
   refs.refreshSnapshotBtn.addEventListener("click", requestSnapshot);
+  refs.voiceMuteBtn.addEventListener("click", () => setVoiceMuted(!appState.voiceMuted));
   refs.refreshLogsBtn.addEventListener("click", loadLogs);
   refs.peekCloseBtn.addEventListener("click", closePeek);
   refs.streamRigFilter.addEventListener("change", handleStreamFilterChange);
@@ -127,12 +137,13 @@ function bindEvents() {
 
 function emptyCockpit() {
   return {
-    meta: { serverTime: "", featureFlags: {} },
+    meta: { serverTime: "", featureFlags: {}, voice: {} },
     agents: [],
     rigs: [],
     workers: [],
     queue: { items: [], summary: { total: 0 } },
     blockers: [],
+    alerts: [],
     logs: { lines: [], total: 0 },
     topology: { nodes: [], edges: [] },
   };
@@ -141,6 +152,14 @@ function emptyCockpit() {
 function setCompact(on) {
   document.body.classList.toggle("compact", Boolean(on));
   localStorage.setItem(COMPACT_KEY, on ? "1" : "0");
+}
+
+function setVoiceMuted(on) {
+  appState.voiceMuted = Boolean(on);
+  localStorage.setItem(VOICE_MUTE_KEY, appState.voiceMuted ? "1" : "0");
+  refs.voiceMuteBtn.setAttribute("aria-pressed", appState.voiceMuted ? "true" : "false");
+  refs.voiceMuteBtn.classList.toggle("active", !appState.voiceMuted);
+  updateVoiceStatus();
 }
 
 function activateSection(name) {
@@ -207,6 +226,7 @@ function requestSnapshot() {
 
 function handleWsMessage(message) {
   if (message.type === "snapshot" && message.snapshot) {
+    const newAlerts = diffNewAlerts(message.snapshot.alerts || []);
     appState.cockpit = message.snapshot;
     appState.lastSnapshotAt = Date.now();
     if (!appState.focusTarget || !hasTarget(appState.focusTarget)) {
@@ -214,6 +234,7 @@ function handleWsMessage(message) {
     }
     syncStreamTargets();
     renderAll();
+    maybePlayVoiceAnnouncement(newAlerts);
     return;
   }
 
@@ -316,11 +337,35 @@ function renderAll() {
   renderMetrics();
   renderRoster();
   renderRigs();
+  renderAlerts();
   renderBlockers();
   renderQueue();
   renderStreamDeck();
   renderLogs();
   renderTopology();
+}
+
+function renderAlerts() {
+  const alerts = appState.cockpit.alerts || [];
+  updateVoiceStatus();
+  if (alerts.length === 0) {
+    refs.alertRail.innerHTML = `<div class="empty-state">Recent blocker transitions and milestone alerts will appear here.</div>`;
+    return;
+  }
+
+  refs.alertRail.innerHTML = alerts.slice(0, 6).map((alert) => `
+    <article class="alert-card alert-${escAttr(alert.severity || "info")}">
+      <div class="queue-head">
+        <div class="blocker-title">${esc(alert.message || alert.title)}</div>
+        <span class="severity-pill ${alertSeverityClass(alert)}">${esc(alert.kind || "event")}</span>
+      </div>
+      <div class="blocker-meta">
+        <span>${esc(alert.rig || "unknown rig")}</span>
+        <span>${esc(formatIso(alert.createdAt))}</span>
+        <span>${esc(alertVoiceLabel(alert))}</span>
+      </div>
+    </article>
+  `).join("");
 }
 
 function renderMetrics() {
@@ -427,7 +472,8 @@ function renderRigs() {
 }
 
 function renderBlockers() {
-  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers`;
+  const totalAlerts = (appState.cockpit.alerts || []).length;
+  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers · ${totalAlerts} recent alerts`;
   if (appState.cockpit.blockers.length === 0) {
     refs.blockerBoard.innerHTML = `<div class="empty-state">Acceptance blockers will surface here with evidence and rig ownership.</div>`;
     return;
@@ -443,6 +489,7 @@ function renderBlockers() {
         <span>${esc(blocker.rig || "unknown rig")}</span>
         <span>${esc(blocker.requester || "unknown reporter")}</span>
         <span>${esc(formatIso(blocker.createdAt))}</span>
+        <span>${esc(snippet(blocker.id || "", 26))}</span>
       </div>
       <p>${esc(snippet(blocker.evidence || "No evidence body recorded.", 240))}</p>
     </article>
@@ -899,6 +946,87 @@ function formatLogLine(line) {
     return `<div class="log-line"><span class="timestamp">[${esc(match[1])}]</span> <span class="log-event">${esc(match[2])}</span> ${esc(match[3])}</div>`;
   }
   return `<div class="log-line">${esc(line)}</div>`;
+}
+
+function diffNewAlerts(alerts) {
+  const unseen = [];
+  for (const alert of alerts) {
+    if (!alert || !alert.id) continue;
+    if (!appState.alertIdsSeen.has(alert.id) && appState.alertsBootstrapped) {
+      unseen.push(alert);
+    }
+  }
+  appState.alertIdsSeen = new Set(alerts.map((alert) => alert.id).filter(Boolean));
+  if (!appState.alertsBootstrapped) {
+    appState.alertsBootstrapped = true;
+  }
+  return unseen;
+}
+
+function updateVoiceStatus() {
+  const voice = appState.cockpit.meta.voice || {};
+  let label = "Muted";
+  if (!voice.configured) {
+    label = "Unavailable";
+  } else if (appState.voiceMuted) {
+    label = "Muted";
+  } else if (appState.activeAnnouncement) {
+    label = "Playing";
+  } else {
+    label = "Armed";
+  }
+  refs.voiceStatus.textContent = label;
+}
+
+function alertSeverityClass(alert) {
+  if (alert.severity === "good") return "state-good";
+  if (alert.severity === "warning") return "state-warn";
+  if (alert.severity === "critical") return "state-critical";
+  return "state-active";
+}
+
+function alertVoiceLabel(alert) {
+  if (!alert.voice || !alert.voice.enabled) return "Visual only";
+  if (alert.voice.eligible) return "Voice ready";
+  if (alert.voice.reason === "event-disabled") return "Voice disabled for event";
+  if (alert.voice.reason === "rate-limited") return "Voice rate-limited";
+  return "Voice unavailable";
+}
+
+async function maybePlayVoiceAnnouncement(alerts) {
+  if (appState.voiceMuted || appState.activeAnnouncement) {
+    updateVoiceStatus();
+    return;
+  }
+  const next = alerts.find((alert) => alert && alert.voice && alert.voice.enabled && alert.voice.eligible);
+  if (!next) {
+    updateVoiceStatus();
+    return;
+  }
+
+  const audio = new Audio(`/api/announcements/${encodeURIComponent(next.id)}/audio`);
+  appState.activeAnnouncement = audio;
+  updateVoiceStatus();
+
+  const clear = () => {
+    if (appState.activeAnnouncement === audio) {
+      appState.activeAnnouncement = null;
+      updateVoiceStatus();
+    }
+  };
+
+  audio.addEventListener("ended", clear, { once: true });
+  audio.addEventListener("error", () => {
+    clear();
+    toast(`Voice announcement unavailable for ${next.rig || "rig"}.`, "error");
+  }, { once: true });
+
+  try {
+    await audio.play();
+  } catch (error) {
+    clear();
+    toast(`Voice playback blocked: ${error.message}`, "error");
+  }
 }
 
 function toast(message, type) {

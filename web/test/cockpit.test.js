@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
   computeStreamDelta,
@@ -49,19 +50,75 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
         evidence: 'Need more work',
       },
     ],
+    alerts: [
+      {
+        id: 'alert:1',
+        blockerId: 'sgt-acceptance-1',
+        kind: 'blocker-opened',
+        severity: 'critical',
+        createdAt: '2026-03-30T06:00:10Z',
+        rig: 'sgt',
+        title: 'Acceptance still red',
+        message: 'sgt blocker opened: Acceptance still red',
+        voice: { enabled: false, eligible: false, reason: 'not-configured' },
+      },
+    ],
     recentLogs: ['[2026-03-30T06:00:00Z] MAYOR_START'],
     version: 'test',
+    voice: {
+      enabled: false,
+      configured: false,
+      eventKinds: ['blocker-resolved'],
+      rateLimitSeconds: 90,
+    },
   });
 
   assert.equal(snapshot.meta.featureFlags.tmuxStreaming, true);
+  assert.equal(snapshot.meta.featureFlags.voiceAnnouncements, false);
   assert.equal(snapshot.rigs.length, 1);
   assert.equal(snapshot.rigs[0].blockers, 1);
   assert.equal(snapshot.rigs[0].activeWorkers, 1);
   assert.equal(snapshot.workers[0].stream.target, 'sgt-34784812');
   assert.equal(snapshot.queue.summary.total, 1);
   assert.equal(snapshot.blockers[0].title, 'Acceptance still red');
+  assert.equal(snapshot.alerts[0].kind, 'blocker-opened');
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'rig:sgt'));
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'rig:sgt' && edge.type === 'runs'));
+});
+
+test('BlockerAlertTracker records blocker opens and resolutions with voice gating', () => {
+  const tracker = new BlockerAlertTracker({
+    now: (() => {
+      const stamps = [
+        '2026-03-30T06:00:00Z',
+        '2026-03-30T06:01:00Z',
+        '2026-03-30T06:02:00Z',
+      ];
+      let index = 0;
+      return () => stamps[index++] || stamps[stamps.length - 1];
+    })(),
+    voice: {
+      enabled: true,
+      eventKinds: ['blocker-resolved'],
+      rateLimitMs: 0,
+    },
+  });
+
+  assert.equal(tracker.observe([{ id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger' }]).length, 0);
+
+  const eventsAfterOpen = tracker.observe([
+    { id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger' },
+    { id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness' },
+  ]);
+  assert.equal(eventsAfterOpen[0].kind, 'blocker-opened');
+  assert.equal(eventsAfterOpen[0].voice.eligible, false);
+  assert.equal(eventsAfterOpen[0].voice.reason, 'event-disabled');
+
+  const eventsAfterResolve = tracker.observe([{ id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness' }]);
+  assert.equal(eventsAfterResolve[0].kind, 'blocker-resolved');
+  assert.equal(eventsAfterResolve[0].rig, 'sgt');
+  assert.equal(eventsAfterResolve[0].voice.eligible, true);
+  assert.match(eventsAfterResolve[0].voice.text, /No open blockers remain on this rig|All acceptance blockers are clear/);
 });
 
 test('computeStreamDelta emits append-only chunks when possible and reset on divergence', () => {
