@@ -176,7 +176,7 @@ Use the repo-owned helper:
 web/scripts/sync-live-copy.sh
 ```
 
-That script syncs repo `web/` into the live target, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, and runs `npm install` in the live directory so the served copy reflects the repo source.
+That script syncs repo `web/` into the live target, preserves runtime-only artifacts such as `node_modules/`, `package-lock.json`, and `webui.log`, and runs `npm install` in the live directory so the served copy reflects the repo source.
 
 ## Latest-main proof path
 

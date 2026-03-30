@@ -32,6 +32,7 @@ test('sync-live-copy helper defaults to the canonical live target and preserves 
   assert.match(script, /SGT_WEB_LIVE_DIR/);
   assert.match(script, /\/root\/sgt\/web/);
   assert.match(script, /--exclude=node_modules\//);
+  assert.match(script, /--exclude=package-lock\.json/);
   assert.match(script, /--exclude=webui\.log/);
   assert.match(script, /npm install --prefix "\$TARGET_DIR"/);
 });
