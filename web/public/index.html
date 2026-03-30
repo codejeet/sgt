@@ -6,16 +6,16 @@
 <title>SGT SGT Cockpit</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <div class="shell-grid">
-  <header class="topbar panel">
+  <header class="topbar panel panel-shell">
     <div>
-      <div class="eyebrow">Live Operator Shell</div>
+      <div class="eyebrow">Operator Console</div>
       <h1>SGT SGT Cockpit</h1>
-      <p class="lead">Dense live control surface for Mayor, active workers, blockers, queue state, and dispatch.</p>
+      <p class="lead">Live operations surface for Mayor, active workers, blockers, queue state, and dispatch.</p>
     </div>
     <div class="topbar-controls">
       <div class="status-chip" id="wsHealth">
@@ -40,7 +40,7 @@
     </div>
   </header>
 
-  <nav class="section-nav panel">
+  <nav class="section-nav panel panel-nav">
     <button data-section="streams" class="nav-btn active">Live Monitor <span class="kbd">1</span></button>
     <button data-section="overview" class="nav-btn">Alert Center <span class="kbd">2</span></button>
     <button data-section="topology" class="nav-btn">Topology <span class="kbd">3</span></button>
@@ -49,15 +49,15 @@
   </nav>
 
   <aside class="sidebar">
-    <section class="panel command-panel">
+    <section class="panel command-panel panel-sidebar panel-status">
       <div class="panel-title">
-        <span>Command Pulse</span>
+        <span>Command Status</span>
         <span class="panel-meta" id="serverTimeLabel">waiting</span>
       </div>
       <div class="metric-stack" id="commandMetrics"></div>
     </section>
 
-    <section class="panel roster-panel">
+    <section class="panel roster-panel panel-sidebar panel-workers">
       <div class="panel-title">
         <span>Worker Roster</span>
         <span class="panel-meta" id="workerCountLabel">0 tracked</span>
@@ -65,7 +65,7 @@
       <div class="roster-list" id="workerRoster"></div>
     </section>
 
-    <section class="panel roster-panel">
+    <section class="panel roster-panel panel-sidebar panel-rigs">
       <div class="panel-title">
         <span>Rig Matrix</span>
         <span class="panel-meta" id="rigCountLabel">0 rigs</span>
@@ -75,7 +75,7 @@
   </aside>
 
   <main class="main-column">
-    <section class="panel section active" id="section-streams">
+    <section class="panel section section-streams active" id="section-streams">
       <div class="panel-title">
         <span>Live Monitor</span>
         <span class="panel-meta" id="streamSummary">0 subscriptions</span>
@@ -123,7 +123,7 @@
       </div>
     </section>
 
-    <section class="panel section" id="section-overview">
+    <section class="panel section section-overview" id="section-overview">
       <div class="panel-title">
         <span>Alert Center</span>
         <span class="panel-meta" id="blockerSummary">0 open blockers</span>
@@ -143,9 +143,9 @@
       </div>
     </section>
 
-    <section class="panel section" id="section-topology">
+    <section class="panel section section-topology" id="section-topology">
       <div class="panel-title">
-        <span>Topology Radar</span>
+        <span>Topology Map</span>
         <span class="panel-meta" id="topologyMode">Canvas fallback</span>
       </div>
       <div class="topology-wrap">
@@ -162,7 +162,7 @@
       </div>
     </section>
 
-    <section class="panel section" id="section-dispatch">
+    <section class="panel section section-dispatch" id="section-dispatch">
       <div class="panel-title">
         <span>Dispatch Console</span>
         <span class="panel-meta">Repo-tracked web/ remains canonical</span>
@@ -195,7 +195,7 @@
       </div>
     </section>
 
-    <section class="panel section" id="section-logs">
+    <section class="panel section section-logs" id="section-logs">
       <div class="panel-title">
         <span>Operator Log Feed</span>
         <span class="panel-meta" id="logSummary">0 lines buffered</span>

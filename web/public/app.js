@@ -1258,7 +1258,7 @@ function createProgram(gl, vertexShader, fragmentShader) {
 }
 
 function hexToRgba(hex, alpha = 1) {
-  const normalized = String(hex || "#7da8ff").replace("#", "");
+  const normalized = String(hex || "#63aafc").replace("#", "");
   const safe = normalized.length === 3
     ? normalized.split("").map((part) => `${part}${part}`).join("")
     : normalized.padEnd(6, "0").slice(0, 6);
@@ -1271,13 +1271,13 @@ function hexToRgba(hex, alpha = 1) {
 }
 
 function topologyColor(type, state) {
-  if (type === "blocker" || state === "blocked") return "#ff6b6b";
-  if (type === "issue") return "#7da8ff";
-  if (type === "pr") return "#8df2d8";
-  if (type === "rig") return "#8bf0ff";
-  if (type === "queue") return "#f8b84a";
-  if (state === "alive" || state === "active") return "#9df77d";
-  return "#7da8ff";
+  if (type === "blocker" || state === "blocked") return "#e27070";
+  if (type === "issue") return "#63aafc";
+  if (type === "pr") return "#ad7cff";
+  if (type === "rig") return "#d9a441";
+  if (type === "queue") return "#d9a441";
+  if (state === "alive" || state === "active") return "#79c66d";
+  return "#63aafc";
 }
 
 function workerPriority(worker) {
