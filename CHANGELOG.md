@@ -84,3 +84,5 @@
 - Added regression coverage for concurrent conflict dedupe plus restart replay resume in `test_refinery_conflict_resling_guardrail.sh` (wired into `test_mayor_wake_replay_regression.sh`).
 - `sgt status` now guards terminal-width initialization for non-TTY/narrow environments, avoids nounset crashes in PR-title truncation, and always exits `0` after rendering.
 - Added regression coverage for status rendering with unset/narrow `COLUMNS` in `test_status_non_tty_term_cols_guard.sh`.
+- Added `test_mayor_refresh_latest_main_proof.sh` as the repo-owned latest-main proof entrypoint for Mayor refresh behavior, bundling manual handoff refresh, live runtime auto-refresh, threshold/cooldown regression, and status JSON telemetry coverage.
+- Added `test_mayor_runtime_auto_refresh.sh` to prove the real Mayor runtime measures the generated AI prompt file, auto-triggers the existing handoff refresh path when the threshold is exceeded, logs operator-visible telemetry, and suppresses the backend invoke on that cycle.

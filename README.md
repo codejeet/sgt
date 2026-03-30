@@ -272,6 +272,20 @@ Mayor AI briefing generation also has a strict freshness gate:
 - If the briefing file is missing/unreadable at prompt-render time, mayor now injects a live fallback briefing (instead of `cat` errors), including deacon heartbeat health, merge queue depth, and active polecat count.
 - Fallback path emits `MAYOR_BRIEFING_FALLBACK reason=briefing-unavailable path="<...>"` telemetry and still includes a full live `sgt status` snapshot for AI context.
 
+### Mayor refresh latest-main proof path
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that both the manual Mayor handoff flow and the runtime over-budget auto-refresh path are real on current code:
+
+```bash
+./test_mayor_refresh_latest_main_proof.sh
+```
+
+That proof bundle covers the four operator-facing parts of Mayor refresh behavior that matter:
+- `test_mayor_refresh.sh` proves `sgt mayor refresh [rig]` archives transient context into a handoff and restarts the scoped Mayor session.
+- `test_mayor_runtime_auto_refresh.sh` proves the live Mayor runtime measures the actual AI-cycle prompt file, aborts the AI invoke when the prompt exceeds the threshold, and triggers the existing handoff/refresh path before the backend runs.
+- `test_mayor_auto_refresh_threshold.sh` proves threshold and cooldown logic remain deterministic.
+- `test_status_json.sh` proves `sgt status --json` exposes the latest prompt-budget and auto-refresh telemetry to operators.
+
 Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
 - Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
