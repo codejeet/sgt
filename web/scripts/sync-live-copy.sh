@@ -62,7 +62,6 @@ rsync_args=(
   -a
   --delete
   --exclude=node_modules/
-  --exclude=package-lock.json
   --exclude=webui.log
   --exclude=.DS_Store
 )
@@ -80,6 +79,6 @@ if [[ "$dry_run" -eq 1 ]]; then
 fi
 
 echo "Installing runtime dependencies in ${TARGET_DIR}"
-npm install --prefix "$TARGET_DIR"
+npm ci --prefix "$TARGET_DIR"
 
 echo "Live web copy synced to ${TARGET_DIR}"
