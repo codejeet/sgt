@@ -2,6 +2,8 @@
 
 SGT Web UI is a small, dependency-light **real-time dashboard** for SGT (Simple GitHub Gastown): monitor agents/polecats, tail logs, and dispatch new work.
 
+For the locked follow-on cockpit architecture and deployment path, see [`web/docs/live-cockpit-architecture.md`](docs/live-cockpit-architecture.md).
+
 ## Quick start
 
 ```bash
@@ -9,6 +11,18 @@ cd web
 npm install
 npm start
 # open http://localhost:4747
+```
+
+To sync the repo-tracked `web/` copy into the live served target on the rig host:
+
+```bash
+web/scripts/sync-live-copy.sh
+```
+
+Dry-run the sync first if needed:
+
+```bash
+web/scripts/sync-live-copy.sh --dry-run
 ```
 
 ## Configuration
@@ -83,6 +97,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 - **Backend**: Node.js + Express. Shells out to `sgt` CLI for actions; tails `~/sgt/sgt.log`.
 - **Frontend**: Single HTML page with vanilla JS.
 - **Real-time**: WebSocket pushes status and log deltas; includes heartbeat + reconnect/backoff.
+- **Canonical source**: repo `web/` is the source of truth; `/root/sgt/web` is a deployment target.
 
 ## API Endpoints
 
