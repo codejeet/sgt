@@ -9,6 +9,8 @@ const appState = {
   lastSnapshotAt: 0,
   lastLogAt: 0,
   focusTarget: "mayor",
+  streamFilters: { rig: "all", role: "polecat", query: "" },
+  streamFollowAll: true,
   desiredTargets: new Set(),
   streams: new Map(),
   sections: ["overview", "streams", "topology", "dispatch", "logs"],
@@ -33,8 +35,14 @@ const refs = {
   overviewHero: document.getElementById("overviewHero"),
   queueBoard: document.getElementById("queueBoard"),
   streamSummary: document.getElementById("streamSummary"),
+  streamRigFilter: document.getElementById("streamRigFilter"),
+  streamRoleFilter: document.getElementById("streamRoleFilter"),
+  streamQuery: document.getElementById("streamQuery"),
+  followAllBtn: document.getElementById("followAllBtn"),
+  monitorWallSummary: document.getElementById("monitorWallSummary"),
   focusStream: document.getElementById("focusStream"),
-  streamGrid: document.getElementById("streamGrid"),
+  mayorMonitor: document.getElementById("mayorMonitor"),
+  monitorWall: document.getElementById("monitorWall"),
   serverTimeLabel: document.getElementById("serverTimeLabel"),
   topologyMode: document.getElementById("topologyMode"),
   topologyCanvas: document.getElementById("topologyCanvas"),
@@ -72,6 +80,10 @@ function bindEvents() {
   refs.refreshSnapshotBtn.addEventListener("click", requestSnapshot);
   refs.refreshLogsBtn.addEventListener("click", loadLogs);
   refs.peekCloseBtn.addEventListener("click", closePeek);
+  refs.streamRigFilter.addEventListener("change", handleStreamFilterChange);
+  refs.streamRoleFilter.addEventListener("change", handleStreamFilterChange);
+  refs.streamQuery.addEventListener("input", handleStreamFilterChange);
+  refs.followAllBtn.addEventListener("click", toggleFollowAll);
   refs.peekModal.addEventListener("click", (event) => {
     if (event.target === refs.peekModal) closePeek();
   });
@@ -236,7 +248,7 @@ function handleStreamEvent(message) {
     target,
     content: "",
     state: "opening",
-    follow: true,
+    follow: appState.streamFollowAll,
     lastEventAt: 0,
     session: "",
   };
@@ -265,18 +277,16 @@ function handleStreamEvent(message) {
 }
 
 function preferredFocusTarget() {
-  const liveWorker = appState.cockpit.workers.find((worker) => worker.stream && worker.stream.available);
+  const liveWorker = monitorWorkers()[0];
   return liveWorker ? liveWorker.stream.target : "mayor";
 }
 
 function syncStreamTargets() {
   const desired = new Set(["mayor"]);
-  const workers = [...appState.cockpit.workers]
-    .filter((worker) => worker.stream && worker.stream.available)
-    .sort((left, right) => workerPriority(right) - workerPriority(left));
+  const workers = monitorWorkers().filter(matchesStreamFilters);
 
   if (appState.focusTarget) desired.add(appState.focusTarget);
-  for (const worker of workers.slice(0, 4)) desired.add(worker.stream.target);
+  for (const worker of workers) desired.add(worker.stream.target);
 
   const previous = appState.desiredTargets;
   appState.desiredTargets = desired;
@@ -460,30 +470,39 @@ function renderQueue() {
 }
 
 function renderStreamDeck() {
+  renderStreamFilters();
   const orderedTargets = Array.from(appState.desiredTargets);
   refs.streamSummary.textContent = `${orderedTargets.length} subscriptions`;
-  refs.overviewHero.innerHTML = renderHeroStream(appState.focusTarget || "mayor");
+  refs.overviewHero.innerHTML = renderHeroStream("mayor");
   refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || "mayor");
+  refs.mayorMonitor.innerHTML = renderMonitorStream("mayor", { focusable: false });
 
-  const others = orderedTargets.filter((target) => target !== appState.focusTarget);
-  refs.streamGrid.innerHTML = others.map((target) => renderMiniStream(target)).join("");
+  const visibleWorkers = monitorWorkers().filter(matchesStreamFilters);
+  refs.monitorWallSummary.textContent = `${visibleWorkers.length} panes visible`;
+  refs.monitorWall.innerHTML = visibleWorkers.length > 0
+    ? visibleWorkers.map((worker) => renderMonitorStream(worker.stream.target, { focusable: true })).join("")
+    : `<div class="empty-state">No worker streams match the current monitor filters.</div>`;
 
   bindStreamActions(refs.focusStream);
-  bindStreamActions(refs.streamGrid);
   bindStreamActions(refs.overviewHero);
+  bindStreamActions(refs.mayorMonitor);
+  bindStreamActions(refs.monitorWall);
 }
 
 function renderHeroStream(target) {
   const stream = streamFor(target);
+  const details = streamDetail(target);
   return `
     <article class="hero-card">
       <div class="stream-head">
         <div class="stream-title">
           <div class="stream-target">${esc(target)}</div>
+          <div class="stream-meta">${esc(details)}</div>
           <div class="stream-meta">${esc(streamCaption(stream))}</div>
         </div>
         <div class="stream-actions">
           <span class="state-pill ${streamStateClass(stream)}">${esc(stream.state)}</span>
+          <button class="btn tiny ghost" data-follow-toggle="${escAttr(target)}">${stream.follow ? "Tail On" : "Tail Off"}</button>
           <button class="btn tiny ghost" data-peek-target="${escAttr(target)}">Peek</button>
         </div>
       </div>
@@ -492,18 +511,22 @@ function renderHeroStream(target) {
   `;
 }
 
-function renderMiniStream(target) {
+function renderMonitorStream(target, options = {}) {
   const stream = streamFor(target);
+  const details = streamDetail(target);
   return `
     <article class="stream-card">
       <div class="stream-head">
         <div class="stream-title">
           <div class="stream-target">${esc(target)}</div>
+          <div class="stream-meta">${esc(details)}</div>
           <div class="stream-meta">${esc(streamCaption(stream))}</div>
         </div>
         <div class="stream-actions">
           <span class="state-pill ${streamStateClass(stream)}">${esc(stream.state)}</span>
-          <button class="btn tiny ghost" data-focus-target="${escAttr(target)}">Focus</button>
+          <button class="btn tiny ghost" data-follow-toggle="${escAttr(target)}">${stream.follow ? "Tail On" : "Tail Off"}</button>
+          ${options.focusable ? `<button class="btn tiny ghost" data-focus-target="${escAttr(target)}">Focus</button>` : ""}
+          <button class="btn tiny ghost" data-peek-target="${escAttr(target)}">Peek</button>
         </div>
       </div>
       <div class="stream-body" data-stream-target="${escAttr(target)}">${esc(stream.content || "Waiting for tmux stream data...")}</div>
@@ -521,6 +544,14 @@ function bindStreamActions(root) {
   });
   root.querySelectorAll("[data-peek-target]").forEach((button) => {
     button.addEventListener("click", () => peek(button.dataset.peekTarget));
+  });
+  root.querySelectorAll("[data-follow-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const stream = streamFor(button.dataset.followToggle);
+      stream.follow = !stream.follow;
+      appState.streams.set(stream.target, stream);
+      renderStreamDeck();
+    });
   });
   root.querySelectorAll("[data-stream-target]").forEach((el) => {
     const stream = appState.streams.get(el.dataset.streamTarget);
@@ -541,10 +572,40 @@ function streamFor(target) {
     target,
     content: "",
     state: "opening",
-    follow: true,
+    follow: appState.streamFollowAll,
     lastEventAt: 0,
     session: "",
   };
+}
+
+function handleStreamFilterChange() {
+  appState.streamFilters = {
+    rig: refs.streamRigFilter.value || "all",
+    role: refs.streamRoleFilter.value || "polecat",
+    query: refs.streamQuery.value.trim().toLowerCase(),
+  };
+  syncStreamTargets();
+  renderStreamDeck();
+}
+
+function toggleFollowAll() {
+  appState.streamFollowAll = !appState.streamFollowAll;
+  for (const stream of appState.streams.values()) {
+    stream.follow = appState.streamFollowAll;
+  }
+  renderStreamDeck();
+}
+
+function renderStreamFilters() {
+  const rigs = ["all", ...appState.cockpit.rigs.map((rig) => rig.name)];
+  refs.streamRigFilter.innerHTML = rigs
+    .map((rig) => `<option value="${escAttr(rig)}">${esc(rig === "all" ? "All rigs" : rig)}</option>`)
+    .join("");
+  if (!rigs.includes(appState.streamFilters.rig)) appState.streamFilters.rig = "all";
+  refs.streamRigFilter.value = appState.streamFilters.rig;
+  refs.streamRoleFilter.value = appState.streamFilters.role;
+  refs.streamQuery.value = appState.streamFilters.query;
+  refs.followAllBtn.textContent = appState.streamFollowAll ? "Tail All: On" : "Tail All: Off";
 }
 
 function renderLogs() {
@@ -746,6 +807,30 @@ function topologyColor(type, state) {
 
 function workerPriority(worker) {
   return (worker.status === "alive" ? 20 : 0) + (worker.role === "polecat" ? 8 : 0) + (worker.issue ? 4 : 0);
+}
+
+function monitorWorkers() {
+  return [...appState.cockpit.workers]
+    .filter((worker) => worker.stream && worker.stream.available)
+    .sort((left, right) => workerPriority(right) - workerPriority(left));
+}
+
+function matchesStreamFilters(worker) {
+  if (appState.streamFilters.role !== "all" && worker.role !== appState.streamFilters.role) return false;
+  if (appState.streamFilters.rig !== "all" && worker.rig !== appState.streamFilters.rig) return false;
+  if (!appState.streamFilters.query) return true;
+  const haystack = [worker.name, worker.rig, worker.role, worker.issue, worker.branch].join(" ").toLowerCase();
+  return haystack.includes(appState.streamFilters.query);
+}
+
+function streamDetail(target) {
+  if (target === "mayor") return "Mayor command loop";
+  const worker = appState.cockpit.workers.find((item) => item.stream && item.stream.target === target);
+  if (!worker) return "Live worker pane";
+  const detail = [worker.role];
+  if (worker.rig) detail.push(worker.rig);
+  if (worker.issue) detail.push(`#${worker.issue}`);
+  return detail.join(" • ");
 }
 
 function workerStateClass(worker) {

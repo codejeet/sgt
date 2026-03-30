@@ -95,8 +95,47 @@
         <span>Live Streams</span>
         <span class="panel-meta" id="streamSummary">0 subscriptions</span>
       </div>
-      <div class="focus-stream" id="focusStream"></div>
-      <div class="stream-grid" id="streamGrid"></div>
+      <div class="stream-toolbar">
+        <div class="stream-filter-row">
+          <label class="stream-filter">
+            <span>Rig</span>
+            <select id="streamRigFilter">
+              <option value="all">All rigs</option>
+            </select>
+          </label>
+          <label class="stream-filter">
+            <span>Role</span>
+            <select id="streamRoleFilter">
+              <option value="polecat">Polecats</option>
+              <option value="all">All workers</option>
+              <option value="dog">Dogs</option>
+            </select>
+          </label>
+          <label class="stream-filter stream-filter-wide">
+            <span>Match</span>
+            <input type="text" id="streamQuery" placeholder="rig, worker, issue, branch">
+          </label>
+        </div>
+        <div class="stream-actions">
+          <button class="btn tiny ghost" id="followAllBtn">Tail All: On</button>
+          <span class="panel-meta" id="monitorWallSummary">0 panes visible</span>
+        </div>
+      </div>
+
+      <div class="monitor-layout">
+        <div class="monitor-column">
+          <div class="subpanel-title">Focused Pane</div>
+          <div class="focus-stream" id="focusStream"></div>
+
+          <div class="subpanel-title">Mayor Live Monitor</div>
+          <div id="mayorMonitor"></div>
+        </div>
+
+        <div class="monitor-column monitor-column-wide">
+          <div class="subpanel-title">Worker Monitor Wall</div>
+          <div class="stream-grid" id="monitorWall"></div>
+        </div>
+      </div>
     </section>
 
     <section class="panel section" id="section-topology">
