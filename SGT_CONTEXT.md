@@ -245,3 +245,177 @@ Required follow-up:
 - 2026-03-30T01:58:00+02:00 — 2026-03-30 operator requested a first-class 'sgt mayor refresh' command: soft-reset Mayor transient context/workspace automatically, generate a durable handoff markdown/doc from current Mayor context before reset, preserve durable board state, and print the handoff artifact path on success. Manual production baseline came from the 2026-03-30 ~01:49 CET soft reset flow (stop, archive transient Mayor files, start, wake).
 - 2026-03-30T02:11:53+02:00 — 2026-03-30 — Added 'sgt mayor refresh [rig]' to archive transient Mayor context into ~/.sgt[/mayors/<rig>]/handoffs/<token>/, write a handoff.md snapshot, restart+wake Mayor, and print the handoff path. Refresh had to reapply per-rig scope after cmd_status/_mayor_build_briefing because those helpers mutate mayor scope, and _cmd_mayor_stop_one now returns 0 even when no FIFO exists so refresh/stop do not fail spuriously.
 - 2026-03-30T04:29:18+02:00 — 2026-03-30 operator diagnosis: _find_recent_duplicate_issue currently matches recently closed issues too, so fresh sling dispatches can be suppressed against closed work (example: PMKB capture regression suppressed against closed #865). Separate live symptom: PMKB was left active with open issue #872 but zero active polecats/open PRs while Mayor stayed healthy and kept cycling, so SGT needs a stronger invariant against actionable rigs idling with zero workers.
+- 2026-03-30T04:31:10+02:00 — 2026-03-30: sling duplicate cooldown now ignores closed issues entirely; _find_recent_duplicate_issue checks only open issues, so freshly closed work no longer suppresses replacement dispatches for the same symptom.
+- 2026-03-30T04:36:10+02:00 — 2026-03-30: Mayor now enforces bounded stranded-rig recovery for non-hibernated rigs with open sgt-authorized issues but zero open PRs, zero active polecats, and zero merge-queue items; it attempts one replacement dispatch per cycle and logs MAYOR_STRANDED_RIG_RECOVERY_DISPATCH/BLOCKED telemetry with explicit reason_code values.
+- 2026-03-30T05:59:21+02:00 — Plan request sgt-1774843161-c615ad59 submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1774843161-c615ad59
+
+- Requested at: 2026-03-30T05:59:21+02:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# SGT Plan Request — JARVIS-style real-time operations cockpit for SGT Web UI
+
+## Goal
+
+Turn the existing SGT Web UI into a real-time operator cockpit for SGT, with:
+
+1. **Live monitoring of the Mayor and all active polecats**
+   - real-time tmux-backed views of their output/logs
+   - fast switching + multi-pane monitoring
+   - stale/disconnected indicators
+2. **An Iron Man / JARVIS-style interface**
+   - visually striking HUD-style operator UI
+   - but still dense, practical, and readable for real work
+3. **Optional ElevenLabs TTS for acceptance blockers**
+   - announce newly created acceptance blockers / critical blocker transitions
+   - fully optional and gracefully disabled if not configured
+4. **A WebGL live visualization**
+   - real-time view of rigs / Mayor / polecats / PRs / blockers / queue relationships
+   - useful, not just decorative
+
+## Current baseline / source of truth
+
+- Existing SGT Web UI already exists under the **repo-tracked** path: `web/` in `codejeet/sgt`
+- There is also a running/deployed copy at `/root/sgt/web`
+- Current running copy and repo `web/` are presently identical, but future work should treat the **repo copy** as canonical source-of-truth
+- Current app is a small Node/Express + WebSocket dashboard with status/logs/dispatch functionality
+- Current live URL is served from the Tailscale host on port `4747`
+
+## Product intent
+
+This should feel like a serious operations console — not a toy dashboard.
+
+Desired vibe:
+- dark HUD / JARVIS-inspired visual language
+- strong live-state awareness
+- clear alerting
+- low cognitive load under pressure
+- compact operator ergonomics
+
+Important: do **not** let the visual theme make it less useful. Dense and practical beats flashy-but-useless.
+
+## Requested outcome
+
+### A. Live tmux monitoring
+
+Add live browser views for:
+- Mayor
+- all active polecats
+- ideally extensible to witness/refinery/dogs/crew later via same mechanism
+
+Requirements:
+- real-time or near-real-time streaming, not static snapshots
+- multiple simultaneous panes/cards
+- easy switching/filtering by rig / issue / worker / role
+- clear stale/disconnected/reconnecting state
+- support tail/follow behavior for active logs
+- support quick peek / expand / focus mode
+
+### B. JARVIS-style UI shell
+
+Redesign the UI into a cohesive ops cockpit.
+
+Expected qualities:
+- HUD-style layout
+- strong information hierarchy
+- visibly distinct states for healthy / active / blocked / stale / critical
+- keyboard-friendly operator flow where sensible
+- preserve existing useful controls (dispatch, logs, status) if still valuable
+
+### C. Acceptance blocker alerting + optional ElevenLabs TTS
+
+When new acceptance blockers are created:
+- surface them prominently in the UI
+- make them visually obvious
+- optionally announce them via ElevenLabs TTS
+
+Requirements:
+- fully optional: if ElevenLabs config is absent, feature should silently degrade to visual-only
+- must not require secrets committed to repo
+- add env/config-driven enablement
+- include mute/disable control and dedupe/rate-limiting so it does not spam
+- blocker announcements should focus on meaningful new blocker events, not noisy repeats
+
+### D. WebGL visualization
+
+Add a live visual layer showing relationships between:
+- Mayor
+- rigs
+- active polecats
+- open PRs
+- open issues
+- acceptance blockers / blocked state
+- maybe merge queue / wake events if it helps
+
+Requirements:
+- live-updating from the same backend state/event stream
+- genuinely useful for orientation / status, not just eye candy
+- degrade gracefully if browser/GPU support is weak
+- should not make the app laggy or unusable on normal operator hardware
+
+## Strong constraints
+
+1. **Canonical code lives in repo `web/`**
+   - do not create yet another divergent standalone web UI tree
+   - if deployment still uses `/root/sgt/web`, include an explicit sync/deploy path after merge
+2. **Do not break the current useful dashboard behavior**
+   - existing status/log/dispatch functionality should remain available or be cleanly superseded
+3. **Do not require ElevenLabs to use the UI**
+   - TTS is optional enhancement, not a hard dependency
+4. **Avoid gimmicks that reduce usability**
+   - keep the operator workflow primary
+5. **Tailnet-first ops**
+   - assume this is primarily used over Tailscale / trusted operator access, not as a public internet app
+
+## Suggested plan shape
+
+The Mayor should decompose this into a real multi-step plan rather than one giant sling. Likely shape:
+
+1. **Audit / architecture pass**
+   - inspect current `web/` implementation
+   - decide backend/frontend shape for live tmux streaming and live event model
+   - decide how to keep repo `web/` canonical while updating deployed copy cleanly
+2. **Backend streaming foundation**
+   - real-time tmux/log/event streaming API / WS model
+   - live data model for mayor, polecats, blockers, PRs, rigs
+3. **UI shell / JARVIS redesign**
+   - new layout system + operator panels + state presentation
+4. **Live tmux monitor views**
+   - Mayor + active polecats first
+   - multi-pane / focus / stale states
+5. **Acceptance blocker alerting + optional TTS**
+   - visual alert center + optional ElevenLabs announcements
+6. **WebGL visualization**
+   - live relationship graph / spatial view / systems model
+7. **Docs + deploy + polish**
+   - setup docs, config docs, deployment/sync path, screenshots, operator instructions
+
+## Completion condition
+
+This plan is complete when an operator can open the SGT Web UI and:
+- watch the Mayor and all active polecats live in-browser,
+- see actionable blocker/rig/PR state in real time,
+- receive optional acceptance-blocker TTS alerts when configured,
+- use a WebGL live visualization that meaningfully reflects current system state,
+- and do so from the repo-tracked `web/` implementation with a clear deployment path.
+
+## Acceptance criteria
+
+1. **Live monitor**: Mayor + active polecats can be watched live in browser with fresh updates and visible stale/reconnect state.
+2. **Operator usability**: UI is materially improved into a coherent JARVIS-style ops console without losing core utility.
+3. **Blocker alerts**: new acceptance blockers are prominently surfaced in UI.
+4. **Optional TTS**: when ElevenLabs config is provided, new acceptance blockers can be voiced; when not provided, UI still works normally.
+5. **WebGL**: a live WebGL visualization exists and reflects current SGT state in a meaningful way.
+6. **Canonical source**: repo `web/` is the maintained source of truth; deployment/update story is documented.
+7. **Docs**: README/setup/config docs explain local run, env vars, optional ElevenLabs setup, and deployment/sync path.
+8. **Graceful degradation**: weak browsers / missing TTS / missing WebGL support do not break the app.
+
+## Operator preference / direction
+
+Be bold about improving the interface. This is explicitly meant to become a serious real-time ops cockpit, not just a lightly polished log page.
+```
+- 2026-03-30T06:02:29+02:00 — Plan request clarification for sgt-1774843161-c615ad59: for ElevenLabs/TTS in the SGT WebUI JARVIS cockpit, the operator mainly wants voice notifications when blockers are cleared/resolved or major milestones are met. New blocker creation/escalation should stay visible in the UI, but TTS for new blockers is lower-priority and should be optional/configurable to avoid noisy negative chatter. The updated spec file at /home/aj/.openclaw/agents/gastown/workspace/notes/sgt-webui-jarvis-plan-2026-03-30.md reflects this preference and should be treated as the latest source text for the pending request.
+- 2026-03-30T06:08:58+02:00 — Issue #262 audit locked the SGT Web cockpit to the existing repo-tracked web/ app: keep a single Node/Express + vanilla JS process, grow it around a normalized snapshot/event model with backend-mediated on-demand tmux streams, treat acceptance blockers as first-class cockpit events, and deploy the canonical repo copy to /root/sgt/web via web/scripts/sync-live-copy.sh.
+- 2026-03-30T06:18:13+02:00 — 2026-03-30 issue #264 added the first normalized web cockpit backend in repo web/: /api/cockpit now emits meta/agents/rigs/workers/queue/blockers/logs/topology from sgt status --json plus blocker files, and the WebSocket now supports demand-driven tmux stream subscribe/unsubscribe with stream/open,data,stale,close events while preserving legacy status/log pushes for the existing UI.
