@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SGT Operator Shell</title>
+<title>SGT SGT Cockpit</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -13,8 +13,8 @@
 <div class="shell-grid">
   <header class="topbar panel">
     <div>
-      <div class="eyebrow">SGT Operator Shell</div>
-      <h1>JARVIS Cockpit</h1>
+      <div class="eyebrow">Live Operator Shell</div>
+      <h1>SGT SGT Cockpit</h1>
       <p class="lead">Dense live control surface for Mayor, active workers, blockers, queue state, and dispatch.</p>
     </div>
     <div class="topbar-controls">
@@ -41,8 +41,8 @@
   </header>
 
   <nav class="section-nav panel">
-    <button data-section="overview" class="nav-btn active">Overview <span class="kbd">1</span></button>
-    <button data-section="streams" class="nav-btn">Streams <span class="kbd">2</span></button>
+    <button data-section="streams" class="nav-btn active">Live Monitor <span class="kbd">1</span></button>
+    <button data-section="overview" class="nav-btn">Alert Center <span class="kbd">2</span></button>
     <button data-section="topology" class="nav-btn">Topology <span class="kbd">3</span></button>
     <button data-section="dispatch" class="nav-btn">Dispatch <span class="kbd">4</span></button>
     <button data-section="logs" class="nav-btn">Logs <span class="kbd">5</span></button>
@@ -75,29 +75,9 @@
   </aside>
 
   <main class="main-column">
-    <section class="panel section active" id="section-overview">
+    <section class="panel section active" id="section-streams">
       <div class="panel-title">
-        <span>Alert Center</span>
-        <span class="panel-meta" id="blockerSummary">0 open blockers</span>
-      </div>
-      <div class="alert-rail" id="alertRail"></div>
-      <div class="blocker-board" id="blockerBoard"></div>
-
-      <div class="overview-grid">
-        <div class="subpanel">
-          <div class="subpanel-title">Mayor Focus</div>
-          <div class="stream-hero" id="overviewHero"></div>
-        </div>
-        <div class="subpanel">
-          <div class="subpanel-title">Queue + Issues</div>
-          <div class="queue-list" id="queueBoard"></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel section" id="section-streams">
-      <div class="panel-title">
-        <span>Live Streams</span>
+        <span>Live Monitor</span>
         <span class="panel-meta" id="streamSummary">0 subscriptions</span>
       </div>
       <div class="stream-toolbar">
@@ -139,6 +119,26 @@
         <div class="monitor-column monitor-column-wide">
           <div class="subpanel-title">Worker Monitor Wall</div>
           <div class="stream-grid" id="monitorWall"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="section-overview">
+      <div class="panel-title">
+        <span>Alert Center</span>
+        <span class="panel-meta" id="blockerSummary">0 open blockers</span>
+      </div>
+      <div class="alert-rail" id="alertRail"></div>
+      <div class="blocker-board" id="blockerBoard"></div>
+
+      <div class="overview-grid">
+        <div class="subpanel">
+          <div class="subpanel-title">Mayor Focus</div>
+          <div class="stream-hero" id="overviewHero"></div>
+        </div>
+        <div class="subpanel">
+          <div class="subpanel-title">Queue + Issues</div>
+          <div class="queue-list" id="queueBoard"></div>
         </div>
       </div>
     </section>

@@ -14,7 +14,7 @@ const appState = {
   streamFollowAll: true,
   desiredTargets: new Set(),
   streams: new Map(),
-  sections: ["overview", "streams", "topology", "dispatch", "logs"],
+  sections: ["streams", "overview", "topology", "dispatch", "logs"],
   voiceMuted: true,
   alertIdsSeen: new Set(),
   alertsBootstrapped: false,
@@ -122,8 +122,8 @@ function bindEvents() {
     if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
 
     const shortcutMap = {
-      "1": "overview",
-      "2": "streams",
+      "1": "streams",
+      "2": "overview",
       "3": "topology",
       "4": "dispatch",
       "5": "logs",

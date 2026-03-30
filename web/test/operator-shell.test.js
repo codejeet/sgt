@@ -5,9 +5,12 @@ const path = require("node:path");
 
 test("operator shell html includes cockpit sections and assets", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
-  assert.match(html, /JARVIS Cockpit/);
+  assert.match(html, /<title>SGT SGT Cockpit<\/title>/);
+  assert.match(html, /<h1>SGT SGT Cockpit<\/h1>/);
   assert.match(html, /section-overview/);
   assert.match(html, /section-streams/);
+  assert.ok(html.indexOf('id="section-streams"') < html.indexOf('id="section-overview"'));
+  assert.match(html, /Live Monitor/);
   assert.match(html, /section-topology/);
   assert.match(html, /section-dispatch/);
   assert.match(html, /section-logs/);
@@ -27,6 +30,9 @@ test("operator shell html includes cockpit sections and assets", () => {
 
 test("operator shell script consumes snapshot and tmux stream events", () => {
   const script = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+  assert.match(script, /sections: \["streams", "overview", "topology", "dispatch", "logs"\]/);
+  assert.match(script, /"1": "streams"/);
+  assert.match(script, /"2": "overview"/);
   assert.match(script, /message\.type === "snapshot"/);
   assert.match(script, /message\.type === "stream\/open"/);
   assert.match(script, /message\.type === "stream\/data"/);
