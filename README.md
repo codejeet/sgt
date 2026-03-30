@@ -271,6 +271,12 @@ Mayor orphan-PR queueing also revalidates live PR state at queue time:
 - If an orphan was listed as open from a stale snapshot but live state is `MERGED`/`CLOSED`, mayor skips queueing.
 - Mayor emits an explicit operator line and structured activity-log event (`MAYOR_ORPHAN_SKIP_STALE ... snapshot_state=OPEN live_state=<...>`).
 
+Mayor also enforces a bounded stranded-rig recovery path for actionable rigs left with zero workers:
+- When a non-hibernated rig has open `sgt-authorized` issues, `open_prs=0`, `active_polecats=0`, and `merge_queue=0`, mayor attempts at most one replacement dispatch per cycle.
+- Successful recovery emits `MAYOR_STRANDED_RIG_RECOVERY_DISPATCH ... reason_code=no-active-polecat-no-open-pr`.
+- If recovery is fenced, mayor emits `MAYOR_STRANDED_RIG_RECOVERY_BLOCKED ...` with an explicit `reason_code` such as `open-pr-exists`, `active-polecat-existing`, `backend_usage_limit`, `stale-event`, or `final-gate`.
+- This path complements `sgt sweep`; it gives Mayor a controller-side invariant that actionable rigs do not remain quietly active with zero workers forever.
+
 Mayor also runs a stale-polecat reconciliation fence after merged/closed transitions:
 - On `merged:*` or `dog-approved:*` wake cycles, mayor revalidates each tracked polecat against live issue/PR state.
 - If a polecat is still in-flight but tied to `issue_state=CLOSED` or `pr_state=MERGED`, mayor cleans the stale session/worktree/state and records one idempotent cleanup decision.
@@ -499,6 +505,25 @@ grep 'MAYOR DISPATCH SKIP (consistency-mismatch)' ~/.sgt/mayor-decisions.log | t
 - `snapshot_summary` is the briefing-time state.
 - `live_summary` is the pre-dispatch revalidation state.
 - `retry=next-mayor-cycle` indicates mayor intentionally did no-op and will retry after the next revalidation pass.
+
+Troubleshooting stranded actionable rigs with zero workers:
+1. Confirm the rig is not intentionally paused:
+
+```bash
+sgt mayor rig-status <rig>
+```
+
+2. Inspect Mayor recovery telemetry:
+
+```bash
+grep 'MAYOR_STRANDED_RIG_RECOVERY_' ~/.sgt/sgt.log | tail -50
+```
+
+3. Interpret the structured reason:
+- `MAYOR_STRANDED_RIG_RECOVERY_DISPATCH` means Mayor spawned a replacement polecat.
+- `reason_code=open-pr-exists` or `active-polecat-existing` means the rig was not actually workerless by the time Mayor revalidated.
+- `reason_code=backend_usage_limit` means dispatch is intentionally fenced by an external backend quota/blocker.
+- `reason_code=stale-event` or `final-gate` means live issue/repo state changed during redispatch and Mayor safely no-op'd instead of starting duplicate work.
 
 Mayor cycle ownership uses a lease lockfile (`~/.sgt/mayor.lock`):
 - Lockfile fields: `ownerPid`, `startedAt`, `leaseUntil`.
