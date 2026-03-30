@@ -807,6 +807,63 @@ function resolveStreamSession(target, { configDir }) {
   return null;
 }
 
+function isMayorTarget(target) {
+  return target === 'mayor' || target.startsWith('mayor/');
+}
+
+function resolveMayorLogPath(target, { configDir }) {
+  if (target === 'mayor') {
+    return path.join(configDir, 'mayor-start.log');
+  }
+  if (target.startsWith('mayor/')) {
+    return path.join(configDir, 'mayors', target.slice('mayor/'.length), 'mayor-start.log');
+  }
+  return '';
+}
+
+function hasVisibleContent(content) {
+  return typeof content === 'string' && /\S/.test(content);
+}
+
+async function captureStreamTarget(target, { configDir, capturePane, readMayorLog }) {
+  const resolved = resolveStreamSession(target, { configDir });
+  if (!resolved) {
+    return { available: false, reason: 'unknown-target' };
+  }
+
+  let paneOutput = null;
+  try {
+    paneOutput = await capturePane(resolved.session);
+  } catch {
+    paneOutput = null;
+  }
+
+  if (paneOutput !== null && (hasVisibleContent(paneOutput) || !isMayorTarget(target))) {
+    return { available: true, session: resolved.session, content: paneOutput };
+  }
+
+  if (isMayorTarget(target)) {
+    const mayorLogPath = resolveMayorLogPath(target, { configDir });
+    if (mayorLogPath) {
+      try {
+        const mayorLog = await readMayorLog(mayorLogPath);
+        return {
+          available: true,
+          session: resolved.session,
+          content: mayorLog,
+          source: 'mayor-log',
+        };
+      } catch {}
+    }
+  }
+
+  if (paneOutput !== null) {
+    return { available: true, session: resolved.session, content: paneOutput };
+  }
+
+  return { available: false, reason: 'session-unavailable' };
+}
+
 function computeStreamDelta(previousContent, nextContent) {
   if (!previousContent) {
     return { changed: true, reset: true, chunk: nextContent };
@@ -941,6 +998,7 @@ module.exports = {
   BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
+  captureStreamTarget,
   computeStreamDelta,
   listStateEntries,
   parseStatus,
@@ -948,6 +1006,7 @@ module.exports = {
   readDir,
   readRecentLogLines,
   readStateFile,
+  resolveMayorLogPath,
   resolveStreamSession,
   tryReadJson,
 };

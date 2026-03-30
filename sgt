@@ -402,15 +402,51 @@ _mayor_notify_alert_state_clear() {
 }
 
 _mayor_start_receipt_file() {
-  echo "$(_mayor_scope_dir)/mayor-start.receipt"
+  echo "$(_mayor_scope_dir "${1:-}")/mayor-start.receipt"
 }
 
 _mayor_start_log_file() {
-  echo "$(_mayor_scope_dir)/mayor-start.log"
+  echo "$(_mayor_scope_dir "${1:-}")/mayor-start.log"
 }
 
 _mayor_start_failure_state_file() {
-  echo "$(_mayor_scope_dir)/mayor-start-failure.state"
+  echo "$(_mayor_scope_dir "${1:-}")/mayor-start-failure.state"
+}
+
+_peek_mayor_log_file_for_target() {
+  local target="${1:-}"
+  case "$target" in
+    mayor)
+      _mayor_start_log_file
+      ;;
+    mayor/*)
+      _mayor_start_log_file "${target#mayor/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_peek_session_output() {
+  local target="${1:-}" session="${2:-}"
+  local pane_output=""
+
+  pane_output="$(tmux capture-pane -t "$session" -p -S -200 2>/dev/null || true)"
+  case "$target" in
+    mayor|mayor/*)
+      if [[ -z "${pane_output//[$' \t\r\n']/}" ]]; then
+        local mayor_log=""
+        mayor_log="$(_peek_mayor_log_file_for_target "$target" || true)"
+        if [[ -n "$mayor_log" && -f "$mayor_log" ]]; then
+          tail -n 200 "$mayor_log"
+          return 0
+        fi
+      fi
+      ;;
+  esac
+
+  printf "%s\n" "$pane_output"
 }
 
 _mayor_start_failure_state_read() {
@@ -7953,7 +7989,7 @@ cmd_status() {
 
 cmd_peek() {
   local target="${1:-}"
-  [[ -n "$target" ]] || die "usage: sgt peek <polecat|witness/<rig>|refinery/<rig>|deacon>"
+  [[ -n "$target" ]] || die "usage: sgt peek <polecat|mayor|mayor/<rig>|witness/<rig>|refinery/<rig>|deacon>"
   ensure_init
 
   local session=""
@@ -7973,7 +8009,7 @@ cmd_peek() {
   if [[ -n "$session" ]]; then
     if tmux has-session -t "$session" 2>/dev/null; then
       _section "peek: $target"
-      tmux capture-pane -t "$session" -p -S -200
+      _peek_session_output "$target" "$session"
     else
       warn "$target session is dead"
     fi
