@@ -424,3 +424,163 @@ Be bold about improving the interface. This is explicitly meant to become a seri
 - 2026-03-30T06:34:31+02:00 — 2026-03-30: web/ now tracks blocker transition alerts in the normalized cockpit snapshot and exposes an optional ElevenLabs-backed /api/announcements/:alertId/audio path. Alert rail stays useful with no TTS config; voice is env-gated via SGT_WEB_ELEVENLABS_API_KEY + SGT_WEB_ELEVENLABS_VOICE_ID, browser-mutable, and backend rate-limited with SGT_WEB_VOICE_EVENT_KINDS / SGT_WEB_VOICE_RATE_LIMIT_SECS.
 - 2026-03-30T06:40:53+02:00 — 2026-03-30: web cockpit now emits blocker transition alerts in the normalized snapshot as alerts[] plus meta.voice config, exposes optional /api/announcements/:alertId/audio ElevenLabs playback behind SGT_WEB_ELEVENLABS_API_KEY + SGT_WEB_ELEVENLABS_VOICE_ID, and keeps browser-local mute with backend event gating/rate limiting via SGT_WEB_VOICE_EVENT_KINDS and SGT_WEB_VOICE_RATE_LIMIT_SECS.
 - 2026-03-30T06:41:45+02:00 — 2026-03-30 issue #272 replaced the web topology placeholder with a live graph layer: backend topology snapshots now materialize rigs, workers, issues, PRs, blockers, and queue nodes/edges explicitly, and the browser renders them through a force-laid WebGL graph with click/hover focus plus a canvas fallback when WebGL init/support is unavailable.
+- 2026-03-30T06:49:29+02:00 — 2026-03-30 issue #272 replaced the operator-shell topology placeholder with a live force-laid graph: cockpit snapshots now emit explicit rig/worker/issue/PR/blocker/queue nodes and relationship edges, and the browser renders them through a WebGL node-edge pass with click/hover focus plus a canvas fallback when WebGL is unavailable.
+- 2026-03-30T06:54:49+02:00 — 2026-03-30: Web cockpit docs now explicitly document the canonical deploy path from repo web/ to /root/sgt/web via web/scripts/sync-live-copy.sh, including SGT_WEB_LIVE_DIR override and runtime config defaults; the repo-owned latest-main proof entrypoint is ./test_web_cockpit_latest_main_proof.sh, which runs npm --prefix web test plus a dry-run sync-helper check.
+- 2026-03-30T07:29:16+02:00 — Plan request sgt-1774848556-335e7d83 submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1774848556-335e7d83
+
+- Requested at: 2026-03-30T07:29:16+02:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# SGT Plan Request — Humanize and refine the SGT Web UI after cockpit v1
+
+## Goal
+
+Create a second-phase SGT plan focused on **improving the current cockpit UI so it feels more intentional, more human-designed, and less like generic AI-generated dashboard CSS**, while preserving the real-time monitoring work that already landed.
+
+This is not a greenfield rewrite. The verified cockpit foundation already exists. This phase is about:
+- design research,
+- anti-pattern identification,
+- layout hierarchy fixes,
+- visual refinement,
+- and a more human-looking operator shell.
+
+## Operator directives (explicit)
+
+The operator wants the current UI improved with these concrete changes:
+
+1. **The livestream should be the first part of the page**
+   - it should come before the alert center
+   - operator attention should land on live Mayor / polecat activity first
+2. **The title should not literally say "Jarvis Cockpit"**
+   - use: `SGT SGT Cockpit`
+3. **Less gradients**
+   - tone them down materially
+   - avoid over-stylized AI-dashboard glow soup
+4. **Less rounded corners**
+   - prefer square corners or only extremely light rounding (1–2px)
+5. **More use of color**
+   - use a stronger **triadic** color theme
+   - still dark mode
+   - still keep the blue as part of the palette
+
+## Critical product direction
+
+The first implementation step should **not** jump straight into visual tweaking.
+
+The operator explicitly wants a research-first lane that studies:
+- common AI-generated CSS / dashboard tells
+- what makes a UI feel obviously machine-generated
+- what to avoid to make the design feel more human-created
+- design prompt(s) or style rules derived from that research that guide the actual redesign
+
+## What this plan should do
+
+### 1. Research lane first
+
+The **first issue** should be a research/design-analysis issue for the SGT Web UI, covering at least:
+- common AI-generated CSS/dashboard tropes
+- common AI layout tells
+- common overused AI visual treatments in dark dashboards
+- what human-designed operator UIs tend to do differently
+- a distilled “avoid this / prefer this” list
+- one or more concrete design prompts or design principles for the redesign phase
+
+This first lane should answer questions like:
+- what visual patterns make dashboards look AI-generated?
+- how do we avoid generic glassmorphism / excessive gradients / over-rounded cards / glowy sci-fi cliché?
+- how do we keep the cockpit visually strong without making it look like prompt-slop?
+- what specific design rules should guide the next implementation lane?
+
+### 2. Layout hierarchy fix
+
+After research, the redesign must adjust the information hierarchy so that:
+- **live monitoring / livestream** is the first thing on the page
+- alerts remain important, but do not dominate the entry point
+- the page feels like an operator tool first, not an alert inbox
+
+### 3. Naming fix
+
+Replace the visible title/branding so it says:
+- `SGT SGT Cockpit`
+
+and remove the literal “Jarvis Cockpit” wording from the operator-facing UI.
+
+### 4. Visual refinement / humanization
+
+Redesign the current UI to feel more human-created and less AI-generated.
+
+Strong preferences:
+- dark mode stays
+- blue stays
+- triadic palette gets stronger/more intentional
+- reduce gradients materially
+- reduce corner radius materially
+- avoid “default AI dashboard” styling clichés
+
+### 5. Redesign implementation
+
+The redesign phase should be downstream from the research lane and should use the resulting design prompts / anti-pattern guidance rather than improvising blindly.
+
+## Scope constraints
+
+1. **Do not lose the real-time cockpit functionality**
+   - preserve the new streaming, monitors, blocker alerts, topology, and operator shell work already landed
+2. **Canonical source remains repo `web/`**
+   - no new divergent web tree
+3. **Deployment path remains explicit**
+   - if live `/root/sgt/web` must be updated after merge, document/sync it cleanly
+4. **Research must drive design**
+   - do not skip the anti-AI-CSS research lane
+5. **Avoid lazy neon-sci-fi clichés**
+   - the operator explicitly wants something that feels more intentional and less machine-generated
+
+## Suggested plan shape
+
+1. **Research common AI-generated dashboard/CSS tells**
+   - anti-pattern catalog
+   - human-design heuristics
+   - concrete design prompts / redesign rules
+2. **Refine layout hierarchy**
+   - livestream first, alert center secondary
+3. **Humanize the visual system**
+   - title change to `SGT SGT Cockpit`
+   - stronger dark triadic palette with blue retained
+   - much less gradient
+   - much less corner rounding
+4. **Implement redesign without regressing cockpit features**
+5. **Deploy/sync/update proof**
+   - ensure served copy reflects merged repo code
+
+## Completion condition
+
+This plan is complete only when:
+- the current SGT cockpit has been visually refined according to the operator’s direction,
+- the livestream is the first section of the page,
+- the title reads `SGT SGT Cockpit`,
+- the UI clearly avoids common AI-generated CSS/dashboard tells identified in the research step,
+- the palette is a stronger dark triadic theme that still includes blue,
+- gradients and corner radius are materially reduced,
+- and the updated UI is deployed/synced to the live served copy.
+
+## Acceptance criteria
+
+1. A first research issue exists and lands concrete findings on AI-generated CSS/dashboard tells, what to avoid, and design prompts/style rules for the redesign.
+2. The redesign is clearly derived from that research, not generic improvised styling.
+3. Live monitoring / livestream is the first section of the page.
+4. Operator-facing title reads exactly `SGT SGT Cockpit`.
+5. Gradients are materially reduced.
+6. Corner radius is materially reduced (prefer square / 1–2px rounding).
+7. The theme is dark, more colorful, triadic, and still retains blue.
+8. Real-time cockpit functionality remains intact.
+9. Live served UI is updated after merge.
+
+## Notes for Mayor
+
+This is intentionally a **phase-2 refinement plan** after the already-verified cockpit build. Treat it as a follow-on design/UX/humanization plan, not a replacement of the first cockpit plan.
+```
+- 2026-03-30T07:36:24+02:00 — 2026-03-30 issue #278 added web/docs/human-dashboard-redesign-rules.md as the canonical anti-pattern catalog and redesign rule set for the cockpit humanization pass: move live monitoring to the first section, title the shell SGT SGT Cockpit, materially reduce gradients/glow and corner radius, keep a dark triadic palette with blue retained, and preserve repo web/ -> /root/sgt/web sync as the deployment path.
+- 2026-03-30T07:40:23+02:00 — 2026-03-30 issue #280 moved the web cockpit live monitor ahead of Alert Center, renamed the visible shell title to SGT SGT Cockpit, remapped keyboard shortcut 1 to streams and 2 to overview, and re-synced the live served copy with web/scripts/sync-live-copy.sh.
+- 2026-03-30T07:43:50+02:00 — 2026-03-30 operator request: SGT should auto-detect truly stalled polecats and resling them, but must distinguish quiet long-running compute from real wedges. Live example: PMKB polecat pmkb-14ad1d1c looked frozen in WebUI, yet process-tree inspection showed codex exec plus active python realism/shadow report children at ~100% CPU. Needed fix: classify busy-long-running vs genuinely stalled, and only auto nuke/resling the latter.

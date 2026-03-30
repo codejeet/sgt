@@ -7,6 +7,12 @@ test("operator shell html includes cockpit sections and assets", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8");
   assert.match(html, /<title>SGT SGT Cockpit<\/title>/);
   assert.match(html, /<h1>SGT SGT Cockpit<\/h1>/);
+  assert.match(html, /Operator Console/);
+  assert.match(html, /Command Status/);
+  assert.match(html, /Topology Map/);
+  assert.doesNotMatch(html, /Jarvis Cockpit/i);
+  assert.doesNotMatch(html, /Command Pulse/);
+  assert.doesNotMatch(html, /Topology Radar/);
   assert.match(html, /section-overview/);
   assert.match(html, /section-streams/);
   assert.ok(html.indexOf('id="section-streams"') < html.indexOf('id="section-overview"'));
@@ -24,6 +30,9 @@ test("operator shell html includes cockpit sections and assets", () => {
   assert.match(html, /id="topologyCanvas"/);
   assert.match(html, /id="topologyOverlay"/);
   assert.match(html, /id="topologyFocus"/);
+  assert.match(html, /section section-streams active/);
+  assert.match(html, /section section-overview/);
+  assert.match(html, /section section-topology/);
   assert.match(html, /src="\/app\.js"/);
   assert.match(html, /href="\/styles\.css"/);
 });
@@ -48,4 +57,21 @@ test("operator shell script consumes snapshot and tmux stream events", () => {
   assert.match(script, /drawWebGlTopology/);
   assert.match(script, /handleTopologyPointerClick/);
   assert.match(script, /renderStreamDeck/);
+});
+
+test("operator shell styles reflect the research-backed humanization pass", () => {
+  const styles = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
+
+  assert.match(styles, /--radius:\s*3px/);
+  assert.match(styles, /--blue:\s*#63aafc/i);
+  assert.match(styles, /--amber:\s*#d9a441/i);
+  assert.match(styles, /--plum:\s*#ad7cff/i);
+  assert.match(styles, /\.section-streams\s*\{/);
+  assert.match(styles, /\.section-overview\s*\{/);
+  assert.match(styles, /\.section-topology\s*\{/);
+  assert.match(styles, /border-top:\s*2px solid rgba\(99, 170, 252, 0\.6\)/);
+  assert.match(styles, /border-radius:\s*2px/);
+  assert.doesNotMatch(styles, /Orbitron/);
+  assert.doesNotMatch(styles, /backdrop-filter/);
+  assert.doesNotMatch(styles, /999px/);
 });
