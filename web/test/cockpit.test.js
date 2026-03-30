@@ -5,7 +5,9 @@ const {
   BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
+  captureStreamTarget,
   computeStreamDelta,
+  resolveMayorLogPath,
 } = require('../lib/cockpit');
 
 test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology state', () => {
@@ -141,6 +143,58 @@ test('computeStreamDelta emits append-only chunks when possible and reset on div
   assert.deepEqual(computeStreamDelta('abc', 'abcdef'), { changed: true, reset: false, chunk: 'def' });
   assert.deepEqual(computeStreamDelta('abc', 'zbc'), { changed: true, reset: true, chunk: 'zbc' });
   assert.deepEqual(computeStreamDelta('abc', 'abc'), { changed: false, reset: false, chunk: '' });
+});
+
+test('resolveMayorLogPath maps shared and per-rig mayor targets to scoped log files', () => {
+  assert.equal(resolveMayorLogPath('mayor', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/mayor-start.log');
+  assert.equal(resolveMayorLogPath('mayor/alpha', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/mayors/alpha/mayor-start.log');
+  assert.equal(resolveMayorLogPath('witness/alpha', { configDir: '/tmp/.sgt' }), '');
+});
+
+test('captureStreamTarget falls back to mayor-start.log when the mayor pane is blank or unavailable', async () => {
+  const shared = await captureStreamTarget('mayor', {
+    configDir: '/tmp/.sgt',
+    capturePane: async () => '\n',
+    readMayorLog: async (logPath) => `tail:${logPath}`,
+  });
+  assert.equal(shared.available, true);
+  assert.equal(shared.source, 'mayor-log');
+  assert.equal(shared.content, 'tail:/tmp/.sgt/mayor-start.log');
+
+  const perRig = await captureStreamTarget('mayor/alpha', {
+    configDir: '/tmp/.sgt',
+    capturePane: async () => {
+      throw new Error('pane missing');
+    },
+    readMayorLog: async (logPath) => `tail:${logPath}`,
+  });
+  assert.equal(perRig.available, true);
+  assert.equal(perRig.source, 'mayor-log');
+  assert.equal(perRig.content, 'tail:/tmp/.sgt/mayors/alpha/mayor-start.log');
+});
+
+test('captureStreamTarget keeps pane content for non-mayor targets and non-blank mayor panes', async () => {
+  const witness = await captureStreamTarget('witness/sgt', {
+    configDir: '/tmp/.sgt',
+    capturePane: async () => 'witness output',
+    readMayorLog: async () => {
+      throw new Error('should not read mayor log');
+    },
+  });
+  assert.equal(witness.available, true);
+  assert.equal(witness.content, 'witness output');
+  assert.equal(witness.source, undefined);
+
+  const mayor = await captureStreamTarget('mayor', {
+    configDir: '/tmp/.sgt',
+    capturePane: async () => 'live mayor pane',
+    readMayorLog: async () => {
+      throw new Error('should not read mayor log');
+    },
+  });
+  assert.equal(mayor.available, true);
+  assert.equal(mayor.content, 'live mayor pane');
+  assert.equal(mayor.source, undefined);
 });
 
 test('TmuxStreamManager emits open, data, stale, and close lifecycle events', async () => {

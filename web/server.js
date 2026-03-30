@@ -10,11 +10,11 @@ const {
   BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
+  captureStreamTarget,
   listStateEntries,
   parseStatus,
   readAcceptanceBlockers,
   readRecentLogLines,
-  resolveStreamSession,
   tryReadJson,
 } = require('./lib/cockpit');
 
@@ -232,18 +232,12 @@ function safeSendMany(subscribers, obj) {
 
 const streamManager = new TmuxStreamManager({
   send: (subscribers, message) => safeSendMany(subscribers, message),
-  captureTarget: async (target) => {
-    const resolved = resolveStreamSession(target, { configDir: SGT_CONFIG });
-    if (!resolved) {
-      return { available: false, reason: 'unknown-target' };
-    }
-    try {
-      const output = await runCommand('tmux', ['capture-pane', '-t', resolved.session, '-p', '-S', '-200']);
-      return { available: true, session: resolved.session, content: output };
-    } catch {
-      return { available: false, reason: 'session-unavailable' };
-    }
-  },
+  captureTarget: (target) =>
+    captureStreamTarget(target, {
+      configDir: SGT_CONFIG,
+      capturePane: (session) => runCommand('tmux', ['capture-pane', '-t', session, '-p', '-S', '-200']),
+      readMayorLog: (logPath) => runCommand('tail', ['-n', '200', logPath]),
+    }),
 });
 
 app.get('/api/status', async (req, res) => {
