@@ -62,6 +62,7 @@ rsync_args=(
   -a
   --delete
   --exclude=node_modules/
+  --exclude=package-lock.json
   --exclude=webui.log
   --exclude=.DS_Store
 )

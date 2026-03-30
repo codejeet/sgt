@@ -37,7 +37,7 @@ Override the live target without editing the script:
 SGT_WEB_LIVE_DIR=/srv/sgt/web web/scripts/sync-live-copy.sh
 ```
 
-`web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, and runs `npm install` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
+`web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/`, `package-lock.json`, and `webui.log`, and runs `npm install` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
 
 ## Configuration
 
