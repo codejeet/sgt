@@ -681,6 +681,87 @@ _mayor_refresh_handoffs_dir() {
   echo "$(_mayor_scope_dir)/handoffs"
 }
 
+_mayor_effective_context_state_file() {
+  echo "$(_mayor_scope_dir)/mayor-effective-context.state"
+}
+
+_mayor_effective_context_threshold_tokens() {
+  local raw="${SGT_MAYOR_AUTO_REFRESH_THRESHOLD_TOKENS:-150000}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -le 0 ]]; then
+    raw="150000"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_effective_context_cooldown_secs() {
+  local raw="${SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS:-900}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -lt 0 ]]; then
+    raw="900"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_effective_context_state_read() {
+  local ts="" iso="" threshold="" measured_tokens="" measured_chars="" measured_lines="" fired="" decision="" handoff="" cooldown_until_ts="" cooldown_until_iso=""
+  local state_file
+  state_file="$(_mayor_effective_context_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts iso threshold measured_tokens measured_chars measured_lines fired decision handoff cooldown_until_ts cooldown_until_iso < "$state_file" 2>/dev/null || true
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$iso" \
+    "$threshold" \
+    "$measured_tokens" \
+    "$measured_chars" \
+    "$measured_lines" \
+    "$fired" \
+    "$decision" \
+    "$handoff" \
+    "$cooldown_until_ts" \
+    "$cooldown_until_iso"
+}
+
+_mayor_effective_context_state_write() {
+  local threshold="${1:-}" measured_tokens="${2:-}" measured_chars="${3:-}" measured_lines="${4:-}" fired="${5:-false}" decision="${6:-unknown}" handoff="${7:-}" cooldown_until_ts="${8:-}"
+  local state_file state_tmp now_epoch now_iso cooldown_until_iso=""
+  state_file="$(_mayor_effective_context_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  if [[ "$cooldown_until_ts" =~ ^[0-9]+$ ]]; then
+    cooldown_until_iso="$(date -u -d "@$cooldown_until_ts" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$now_epoch" \
+    "$now_iso" \
+    "$threshold" \
+    "$measured_tokens" \
+    "$measured_chars" \
+    "$measured_lines" \
+    "$fired" \
+    "$(_escape_wake_value "$decision")" \
+    "$handoff" \
+    "$cooldown_until_ts" \
+    "$cooldown_until_iso" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_effective_context_measure_file() {
+  local prompt_file="${1:-}"
+  local char_count line_count token_count
+  [[ -f "$prompt_file" ]] || {
+    printf '0|0|0\n'
+    return 1
+  }
+  char_count="$(wc -m < "$prompt_file" 2>/dev/null | tr -d '[:space:]')"
+  line_count="$(wc -l < "$prompt_file" 2>/dev/null | tr -d '[:space:]')"
+  [[ "$char_count" =~ ^[0-9]+$ ]] || char_count=0
+  [[ "$line_count" =~ ^[0-9]+$ ]] || line_count=0
+  token_count=$(( (char_count + 3) / 4 ))
+  printf '%s|%s|%s\n' "$token_count" "$char_count" "$line_count"
+}
+
 _mayor_refresh_token() {
   local now
   now="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')"
@@ -717,7 +798,7 @@ _mayor_refresh_archive_transients() {
 }
 
 _mayor_refresh_write_handoff() {
-  local handoff_file="${1:-}" handoff_token="${2:-}" was_running="${3:-false}" status_snapshot="${4:-}"
+  local handoff_file="${1:-}" handoff_token="${2:-}" was_running="${3:-false}" status_snapshot="${4:-}" refresh_kind="${5:-manual}" refresh_detail="${6:-operator-requested}"
   local scope_label scope_dir architecture generated_at event_log_path briefing_archive decisions_log
   local start_fail_ts start_fail_reason start_fail_attempt start_fail_log start_fail_detail
   local exit_ts exit_reason exit_code exit_signal exit_unexpected exit_pid exit_trigger exit_cycle_at exit_cycle_status
@@ -747,6 +828,8 @@ _mayor_refresh_write_handoff() {
 - architecture: $architecture
 - scope_dir: $scope_dir
 - mayor_was_running: $was_running
+- refresh_kind: $refresh_kind
+- refresh_detail: $refresh_detail
 - preserved_decision_log: $decisions_log
 - event_log: $event_log_path
 
@@ -7322,6 +7405,8 @@ cmd_status_json() {
       local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
       local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
       local review_watch_count review_watch_oldest review_watch_threshold
+      local ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso
+      local ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso
       mayor_alive="off"
       tmux has-session -t "$(_mayor_scope_session_name "$mayor_scope_rig")" 2>/dev/null && mayor_alive="on"
       IFS='|' read -r mayor_lock_state mayor_lock_owner mayor_lock_started mayor_lock_until <<< "$(_mayor_lock_snapshot)"
@@ -7347,7 +7432,8 @@ cmd_status_json() {
         (( notify_alert_age < 0 )) && notify_alert_age=0
       fi
       IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-      agents+=("{\"name\":$(_json_quote "mayor/$mayor_scope_rig"),\"rig\":$(_json_quote "$mayor_scope_rig"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+      IFS='|' read -r ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso <<< "$(_mayor_effective_context_state_read)"
+      agents+=("{\"name\":$(_json_quote "mayor/$mayor_scope_rig"),\"rig\":$(_json_quote "$mayor_scope_rig"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")},\"effective_context\":{\"timestamp\":$(_json_quote "$ctx_iso"),\"threshold_tokens\":$(_json_quote "$ctx_threshold"),\"measured_tokens\":$(_json_quote "$ctx_measured_tokens"),\"measured_chars\":$(_json_quote "$ctx_measured_chars"),\"measured_lines\":$(_json_quote "$ctx_measured_lines"),\"auto_refresh_fired\":$(_json_quote "$ctx_fired"),\"decision\":$(_json_quote "$ctx_decision"),\"handoff\":$(_json_quote "$ctx_handoff"),\"cooldown_until\":$(_json_quote "$ctx_cooldown_iso")}}")
     done
     _mayor_scope_apply ""
   else
@@ -7378,6 +7464,7 @@ cmd_status_json() {
       fi
     fi
     local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+    local ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso
     IFS='|' read -r notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open <<< "$(_mayor_notify_alert_state_read)"
     notify_alert_age=""
     if [[ "$notify_alert_ts" =~ ^[0-9]+$ ]]; then
@@ -7388,7 +7475,8 @@ cmd_status_json() {
     fi
     local review_watch_count review_watch_oldest review_watch_threshold
     IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-    agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+    IFS='|' read -r ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso <<< "$(_mayor_effective_context_state_read)"
+    agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")},\"effective_context\":{\"timestamp\":$(_json_quote "$ctx_iso"),\"threshold_tokens\":$(_json_quote "$ctx_threshold"),\"measured_tokens\":$(_json_quote "$ctx_measured_tokens"),\"measured_chars\":$(_json_quote "$ctx_measured_chars"),\"measured_lines\":$(_json_quote "$ctx_measured_lines"),\"auto_refresh_fired\":$(_json_quote "$ctx_fired"),\"decision\":$(_json_quote "$ctx_decision"),\"handoff\":$(_json_quote "$ctx_handoff"),\"cooldown_until\":$(_json_quote "$ctx_cooldown_iso")}}")
   fi
 
   local df dname
@@ -7693,6 +7781,13 @@ _cmd_status_human() {
       else
         printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
       fi
+      IFS='|' read -r ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso <<< "$(_mayor_effective_context_state_read)"
+      if [[ -n "$ctx_threshold" || -n "$ctx_measured_tokens" || -n "$ctx_decision" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "effective context: threshold=${ctx_threshold:-unknown}t measured=${ctx_measured_tokens:-unknown}t chars=${ctx_measured_chars:-unknown} fired=${ctx_fired:-false} decision=${ctx_decision:-unknown}" "$(_reset)"
+        if [[ -n "$ctx_cooldown_iso" || -n "$ctx_handoff" ]]; then
+          printf "  %-16s %s%s%s\n" "" "$(_dim)" "cooldown_until=${ctx_cooldown_iso:-none} handoff=${ctx_handoff:-none}" "$(_reset)"
+        fi
+      fi
     done
     _mayor_scope_apply ""
   else
@@ -7745,6 +7840,7 @@ _cmd_status_human() {
       printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "decision-log warning: ${log_fail_age}s ago context=$log_fail_context error=$log_fail_error" "$(_reset)"
     fi
     local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+    local ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso
     IFS='|' read -r notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open <<< "$(_mayor_notify_alert_state_read)"
     if [[ "$notify_alert_ts" =~ ^[0-9]+$ ]]; then
       notify_alert_age=$(( $(date +%s) - notify_alert_ts ))
@@ -7759,6 +7855,13 @@ _cmd_status_human() {
       printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "review watchdog: ${review_watch_count} stalled REVIEW_UNCLEAR (oldest=${review_watch_oldest}s threshold>=${review_watch_threshold}s)" "$(_reset)"
     else
       printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
+    fi
+    IFS='|' read -r ctx_ts ctx_iso ctx_threshold ctx_measured_tokens ctx_measured_chars ctx_measured_lines ctx_fired ctx_decision ctx_handoff ctx_cooldown_ts ctx_cooldown_iso <<< "$(_mayor_effective_context_state_read)"
+    if [[ -n "$ctx_threshold" || -n "$ctx_measured_tokens" || -n "$ctx_decision" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "effective context: threshold=${ctx_threshold:-unknown}t measured=${ctx_measured_tokens:-unknown}t chars=${ctx_measured_chars:-unknown} fired=${ctx_fired:-false} decision=${ctx_decision:-unknown}" "$(_reset)"
+      if [[ -n "$ctx_cooldown_iso" || -n "$ctx_handoff" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "cooldown_until=${ctx_cooldown_iso:-none} handoff=${ctx_handoff:-none}" "$(_reset)"
+      fi
     fi
   fi
   if _mayor_rig_activity_enabled; then
@@ -11044,6 +11147,129 @@ _mayor_briefing_content_for_prompt() {
   _mayor_live_status_briefing_fallback "$briefing_path"
 }
 
+_mayor_write_ai_cycle_prompt() {
+  local prompt_file="${1:-}" issues_found="${2:-}" actions_taken="${3:-}" snapshot_freshness="${4:-}" acceptance_blockers_prompt="${5:-}" briefing_content="${6:-}"
+  [[ -n "$prompt_file" ]] || return 1
+  cat > "$prompt_file" <<MAYORMD
+# Mayor — Emergency Decision
+
+Issues requiring your judgment:
+$(echo -e "$issues_found")
+
+Recent actions already taken:
+$(echo -e "$actions_taken")
+
+Snapshot freshness notes:
+$(echo -e "${snapshot_freshness:-  - none}")
+
+Known unresolved acceptance blockers:
+$(echo -e "${acceptance_blockers_prompt:-  - none}")
+
+## System State
+$briefing_content
+
+## Commands
+- \`sgt sling <rig> "<task>"\` — Dispatch work
+- \`sgt plan tick <rig>\` — Deterministically dispatch ready plan tasks from repo-local \`SGT_PLAN.json\`
+- \`sgt nuke <polecat>\` — Kill stuck worker
+- \`sgt sweep\` — Clean finished workers
+- \`sgt mayor merge <pr#> --repo <repo>\` — Merge PR with post-action live receipt fence
+- \`sgt mayor request list\` — Show pending plan requests
+- \`sgt mayor request ask <request-id> "<question>"\` — Ask the requesting OpenClaw agent for clarification
+- \`sgt mayor request complete <request-id>\` — Mark a plan request complete after writing \`SGT_PLAN.json\`
+
+Decide what to do. Log decisions to $(_mayor_scope_dir)/mayor-decisions.log. Be fast.
+
+For each pending plan request, turn the request into a repo-local \`SGT_PLAN.json\` inside the rig repo when the request is clear enough.
+For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
+If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
+After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
+If a repo-local plan declares \`completion_condition\` / \`acceptance\`, treat closed issues and merged PRs as insufficient until acceptance is \`verified\`, \`waived\`, or explicitly \`blocked\` by a human.
+
+If an issue/PR just merged, you should proactively:
+- queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
+- prefer keeping each issue small enough for an overnight polecat
+
+An unresolved acceptance blocker means verified user-facing acceptance is still red.
+Do not treat an empty board as success while any blocker remains open.
+If a blocker has no active work left, recreate actionable follow-up work or a plan before standing down.
+
+After deciding, report your actions: sgt mayor notify "<summary of what you did>"
+MAYORMD
+}
+
+_mayor_schedule_restart_after_refresh() {
+  local scope_rig="${1:-}" wake_reason="${2:-auto-refresh}"
+  local sgt_exec
+  sgt_exec="$(_sgt_exec_path)"
+  (
+    sleep 1
+    if [[ -n "$scope_rig" ]]; then
+      SGT_ROOT="$SGT_ROOT" "$sgt_exec" mayor start "$scope_rig" >/dev/null 2>&1 || true
+    else
+      SGT_ROOT="$SGT_ROOT" "$sgt_exec" mayor start >/dev/null 2>&1 || true
+    fi
+    SGT_ROOT="$SGT_ROOT" "$sgt_exec" wake-mayor "$wake_reason" >/dev/null 2>&1 || true
+  ) >/dev/null 2>&1 &
+}
+
+_mayor_auto_refresh_for_prompt() {
+  local prompt_file="${1:-}" wake_reason="${2:-periodic}"
+  local threshold_tokens cooldown_secs measured_tokens measured_chars measured_lines
+  local state_ts state_iso state_threshold state_measured_tokens state_measured_chars state_measured_lines state_fired state_decision state_handoff state_cooldown_ts state_cooldown_iso
+  local now_epoch handoff_token handoff_dir handoff_file status_snapshot cooldown_until refresh_reason
+
+  threshold_tokens="$(_mayor_effective_context_threshold_tokens)"
+  cooldown_secs="$(_mayor_effective_context_cooldown_secs)"
+  IFS='|' read -r measured_tokens measured_chars measured_lines <<< "$(_mayor_effective_context_measure_file "$prompt_file")"
+  IFS='|' read -r state_ts state_iso state_threshold state_measured_tokens state_measured_chars state_measured_lines state_fired state_decision state_handoff state_cooldown_ts state_cooldown_iso <<< "$(_mayor_effective_context_state_read)"
+  now_epoch="$(date +%s)"
+
+  if [[ ! "$measured_tokens" =~ ^[0-9]+$ ]]; then
+    measured_tokens=0
+  fi
+  if [[ ! "$state_cooldown_ts" =~ ^[0-9]+$ ]]; then
+    state_cooldown_ts=0
+  fi
+
+  if (( measured_tokens < threshold_tokens )); then
+    _mayor_effective_context_state_write "$threshold_tokens" "$measured_tokens" "$measured_chars" "$measured_lines" "false" "below-threshold" "" "$state_cooldown_ts"
+    log_event "MAYOR_EFFECTIVE_CONTEXT threshold_tokens=$threshold_tokens measured_tokens=$measured_tokens measured_chars=$measured_chars measured_lines=$measured_lines fired=false decision=below-threshold cooldown_remaining=$(( state_cooldown_ts > now_epoch ? state_cooldown_ts - now_epoch : 0 ))s"
+    printf 'continue|below-threshold|%s|%s|%s|\n' "$threshold_tokens" "$measured_tokens" "$measured_chars"
+    return 0
+  fi
+
+  if (( cooldown_secs > 0 && state_cooldown_ts > now_epoch )); then
+    _mayor_effective_context_state_write "$threshold_tokens" "$measured_tokens" "$measured_chars" "$measured_lines" "false" "cooldown-suppressed" "$state_handoff" "$state_cooldown_ts"
+    log_event "MAYOR_EFFECTIVE_CONTEXT threshold_tokens=$threshold_tokens measured_tokens=$measured_tokens measured_chars=$measured_chars measured_lines=$measured_lines fired=false decision=cooldown-suppressed cooldown_remaining=$(( state_cooldown_ts - now_epoch ))s handoff=\"$(_escape_quotes "${state_handoff:-}")\""
+    printf 'continue|cooldown-suppressed|%s|%s|%s|%s\n' "$threshold_tokens" "$measured_tokens" "$measured_chars" "${state_handoff:-}"
+    return 0
+  fi
+
+  handoff_token="$(_mayor_refresh_token)"
+  handoff_dir="$(_mayor_refresh_handoffs_dir)/$handoff_token"
+  handoff_file="$handoff_dir/handoff.md"
+  mkdir -p "$handoff_dir"
+
+  status_snapshot="$(cmd_status 2>&1 || true)"
+  _mayor_dispatch_snapshot_file "$(_mayor_scope_dir)/mayor-dispatch-snapshot.tsv" || true
+  _mayor_refresh_archive_transients "$handoff_dir" >/dev/null || true
+  _mayor_refresh_write_handoff "$handoff_file" "$handoff_token" "true" "$status_snapshot" "auto-threshold" "effective_context_tokens=${measured_tokens} threshold_tokens=${threshold_tokens} measured_chars=${measured_chars} measured_lines=${measured_lines}"
+  cooldown_until=$(( now_epoch + cooldown_secs ))
+  _mayor_effective_context_state_write "$threshold_tokens" "$measured_tokens" "$measured_chars" "$measured_lines" "true" "auto-refreshed" "$handoff_file" "$cooldown_until"
+  log_event "MAYOR_EFFECTIVE_CONTEXT threshold_tokens=$threshold_tokens measured_tokens=$measured_tokens measured_chars=$measured_chars measured_lines=$measured_lines fired=true decision=auto-refreshed cooldown_until=${cooldown_until} handoff=\"$(_escape_quotes "$handoff_file")\""
+  log_event "MAYOR_REFRESH scope=${SGT_MAYOR_SCOPE_RIG:-shared} running_before=true handoff=\"$(_escape_quotes "$handoff_file")\" kind=auto-threshold threshold_tokens=$threshold_tokens measured_tokens=$measured_tokens measured_chars=$measured_chars measured_lines=$measured_lines"
+  _mayor_record_decision "MAYOR AUTO REFRESH fired=true threshold_tokens=$threshold_tokens measured_tokens=$measured_tokens measured_chars=$measured_chars measured_lines=$measured_lines handoff=\"$(_escape_quotes "$handoff_file")\"" "effective-context-refresh" "$SGT_ROOT" || true
+
+  if [[ -n "${SGT_MAYOR_SCOPE_RIG:-}" ]]; then
+    refresh_reason="auto-refresh|rig=${SGT_MAYOR_SCOPE_RIG}|handoff=$handoff_token|trigger=$wake_reason|measured_tokens=$measured_tokens|threshold_tokens=$threshold_tokens"
+  else
+    refresh_reason="auto-refresh|handoff=$handoff_token|trigger=$wake_reason|measured_tokens=$measured_tokens|threshold_tokens=$threshold_tokens"
+  fi
+  _mayor_schedule_restart_after_refresh "${SGT_MAYOR_SCOPE_RIG:-}" "$refresh_reason"
+  printf 'refreshed|auto-refreshed|%s|%s|%s|%s\n' "$threshold_tokens" "$measured_tokens" "$measured_chars" "$handoff_file"
+}
+
 _mayor_ai_cycle_timeout_secs() {
   local raw="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}"
   if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -eq 0 ]]; then
@@ -12083,7 +12309,7 @@ _mayor_loop() {
       mkdir -p "$mayor_workspace"
       _mayor_dispatch_snapshot_file "$dispatch_snapshot_file"
 
-      local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path briefing_content
+      local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path briefing_content prompt_file auto_refresh_result auto_refresh_status auto_refresh_decision auto_refresh_threshold auto_refresh_measured_tokens auto_refresh_measured_chars auto_refresh_handoff
       if ! briefing_gate="$(_mayor_prepare_briefing_for_cycle)"; then
         IFS='|' read -r briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path <<< "${briefing_gate:-$(_mayor_scope_dir)/mayor-briefing.md|invalid|unknown|-1|$(_mayor_briefing_stale_secs)|true|aborted}"
         echo "[mayor] AI cycle aborted — briefing freshness gate failed (status=${briefing_status:-invalid} age=${briefing_age:-unknown}s threshold=${briefing_threshold:-unknown}s path=${briefing_path:-aborted})"
@@ -12097,53 +12323,17 @@ _mayor_loop() {
       echo "[mayor] briefing freshness gate path=${briefing_path} stale_detected=${briefing_stale_detected} age=${briefing_age}s threshold=${briefing_threshold}s generated_at=${briefing_generated_at}"
       log_event "MAYOR_BRIEFING_GATE_STATUS path=${briefing_path} stale_detected=${briefing_stale_detected} status=${briefing_status} generated_at=\"$(_escape_quotes "${briefing_generated_at}")\" age=${briefing_age}s threshold=${briefing_threshold}s"
       briefing_content="$(_mayor_briefing_content_for_prompt "$briefing")"
-
-      cat > "$mayor_workspace/CLAUDE.md" <<MAYORMD
-# Mayor — Emergency Decision
-
-Issues requiring your judgment:
-$(echo -e "$issues_found")
-
-Recent actions already taken:
-$(echo -e "$actions_taken")
-
-Snapshot freshness notes:
-$(echo -e "${snapshot_freshness:-  - none}")
-
-Known unresolved acceptance blockers:
-$(echo -e "${acceptance_blockers_prompt:-  - none}")
-
-## System State
-$briefing_content
-
-## Commands
-- \`sgt sling <rig> "<task>"\` — Dispatch work
-- \`sgt plan tick <rig>\` — Deterministically dispatch ready plan tasks from repo-local \`SGT_PLAN.json\`
-- \`sgt nuke <polecat>\` — Kill stuck worker
-- \`sgt sweep\` — Clean finished workers
-- \`sgt mayor merge <pr#> --repo <repo>\` — Merge PR with post-action live receipt fence
-- \`sgt mayor request list\` — Show pending plan requests
-- \`sgt mayor request ask <request-id> "<question>"\` — Ask the requesting OpenClaw agent for clarification
-- \`sgt mayor request complete <request-id>\` — Mark a plan request complete after writing \`SGT_PLAN.json\`
-
-Decide what to do. Log decisions to $(_mayor_scope_dir)/mayor-decisions.log. Be fast.
-
-For each pending plan request, turn the request into a repo-local \`SGT_PLAN.json\` inside the rig repo when the request is clear enough.
-For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
-If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
-After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
-If a repo-local plan declares \`completion_condition\` / \`acceptance\`, treat closed issues and merged PRs as insufficient until acceptance is \`verified\`, \`waived\`, or explicitly \`blocked\` by a human.
-
-If an issue/PR just merged, you should proactively:
-- queue the next 1–3 highest-leverage issues (write crisp acceptance criteria)
-- prefer keeping each issue small enough for an overnight polecat
-
-An unresolved acceptance blocker means verified user-facing acceptance is still red.
-Do not treat an empty board as success while any blocker remains open.
-If a blocker has no active work left, recreate actionable follow-up work or a plan before standing down.
-
-After deciding, report your actions: sgt mayor notify "<summary of what you did>"
-MAYORMD
+      prompt_file="$mayor_workspace/CLAUDE.md"
+      _mayor_write_ai_cycle_prompt "$prompt_file" "$issues_found" "$actions_taken" "${snapshot_freshness:-  - none}" "${acceptance_blockers_prompt:-  - none}" "$briefing_content"
+      auto_refresh_result="$(_mayor_auto_refresh_for_prompt "$prompt_file" "$wake_reason")"
+      IFS='|' read -r auto_refresh_status auto_refresh_decision auto_refresh_threshold auto_refresh_measured_tokens auto_refresh_measured_chars auto_refresh_handoff <<< "$auto_refresh_result"
+      echo "[mayor] effective context threshold=${auto_refresh_threshold}t measured=${auto_refresh_measured_tokens}t chars=${auto_refresh_measured_chars} decision=${auto_refresh_decision}"
+      if [[ "$auto_refresh_status" == "refreshed" ]]; then
+        echo "[mayor] auto-refresh fired — handoff saved to ${auto_refresh_handoff:-unknown}; exiting current loop for clean restart"
+        _mayor_last_cycle_state_write "$wake_reason" "auto-refreshed" || true
+        _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
+        return 0
+      fi
 
       local backend="$(_ai_backend_default)"
 
@@ -12550,7 +12740,7 @@ _cmd_mayor_refresh_one() {
   _mayor_build_briefing >/dev/null || true
   _mayor_scope_apply "$scope_rig"
   _mayor_refresh_archive_transients "$handoff_dir" >/dev/null || true
-  _mayor_refresh_write_handoff "$handoff_file" "$handoff_token" "$was_running" "$status_snapshot"
+  _mayor_refresh_write_handoff "$handoff_file" "$handoff_token" "$was_running" "$status_snapshot" "manual" "operator-requested"
   log_event "MAYOR_REFRESH scope=${scope_rig:-shared} running_before=$was_running handoff=\"$(_escape_quotes "$handoff_file")\""
 
   _cmd_mayor_start_one "$scope_rig"

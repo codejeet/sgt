@@ -265,6 +265,10 @@ Mayor AI briefing generation also has a strict freshness gate:
 - Structured freshness telemetry is emitted on each path:
   - `MAYOR_BRIEFING_GATE stale_detected=<true|false> path=<fresh|refreshed|aborted> status=<fresh|stale|invalid|missing> generated_at="..." age=<n>s threshold=<n>s refresh_attempted=<true|false> ...`
   - `MAYOR_BRIEFING_GATE_STATUS path=<...> stale_detected=<...> status=<...> generated_at="..." age=<n>s threshold=<n>s` (just before AI invoke).
+- Mayor also measures the exact runtime AI prompt file (`mayor-workspace/CLAUDE.md`) before each AI invoke and estimates effective context as `ceil(chars/4)` tokens.
+- If measured effective context meets or exceeds `SGT_MAYOR_AUTO_REFRESH_THRESHOLD_TOKENS` (default `150000`), Mayor auto-triggers the same handoff/archive refresh path used by `sgt mayor refresh`, records a durable handoff, schedules a clean restart+wake, and skips sending the oversized prompt to the model.
+- Auto-refresh thrash protection is controlled by `SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS` (default `900`), and each check emits `MAYOR_EFFECTIVE_CONTEXT threshold_tokens=<...> measured_tokens=<...> measured_chars=<...> measured_lines=<...> fired=<true|false> decision=<below-threshold|cooldown-suppressed|auto-refreshed> ...`.
+- `sgt status` and `sgt status --json` expose the latest effective-context telemetry under each Mayor entry: threshold, measured size, last decision, whether auto-refresh fired, handoff path, and cooldown deadline.
 - If the briefing file is missing/unreadable at prompt-render time, mayor now injects a live fallback briefing (instead of `cat` errors), including deacon heartbeat health, merge queue depth, and active polecat count.
 - Fallback path emits `MAYOR_BRIEFING_FALLBACK reason=briefing-unavailable path="<...>"` telemetry and still includes a full live `sgt status` snapshot for AI context.
 
@@ -544,6 +548,11 @@ Optional per-rig Mayor architecture:
 - In that mode, sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises each `sgt-mayor-<rig>` independently, and `sgt status` / `sgt status --json` expose entries like `mayor/pmkb` or `mayor/sgt`.
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
+- Latest-main proof for both manual refresh and runtime threshold auto-refresh:
+
+```bash
+./test_mayor_refresh_latest_main_proof.sh
+```
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
