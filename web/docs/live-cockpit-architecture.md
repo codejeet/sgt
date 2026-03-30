@@ -135,7 +135,7 @@ Locked behavior:
 
 ### 8. UI shell direction
 
-The cockpit should replace the current generic control panel framing with a denser JARVIS-style operations shell, while preserving practical operator workflows.
+The cockpit should keep the dense operator-shell direction, but the next refinement pass must be driven by the explicit anti-pattern research in [`web/docs/human-dashboard-redesign-rules.md`](human-dashboard-redesign-rules.md) instead of leaning further into generic JARVIS/sci-fi dashboard styling.
 
 Locked UI constraints:
 
@@ -143,6 +143,10 @@ Locked UI constraints:
 - prioritize dense, scannable live-state presentation over decorative motion
 - maintain keyboard-friendly workflows
 - clearly distinguish healthy, active, stale, blocked, and critical states
+- make live monitoring the first major section operators encounter
+- use the visible title `SGT SGT Cockpit`
+- materially reduce gradients, glow, blur, and over-rounded surfaces
+- keep the palette dark and intentionally triadic while retaining blue
 
 ## Implementation Sequence
 
@@ -192,4 +196,5 @@ This proof path is intentionally narrow:
 - Do not split the app into multiple deployables for this plan.
 - Do not bypass the backend for tmux streaming, blocker state, or topology state.
 - Do not make ElevenLabs or WebGL a requirement for baseline operator use.
+- Do not improvise the redesign from taste alone; use the anti-pattern catalog and redesign rules in `web/docs/human-dashboard-redesign-rules.md`.
 - Do not treat a merged intermediate PR as final cockpit completion while plan acceptance remains pending.
