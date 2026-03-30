@@ -3,6 +3,7 @@
 SGT Web UI is a small, dependency-light **real-time operator shell** for SGT (Simple GitHub Gastown): monitor Mayor and workers live, surface blockers and queue state, tail logs, inspect topology relationships, and dispatch new work.
 
 For the locked follow-on cockpit architecture and deployment path, see [`web/docs/live-cockpit-architecture.md`](docs/live-cockpit-architecture.md).
+For the research-first redesign constraints that govern the next visual refinement pass, see [`web/docs/human-dashboard-redesign-rules.md`](docs/human-dashboard-redesign-rules.md).
 
 ## Quick start
 
@@ -90,12 +91,25 @@ That proof path bundles:
 - **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
 - **Dispatch** — Sling polecats and dogs without leaving the shell
 
+## Redesign Direction
+
+Issue `#278` locks the next UI pass to an explicit research-first rule set rather than ad hoc style tweaking.
+
+- catalog and remove common AI-generated dashboard tells
+- move live monitoring to the first major section on page load
+- change the visible operator title to `SGT SGT Cockpit`
+- materially reduce gradients and corner radius
+- keep the shell dark, but use a stronger triadic palette that still includes blue
+- preserve the existing real-time monitoring, blocker, topology, and dispatch capabilities
+- keep repo `web/` canonical and sync the served copy with `web/scripts/sync-live-copy.sh`
+
 ## Theme
 
-The UI uses a dense **dark HUD / JARVIS-inspired** shell:
-- display typography via Orbitron for cockpit headers
-- IBM Plex Sans / Mono for readable dense operational content
-- cyan, amber, lime, and red accents reserved for live state and alert severity
+The current UI uses a dense dark cockpit shell. The follow-on refinement issue should use the redesign rules above to reduce generic JARVIS/AI-dashboard styling while preserving the core operator workflows.
+
+- display typography is available for selective emphasis, not broad decorative use
+- IBM Plex Sans / Mono remain the readability baseline for dense operational content
+- accent colors should stay semantic and become more intentionally distributed in the next pass
 
 ## Screenshots
 
