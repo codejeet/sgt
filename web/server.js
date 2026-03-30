@@ -2,8 +2,19 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
 const fs = require('fs');
+const { execFile } = require('child_process');
+
+const {
+  TmuxStreamManager,
+  buildCockpitSnapshot,
+  listStateEntries,
+  parseStatus,
+  readAcceptanceBlockers,
+  readRecentLogLines,
+  resolveStreamSession,
+  tryReadJson,
+} = require('./lib/cockpit');
 
 const app = express();
 const server = http.createServer(app);
@@ -14,11 +25,14 @@ const SGT_ROOT = process.env.SGT_ROOT || path.join(process.env.HOME, 'sgt');
 const SGT_BIN = process.env.SGT_BIN || path.join(SGT_ROOT, 'sgt');
 const SGT_CONFIG = path.join(SGT_ROOT, '.sgt');
 const SGT_LOG = path.join(SGT_ROOT, 'sgt.log');
+const COCKPIT_VERSION = '2026-03-30';
+const WS_INTERVAL = 3000;
+const WS_PING_INTERVAL = 15000;
+const WS_PONG_GRACE = 35000;
+const LOG_TAIL_LINES = 120;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-
-// --- Helpers ---
 
 function runSgt(args) {
   return new Promise((resolve, reject) => {
@@ -32,347 +46,338 @@ function runSgt(args) {
   });
 }
 
-function readStateFile(filePath) {
-  try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    const state = {};
-    for (const line of content.split('\n')) {
-      const eq = line.indexOf('=');
-      if (eq > 0) {
-        state[line.slice(0, eq)] = line.slice(eq + 1);
+async function runCommand(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 5000, env: process.env }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(stderr || err.message));
+      } else {
+        resolve(stdout);
       }
-    }
-    return state;
-  } catch {
-    return null;
-  }
+    });
+  });
 }
 
-function readDir(dir) {
+async function readStatusBundle() {
+  let statusRaw = '';
+  let statusJson = null;
+
   try {
-    return fs.readdirSync(dir).filter(f => !f.startsWith('.'));
+    statusRaw = await runSgt(['status', '--json']);
+    statusJson = JSON.parse(statusRaw);
+  } catch {
+    statusRaw = await runSgt(['status']);
+  }
+
+  return { statusRaw, statusJson };
+}
+
+async function readRigs() {
+  try {
+    const output = await runSgt(['rig', 'list']);
+    const rigs = [];
+    const lines = output.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = lines[i].match(/^\s+(\S+)\s+(https?:\/\/.+)$/);
+      if (!match) continue;
+      const rig = { name: match[1], repo: match[2] };
+      if (i + 1 < lines.length) {
+        const detail = lines[i + 1].match(/polecats:\s*(\d+)\s+witness:\s*(\w+)\s+refinery:\s*(\w+)/);
+        if (detail) {
+          rig.polecats = Number(detail[1]);
+          rig.witness = detail[2];
+          rig.refinery = detail[3];
+        }
+      }
+      rigs.push(rig);
+    }
+    return rigs;
   } catch {
     return [];
   }
 }
 
-// --- API: Status (parsed from sgt status output) ---
+async function buildSnapshot() {
+  const [{ statusRaw, statusJson }, rigs] = await Promise.all([readStatusBundle(), readRigs()]);
+  return buildCockpitSnapshot({
+    statusJson,
+    statusRaw,
+    rigs,
+    blockers: readAcceptanceBlockers(SGT_CONFIG),
+    recentLogs: readRecentLogLines(SGT_LOG, LOG_TAIL_LINES),
+    version: COCKPIT_VERSION,
+  });
+}
+
+function toLegacyStatusPayload(snapshot) {
+  return {
+    agents: snapshot.agents.map((agent) => ({
+      name: agent.name,
+      status: agent.status,
+      heartbeat: agent.heartbeat || undefined,
+    })),
+    polecats: snapshot.workers
+      .filter((worker) => worker.role === 'polecat')
+      .map((worker) => ({
+        name: worker.name,
+        alive: worker.status,
+        issue: worker.issue ? `#${worker.issue}` : '',
+        branch: worker.branch,
+        rig: worker.rig,
+        pr: worker.pr && worker.pr.number ? `#${worker.pr.number}` : '',
+      })),
+    dogs: snapshot.workers
+      .filter((worker) => worker.role === 'dog')
+      .map((worker) => ({
+        name: worker.name,
+        alive: worker.status,
+        issue: worker.issue ? `#${worker.issue}` : '',
+        rig: worker.rig,
+      })),
+    mergeQueue: snapshot.queue.items.map((item) => ({
+      name: item.name || '',
+      detail: item.detail || '',
+    })),
+  };
+}
+
+function safeSend(ws, obj) {
+  if (!ws || ws.readyState !== 1) return;
+  try {
+    ws.send(JSON.stringify(obj));
+  } catch {}
+}
+
+function safeSendMany(subscribers, obj) {
+  if (!subscribers) return;
+  for (const ws of subscribers) {
+    safeSend(ws, obj);
+  }
+}
+
+const streamManager = new TmuxStreamManager({
+  send: (subscribers, message) => safeSendMany(subscribers, message),
+  captureTarget: async (target) => {
+    const resolved = resolveStreamSession(target, { configDir: SGT_CONFIG });
+    if (!resolved) {
+      return { available: false, reason: 'unknown-target' };
+    }
+    try {
+      const output = await runCommand('tmux', ['capture-pane', '-t', resolved.session, '-p', '-S', '-200']);
+      return { available: true, session: resolved.session, content: output };
+    } catch {
+      return { available: false, reason: 'session-unavailable' };
+    }
+  },
+});
 
 app.get('/api/status', async (req, res) => {
   try {
-    const output = await runSgt(['status']);
-    res.json({ raw: output, parsed: parseStatus(output) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const { statusRaw, statusJson } = await readStatusBundle();
+    res.json({ raw: statusRaw, parsed: statusJson || parseStatus(statusRaw) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-function parseStatus(raw) {
-  // Supports both legacy (=== Agents ===) and current box-drawing output.
-  const result = { agents: [], polecats: [], dogs: [], crew: [], mergeQueue: [] };
-  let section = null;
-
-  function setSectionFromHeader(line) {
-    // Legacy headers
-    if (line.startsWith('=== Agents ===')) return 'agents';
-    if (line.startsWith('=== Dogs ===')) return 'dogs';
-    if (line.startsWith('=== Crew ===')) return 'crew';
-    if (line.startsWith('=== Merge Queue')) return 'mergeQueue';
-    if (line.startsWith('=== Polecats ===')) return 'polecats';
-
-    // New headers
-    const mh = line.match(/^╭─\s+(.+?)\s+─/);
-    if (!mh) return null;
-    const title = mh[1].trim();
-    if (title === 'Agents') return 'agents';
-    if (title === 'Dogs') return 'dogs';
-    if (title === 'Crew') return 'crew';
-    if (title.startsWith('Merge Queue')) return 'mergeQueue';
-    if (title === 'Polecats') return 'polecats';
-    return null;
+app.get('/api/cockpit', async (req, res) => {
+  try {
+    res.json(await buildSnapshot());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  for (const line of raw.split('\n')) {
-    const maybe = setSectionFromHeader(line);
-    if (maybe) { section = maybe; continue; }
-
-    if (line.startsWith('»') || line.trim() === '') continue;
-    if (line.trim() === 'none' || line.trim() === 'empty') continue;
-    if (line.startsWith('1 polecat') || line.includes('polecat(s) tracked')) continue;
-
-    if (section === 'agents') {
-      // Legacy: "  daemon:  on (pid ...)"
-      const mLegacy = line.match(/^\s+(\S+):\s+(.+)$/);
-      if (mLegacy) {
-        result.agents.push({ name: mLegacy[1], status: mLegacy[2].trim() });
-        continue;
-      }
-
-      // New: "  daemon           on  (pid ...)" or "  witness/sgt      on"
-      const m = line.match(/^\s{2,}([^\s]+)\s{2,}(.+?)\s*$/);
-      if (m) {
-        const name = m[1].trim();
-        const status = m[2].trim();
-        // heartbeat line is indented further
-        if (name === 'last' && status.startsWith('heartbeat:')) {
-          // ignore (handled below)
-        } else {
-          result.agents.push({ name, status });
-        }
-        continue;
-      }
-
-      if (line.includes('last heartbeat:')) {
-        const hb = line.match(/last heartbeat:\s+(.+)/);
-        if (hb && result.agents.length > 0) {
-          result.agents[result.agents.length - 1].heartbeat = hb[1].trim();
-        }
-      }
-
-    } else if (section === 'polecats') {
-      // Legacy detailed block
-      const pmLegacy = line.match(/^\s+(\S+)\s+\[(\w+)\]/);
-      if (pmLegacy) {
-        result.polecats.push({ name: pmLegacy[1], alive: pmLegacy[2] });
-        continue;
-      }
-      if (result.polecats.length > 0) {
-        const last = result.polecats[result.polecats.length - 1];
-        const kv = line.match(/^\s+(\w+):\s+(.+)/);
-        if (kv) { last[kv[1]] = kv[2].trim(); continue; }
-      }
-
-      // New compact polecat line: "  thrembo-voice-ui-b007867c alive  #2  sgt/thrembo-voice-ui-b007867c"
-      const pm = line.match(/^\s{2,}(\S+)\s+(alive|dead)\s{2,}#?(\d+)\s{2,}(.+)$/);
-      if (pm) {
-        result.polecats.push({
-          name: pm[1],
-          alive: pm[2],
-          issue: '#' + pm[3],
-          branch: pm[4].trim(),
-        });
-      }
-
-    } else if (section === 'dogs') {
-      // Legacy dog line
-      const dm = line.match(/^\s+(\S+)\s+\[(\w+)\]\s+—\s+(.+)/);
-      if (dm) {
-        result.dogs.push({ name: dm[1], alive: dm[2], issue: dm[3] });
-        continue;
-      }
-
-      // New dogs (if/when shown): "  dog-xxxx alive  #12 ..."
-      const dn = line.match(/^\s{2,}(\S+)\s+(alive|dead)\s{2,}(.+)$/);
-      if (dn) result.dogs.push({ name: dn[1], alive: dn[2], issue: dn[3].trim() });
-
-    } else if (section === 'crew') {
-      // Legacy crew line
-      const cm = line.match(/^\s+(\S+)\s+\[(\w+)\]\s+—\s+(.+)/);
-      if (cm) {
-        result.crew.push({ name: cm[1], status: cm[2], detail: cm[3] });
-        continue;
-      }
-
-      const cn = line.match(/^\s{2,}(\S+)\s+(\S+)\s{2,}(.+)$/);
-      if (cn) result.crew.push({ name: cn[1], status: cn[2], detail: cn[3].trim() });
-
-    } else if (section === 'mergeQueue') {
-      // Legacy merge queue line
-      const mm = line.match(/^\s+(\S+)\s+—\s+(.+)/);
-      if (mm) {
-        result.mergeQueue.push({ name: mm[1], detail: mm[2] });
-        continue;
-      }
-
-      // New merge queue lines (best-effort): "  pr#17  ..."
-      const mn = line.match(/^\s{2,}(\S+)\s{2,}(.+)$/);
-      if (mn) result.mergeQueue.push({ name: mn[1], detail: mn[2].trim() });
-    }
-  }
-
-  return result;
-}
-
-// --- API: Rigs ---
+});
 
 app.get('/api/rigs', async (req, res) => {
-  try {
-    const output = await runSgt(['rig', 'list']);
-    const rigs = [];
-    const lines = output.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^\s+(\S+)\s+(https?:\/\/.+)$/);
-      if (m) {
-        const info = { name: m[1], repo: m[2] };
-        if (i + 1 < lines.length) {
-          const detail = lines[i + 1].match(/polecats:\s*(\d+)\s+witness:\s*(\w+)\s+refinery:\s*(\w+)/);
-          if (detail) {
-            info.polecats = parseInt(detail[1]);
-            info.witness = detail[2];
-            info.refinery = detail[3];
-          }
-        }
-        rigs.push(info);
-      }
-    }
-    res.json(rigs);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  res.json(await readRigs());
 });
-
-// --- API: Polecats (from state files for richer data) ---
 
 app.get('/api/polecats', (req, res) => {
-  const dir = path.join(SGT_CONFIG, 'polecats');
-  const polecats = readDir(dir).map(name => {
-    const state = readStateFile(path.join(dir, name));
-    if (!state) return null;
-    return { name, ...state };
-  }).filter(Boolean);
-  res.json(polecats);
+  res.json(listStateEntries(path.join(SGT_CONFIG, 'polecats')));
 });
-
-// --- API: Dogs ---
 
 app.get('/api/dogs', (req, res) => {
-  const dir = path.join(SGT_CONFIG, 'dogs');
-  const dogs = readDir(dir).map(name => {
-    const state = readStateFile(path.join(dir, name));
-    if (!state) return null;
-    return { name, ...state };
-  }).filter(Boolean);
-  res.json(dogs);
+  res.json(listStateEntries(path.join(SGT_CONFIG, 'dogs')));
 });
-
-// --- API: Merge Queue ---
 
 app.get('/api/merge-queue', (req, res) => {
-  const dir = path.join(SGT_CONFIG, 'merge-queue');
-  const items = readDir(dir).map(name => {
-    const state = readStateFile(path.join(dir, name));
-    if (!state) return null;
-    return { name, ...state };
-  }).filter(Boolean);
-  res.json(items);
+  res.json(listStateEntries(path.join(SGT_CONFIG, 'merge-queue')));
 });
 
-// --- API: Peek ---
+app.get('/api/blockers', (req, res) => {
+  res.json(readAcceptanceBlockers(SGT_CONFIG));
+});
 
 app.get('/api/peek/:target', async (req, res) => {
   try {
     const output = await runSgt(['peek', req.params.target]);
     res.json({ output });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
-
-// --- API: Sling (dispatch polecat) ---
 
 app.post('/api/sling', async (req, res) => {
   const { rig, task, labels, convoy } = req.body;
   if (!rig || !task) {
-    return res.status(400).json({ error: 'rig and task are required' });
+    res.status(400).json({ error: 'rig and task are required' });
+    return;
   }
   const args = ['sling', rig, task];
-  if (convoy) { args.push('--convoy', convoy); }
-  if (labels && labels.length) {
-    for (const l of labels) { args.push('--label', l); }
+  if (convoy) args.push('--convoy', convoy);
+  if (Array.isArray(labels)) {
+    for (const label of labels) {
+      args.push('--label', label);
+    }
   }
   try {
-    const output = await runSgt(args);
-    res.json({ output });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.json({ output: await runSgt(args) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
-
-// --- API: Sling dog ---
 
 app.post('/api/sling-dog', async (req, res) => {
   const { rig, issue } = req.body;
   if (!rig || !issue) {
-    return res.status(400).json({ error: 'rig and issue are required' });
+    res.status(400).json({ error: 'rig and issue are required' });
+    return;
   }
   try {
-    const output = await runSgt(['dog', rig, issue]);
-    res.json({ output });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.json({ output: await runSgt(['dog', rig, issue]) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
-
-// --- API: Log tail (last N lines) ---
 
 app.get('/api/logs', (req, res) => {
-  const lines = parseInt(req.query.lines) || 100;
-  try {
-    const content = fs.readFileSync(SGT_LOG, 'utf8');
-    const allLines = content.split('\n');
-    const tail = allLines.slice(Math.max(0, allLines.length - lines));
-    res.json({ lines: tail });
-  } catch {
-    res.json({ lines: [] });
-  }
+  const lines = Number.parseInt(req.query.lines, 10) || 100;
+  res.json({ lines: readRecentLogLines(SGT_LOG, lines) });
 });
 
-// --- WebSocket: Real-time updates ---
+app.get('/api/plan-state/:rig', (req, res) => {
+  const planState = tryReadJson(path.join(SGT_CONFIG, 'plan-state', `${req.params.rig}.json`));
+  if (!planState) {
+    res.status(404).json({ error: 'plan state not found' });
+    return;
+  }
+  res.json(planState);
+});
 
-const WS_INTERVAL = 3000; // poll every 3 seconds
-const WS_PING_INTERVAL = 15000;
-const WS_PONG_GRACE = 35000; // if no pong for this long, terminate
+function handleWsMessage(ws, rawMessage) {
+  let msg;
+  try {
+    msg = JSON.parse(rawMessage.toString());
+  } catch {
+    safeSend(ws, { type: 'error', error: 'invalid-json' });
+    return;
+  }
+
+  if (msg.type === 'stream/subscribe') {
+    if (!msg.target) {
+      safeSend(ws, { type: 'error', error: 'stream-target-required' });
+      return;
+    }
+    streamManager.subscribe(ws, msg.target);
+    return;
+  }
+
+  if (msg.type === 'stream/unsubscribe') {
+    if (msg.target) streamManager.unsubscribe(ws, msg.target);
+    return;
+  }
+
+  if (msg.type === 'snapshot/request') {
+    buildSnapshot()
+      .then((snapshot) => safeSend(ws, { type: 'snapshot', snapshot }))
+      .catch((error) => safeSend(ws, { type: 'error', error: error.message }));
+  }
+}
 
 wss.on('connection', (ws) => {
   let alive = true;
-  let logWatcher = null;
   let statusInterval = null;
   let pingInterval = null;
+  let logWatcher = null;
   let lastPongAt = Date.now();
 
-  // hello + initial status
-  safeSend(ws, { type: 'hello', serverTime: new Date().toISOString() });
-  sendStatus(ws);
+  safeSend(ws, {
+    type: 'hello',
+    serverTime: new Date().toISOString(),
+    features: {
+      normalizedSnapshot: true,
+      blockers: true,
+      tmuxStreaming: true,
+    },
+  });
 
-  // Poll status on interval
+  buildSnapshot()
+    .then((snapshot) => {
+      safeSend(ws, { type: 'snapshot', snapshot });
+      safeSend(ws, {
+        type: 'status',
+        raw: '',
+        parsed: toLegacyStatusPayload(snapshot),
+        serverTime: snapshot.meta.serverTime,
+      });
+    })
+    .catch(() => {});
+
   statusInterval = setInterval(() => {
-    if (alive) sendStatus(ws);
+    if (!alive) return;
+    buildSnapshot()
+      .then((snapshot) => {
+        safeSend(ws, { type: 'snapshot', snapshot });
+        safeSend(ws, {
+          type: 'status',
+          raw: '',
+          parsed: toLegacyStatusPayload(snapshot),
+          serverTime: snapshot.meta.serverTime,
+        });
+      })
+      .catch(() => {});
   }, WS_INTERVAL);
 
-  // WS heartbeat (robustness)
-  ws.on('pong', () => { lastPongAt = Date.now(); });
+  ws.on('pong', () => {
+    lastPongAt = Date.now();
+  });
+
   pingInterval = setInterval(() => {
     if (ws.readyState !== 1) return;
-    const age = Date.now() - lastPongAt;
-    if (age > WS_PONG_GRACE) {
-      try { ws.terminate(); } catch {}
+    if (Date.now() - lastPongAt > WS_PONG_GRACE) {
+      try {
+        ws.terminate();
+      } catch {}
       return;
     }
-    try { ws.ping(); } catch {}
+    try {
+      ws.ping();
+    } catch {}
   }, WS_PING_INTERVAL);
 
-  // Watch log file for changes (handle truncation/rotation)
   try {
     let lastSize = 0;
-    try { lastSize = fs.statSync(SGT_LOG).size; } catch {}
+    try {
+      lastSize = fs.statSync(SGT_LOG).size;
+    } catch {}
 
     logWatcher = fs.watchFile(SGT_LOG, { interval: 1000 }, () => {
       try {
         const stat = fs.statSync(SGT_LOG);
-
-        // truncation / rotation
         if (stat.size < lastSize) {
           lastSize = 0;
           safeSend(ws, { type: 'log_reset' });
           return;
         }
-
         if (stat.size > lastSize) {
           const fd = fs.openSync(SGT_LOG, 'r');
           const buf = Buffer.alloc(stat.size - lastSize);
           fs.readSync(fd, buf, 0, buf.length, lastSize);
           fs.closeSync(fd);
-          const newLines = buf.toString('utf8').split('\n').filter(l => l.trim());
+          const newLines = buf
+            .toString('utf8')
+            .split('\n')
+            .filter((line) => line.trim());
           if (newLines.length > 0) {
             safeSend(ws, { type: 'log', lines: newLines });
           }
@@ -382,8 +387,11 @@ wss.on('connection', (ws) => {
     });
   } catch {}
 
+  ws.on('message', (message) => handleWsMessage(ws, message));
+
   ws.on('close', () => {
     alive = false;
+    streamManager.unsubscribeAll(ws);
     if (statusInterval) clearInterval(statusInterval);
     if (pingInterval) clearInterval(pingInterval);
     if (logWatcher) fs.unwatchFile(SGT_LOG);
@@ -391,23 +399,9 @@ wss.on('connection', (ws) => {
 
   ws.on('error', () => {
     alive = false;
+    streamManager.unsubscribeAll(ws);
   });
 });
-
-function safeSend(ws, obj) {
-  if (ws.readyState !== 1) return;
-  try { ws.send(JSON.stringify(obj)); } catch {}
-}
-
-async function sendStatus(ws) {
-  if (ws.readyState !== 1) return;
-  try {
-    const output = await runSgt(['status']);
-    safeSend(ws, { type: 'status', raw: output, parsed: parseStatus(output), serverTime: new Date().toISOString() });
-  } catch {}
-}
-
-// --- Start ---
 
 server.listen(PORT, () => {
   console.log(`SGT Web UI running at http://localhost:${PORT}`);

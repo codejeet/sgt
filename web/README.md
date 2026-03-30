@@ -41,6 +41,8 @@ Environment variables:
 - **Polecats** — Active polecats with rig/issue/branch/PR; click to peek tmux output
 - **Logs** — Tail `sgt.log` (auto-scroll + realtime updates)
 - **Realtime WS** — Status push (poll every 3s) + log stream; reconnect/backoff + heartbeat + stale indicators
+- **Cockpit snapshot backend** — Normalized `meta/agents/rigs/workers/queue/blockers/logs/topology` document for live cockpit consumers
+- **Demand-driven tmux streams** — WebSocket `stream/subscribe` / `stream/unsubscribe` for Mayor and worker panes, with `stream/open`, `stream/data`, `stream/stale`, and `stream/close` lifecycle events
 - **High density** — Compact mode toggle (`c`), multi-column rows, collapsible cards (persisted)
 - **Keyboard shortcuts** — `1..7` switch panels, `c` toggles compact, `Esc` closes peek modal
 - **Dispatch** — Sling polecats / dogs from the UI
@@ -104,12 +106,31 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/status` | Full parsed SGT status |
+| GET | `/api/cockpit` | Normalized live cockpit snapshot |
 | GET | `/api/rigs` | List registered rigs |
 | GET | `/api/polecats` | Polecat state files |
 | GET | `/api/dogs` | Dog state files |
 | GET | `/api/merge-queue` | Merge queue items |
+| GET | `/api/blockers` | Active acceptance blockers |
 | GET | `/api/peek/:target` | Peek at tmux pane output |
 | GET | `/api/logs?lines=N` | Tail sgt.log |
+| GET | `/api/plan-state/:rig` | Repo plan-state JSON for one rig |
 | POST | `/api/sling` | Dispatch a polecat `{rig, task, labels?, convoy?}` |
 | POST | `/api/sling-dog` | Dispatch a dog `{rig, issue}` |
-| WS | `/` | Real-time status + log stream |
+| WS | `/` | Real-time status/log stream plus snapshot + tmux stream events |
+
+## WebSocket control messages
+
+Client-to-server:
+
+- `{"type":"snapshot/request"}` — request an immediate normalized snapshot
+- `{"type":"stream/subscribe","target":"mayor"}` — start a live tmux stream for `mayor`, `mayor/<rig>`, `witness/<rig>`, `refinery/<rig>`, `crew/<name>`, `dog/<name>`, or a polecat name
+- `{"type":"stream/unsubscribe","target":"mayor"}` — stop a live tmux stream
+
+Server-to-client additions:
+
+- `snapshot` — normalized cockpit state document
+- `stream/open` — tmux stream became available
+- `stream/data` — pane delta payload; `reset=true` means replace the current client buffer
+- `stream/stale` — session became unavailable or stopped updating
+- `stream/close` — stream worker closed after unsubscribe
