@@ -1,11 +1,13 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 
 const {
+  BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
   listStateEntries,
@@ -30,9 +32,40 @@ const WS_INTERVAL = 3000;
 const WS_PING_INTERVAL = 15000;
 const WS_PONG_GRACE = 35000;
 const LOG_TAIL_LINES = 120;
+const ELEVENLABS_API_KEY = process.env.SGT_WEB_ELEVENLABS_API_KEY || '';
+const ELEVENLABS_VOICE_ID = process.env.SGT_WEB_ELEVENLABS_VOICE_ID || '';
+const ELEVENLABS_MODEL_ID = process.env.SGT_WEB_ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
+const VOICE_RATE_LIMIT_SECS = Number.parseInt(process.env.SGT_WEB_VOICE_RATE_LIMIT_SECS || '90', 10) || 90;
+const VOICE_EVENT_KINDS = String(process.env.SGT_WEB_VOICE_EVENT_KINDS || 'blocker-resolved')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+function elevenLabsConfigured() {
+  return Boolean(ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID);
+}
+
+const blockerAlertTracker = new BlockerAlertTracker({
+  voice: {
+    enabled: elevenLabsConfigured(),
+    configured: elevenLabsConfigured(),
+    eventKinds: VOICE_EVENT_KINDS,
+    rateLimitMs: VOICE_RATE_LIMIT_SECS * 1000,
+  },
+});
+const announcementAudioCache = new Map();
+
+function voiceState() {
+  return {
+    enabled: elevenLabsConfigured(),
+    configured: elevenLabsConfigured(),
+    eventKinds: VOICE_EVENT_KINDS,
+    rateLimitSeconds: VOICE_RATE_LIMIT_SECS,
+  };
+}
 
 function runSgt(args) {
   return new Promise((resolve, reject) => {
@@ -99,13 +132,55 @@ async function readRigs() {
 
 async function buildSnapshot() {
   const [{ statusRaw, statusJson }, rigs] = await Promise.all([readStatusBundle(), readRigs()]);
+  const blockers = readAcceptanceBlockers(SGT_CONFIG);
+  const alerts = blockerAlertTracker.observe(blockers);
   return buildCockpitSnapshot({
     statusJson,
     statusRaw,
     rigs,
-    blockers: readAcceptanceBlockers(SGT_CONFIG),
+    blockers,
+    alerts,
     recentLogs: readRecentLogLines(SGT_LOG, LOG_TAIL_LINES),
     version: COCKPIT_VERSION,
+    voice: voiceState(),
+  });
+}
+
+async function synthesizeElevenLabs(text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      text,
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: {
+        stability: 0.45,
+        similarity_boost: 0.72,
+      },
+    });
+    const request = https.request({
+      method: 'POST',
+      hostname: 'api.elevenlabs.io',
+      path: `/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}`,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'xi-api-key': ELEVENLABS_API_KEY,
+        Accept: 'audio/mpeg',
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const payload = Buffer.concat(chunks);
+        if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+          resolve(payload);
+          return;
+        }
+        reject(new Error(payload.toString('utf8') || `ElevenLabs request failed with status ${response.statusCode}`));
+      });
+    });
+    request.on('error', reject);
+    request.write(body);
+    request.end();
   });
 }
 
@@ -206,6 +281,35 @@ app.get('/api/merge-queue', (req, res) => {
 
 app.get('/api/blockers', (req, res) => {
   res.json(readAcceptanceBlockers(SGT_CONFIG));
+});
+
+app.get('/api/announcements/:alertId/audio', async (req, res) => {
+  const event = blockerAlertTracker.getEvent(req.params.alertId);
+  if (!event) {
+    res.status(404).json({ error: 'announcement not found' });
+    return;
+  }
+  if (!event.voice || !event.voice.enabled) {
+    res.status(404).json({ error: 'voice announcements are not configured' });
+    return;
+  }
+  if (!event.voice.eligible) {
+    res.status(409).json({ error: `announcement not available: ${event.voice.reason || 'not-ready'}` });
+    return;
+  }
+
+  try {
+    let audio = announcementAudioCache.get(event.id);
+    if (!audio) {
+      audio = await synthesizeElevenLabs(event.voice.text);
+      announcementAudioCache.set(event.id, audio);
+    }
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.send(audio);
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
 });
 
 app.get('/api/peek/:target', async (req, res) => {
