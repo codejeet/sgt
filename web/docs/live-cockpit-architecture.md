@@ -4,6 +4,8 @@ Issue: `#262`
 
 This document records the current `web/` audit and locks the implementation shape for the live cockpit build-out. Follow-on work should extend this architecture rather than replace it with a separate app tree or a different stack without an explicit new decision.
 
+Status note: the topology/WebGL follow-on called out below landed in issue `#272`; this document remains the architecture lock for the surrounding app shape and degradation rules.
+
 ## Audit Summary
 
 Current repo-tracked implementation:

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   TmuxStreamManager,
   buildCockpitSnapshot,
+  buildTopology,
   computeStreamDelta,
 } = require('../lib/cockpit');
 
@@ -62,6 +63,39 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.blockers[0].title, 'Acceptance still red');
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'rig:sgt'));
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'rig:sgt' && edge.type === 'runs'));
+  assert.ok(snapshot.topology.nodes.some((node) => node.id === 'issue:sgt:264'));
+  assert.ok(snapshot.topology.nodes.some((node) => node.id === 'queue:sgt-pr264'));
+  assert.ok(snapshot.topology.nodes.some((node) => node.id === 'pr:sgt:264'));
+  assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'worker:polecat:sgt-34784812' && edge.to === 'issue:sgt:264' && edge.type === 'tracks'));
+  assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'queue:sgt-pr264' && edge.to === 'pr:sgt:264' && edge.type === 'queues'));
+});
+
+test('buildTopology materializes issue, pr, blocker, and queue nodes before linking edges', () => {
+  const topology = buildTopology({
+    rigs: [{ name: 'sgt', state: 'active', reason: 'open work' }],
+    workers: [
+      {
+        id: 'polecat:sgt-worker',
+        name: 'sgt-worker',
+        role: 'polecat',
+        status: 'alive',
+        rig: 'sgt',
+        issue: '272',
+        branch: 'sgt/sgt-worker',
+        pr: { number: '901', state: 'OPEN', title: 'Build topology' },
+      },
+    ],
+    blockers: [{ id: 'sgt-acceptance-1', rig: 'sgt', status: 'open', title: 'Acceptance blocked', requester: 'rigger' }],
+    queue: { items: [{ name: 'sgt-pr901', detail: 'PR#901 sgt' }] },
+  });
+
+  const nodeIds = new Set(topology.nodes.map((node) => node.id));
+  assert.ok(nodeIds.has('issue:sgt:272'));
+  assert.ok(nodeIds.has('pr:sgt:901'));
+  assert.ok(nodeIds.has('blocker:sgt-acceptance-1'));
+  assert.ok(nodeIds.has('queue:sgt-pr901'));
+  assert.ok(topology.edges.some((edge) => edge.from === 'pr:sgt:901' && edge.to === 'issue:sgt:272' && edge.type === 'addresses'));
+  assert.ok(topology.edges.some((edge) => edge.from === 'rig:sgt' && edge.to === 'queue:sgt-pr901' && edge.type === 'feeds'));
 });
 
 test('computeStreamDelta emits append-only chunks when possible and reset on divergence', () => {

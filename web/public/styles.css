@@ -598,13 +598,40 @@ a {
 }
 
 #topologyCanvas {
+  display: block;
   width: 100%;
   min-height: 520px;
   border: 1px solid var(--line);
   border-radius: 18px;
+  cursor: crosshair;
   background:
     radial-gradient(circle at center, rgba(77, 214, 255, 0.08), transparent 45%),
     rgba(3, 14, 22, 0.96);
+}
+
+.topology-sidebar {
+  display: grid;
+  gap: 12px;
+}
+
+.topology-summary {
+  min-height: 78px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(7, 24, 35, 0.78);
+  color: #c7e7f4;
+  line-height: 1.5;
+}
+
+.topology-summary strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--cyan-strong);
+  font-family: var(--display);
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .topology-item {

@@ -236,32 +236,132 @@ function normalizeWorker(worker, role) {
 function buildTopology(snapshot) {
   const nodes = [];
   const edges = [];
+  const seenNodes = new Map();
+  const seenEdges = new Set();
 
-  nodes.push({ id: 'mayor', type: 'agent', label: 'Mayor' });
+  function upsertNode(node) {
+    if (!node || !node.id) return node;
+    const existing = seenNodes.get(node.id) || {};
+    const merged = { ...existing, ...node };
+    seenNodes.set(node.id, merged);
+    return merged;
+  }
+
+  function addEdge(edge) {
+    if (!edge || !edge.from || !edge.to || !edge.type) return;
+    const key = `${edge.from}|${edge.to}|${edge.type}`;
+    if (seenEdges.has(key)) return;
+    seenEdges.add(key);
+    edges.push(edge);
+  }
+
+  upsertNode({ id: 'mayor', type: 'agent', label: 'Mayor', state: 'active' });
   for (const rig of snapshot.rigs) {
-    nodes.push({ id: `rig:${rig.name}`, type: 'rig', label: rig.name, state: rig.state });
-    edges.push({ from: 'mayor', to: `rig:${rig.name}`, type: 'oversees' });
+    upsertNode({
+      id: `rig:${rig.name}`,
+      type: 'rig',
+      label: rig.name,
+      state: rig.state,
+      detail: rig.reason || '',
+    });
+    addEdge({ from: 'mayor', to: `rig:${rig.name}`, type: 'oversees' });
   }
 
   for (const worker of snapshot.workers) {
     const workerNode = `worker:${worker.id}`;
-    nodes.push({ id: workerNode, type: worker.role, label: worker.name, state: worker.status });
-    if (worker.rig) edges.push({ from: `rig:${worker.rig}`, to: workerNode, type: 'runs' });
-    if (worker.issue) edges.push({ from: workerNode, to: `issue:${worker.rig || 'unknown'}:${worker.issue}`, type: 'tracks' });
-    if (worker.pr && worker.pr.number) edges.push({ from: workerNode, to: `pr:${worker.rig || 'unknown'}:${worker.pr.number}`, type: 'owns' });
+    upsertNode({
+      id: workerNode,
+      type: worker.role,
+      label: worker.name,
+      state: worker.status,
+      rig: worker.rig || '',
+      detail: worker.branch || '',
+    });
+    if (worker.rig) addEdge({ from: `rig:${worker.rig}`, to: workerNode, type: 'runs' });
+    if (worker.issue) {
+      const issueNode = `issue:${worker.rig || 'unknown'}:${worker.issue}`;
+      upsertNode({
+        id: issueNode,
+        type: 'issue',
+        label: `#${worker.issue}`,
+        state: worker.status === 'alive' ? 'active' : 'open',
+        rig: worker.rig || '',
+        detail: worker.branch || '',
+      });
+      addEdge({ from: workerNode, to: issueNode, type: 'tracks' });
+    }
+    if (worker.pr && worker.pr.number) {
+      const prNode = `pr:${worker.rig || 'unknown'}:${worker.pr.number}`;
+      upsertNode({
+        id: prNode,
+        type: 'pr',
+        label: `PR #${worker.pr.number}`,
+        state: worker.pr.state || 'open',
+        rig: worker.rig || '',
+        detail: worker.pr.title || '',
+      });
+      addEdge({ from: workerNode, to: prNode, type: 'owns' });
+      if (worker.issue) {
+        addEdge({
+          from: prNode,
+          to: `issue:${worker.rig || 'unknown'}:${worker.issue}`,
+          type: 'addresses',
+        });
+      }
+    }
   }
 
   for (const blocker of snapshot.blockers) {
     const blockerNode = `blocker:${blocker.id}`;
-    nodes.push({ id: blockerNode, type: 'blocker', label: blocker.title, state: blocker.status });
-    if (blocker.rig) edges.push({ from: `rig:${blocker.rig}`, to: blockerNode, type: 'blocked-by' });
+    upsertNode({
+      id: blockerNode,
+      type: 'blocker',
+      label: blocker.title,
+      state: blocker.status,
+      rig: blocker.rig || '',
+      detail: blocker.requester || '',
+    });
+    if (blocker.rig) addEdge({ from: `rig:${blocker.rig}`, to: blockerNode, type: 'blocked-by' });
   }
 
   for (const item of snapshot.queue.items) {
     const queueNode = `queue:${item.name}`;
-    nodes.push({ id: queueNode, type: 'queue', label: item.name, detail: item.detail || '' });
+    const detail = `${item.name || ''} ${item.detail || ''}`;
+    const prMatch = detail.match(/PR#(\d+)/i);
+    const rigMatch = detail.match(/\b([a-z0-9_-]+)\b$/i);
+    upsertNode({
+      id: queueNode,
+      type: 'queue',
+      label: item.name,
+      state: 'queued',
+      rig: rigMatch ? rigMatch[1] : '',
+      detail: item.detail || '',
+    });
+    if (prMatch) {
+      const prNode = `pr:${rigMatch ? rigMatch[1] : 'unknown'}:${prMatch[1]}`;
+      upsertNode({
+        id: prNode,
+        type: 'pr',
+        label: `PR #${prMatch[1]}`,
+        state: 'queued',
+        rig: rigMatch ? rigMatch[1] : '',
+        detail: item.detail || '',
+      });
+      addEdge({ from: queueNode, to: prNode, type: 'queues' });
+    }
+    if (rigMatch) {
+      upsertNode({ id: `rig:${rigMatch[1]}`, type: 'rig', label: rigMatch[1], state: 'active' });
+      addEdge({ from: `rig:${rigMatch[1]}`, to: queueNode, type: 'feeds' });
+    }
   }
 
+  nodes.push(...Array.from(seenNodes.values()));
+  nodes.sort((left, right) => left.id.localeCompare(right.id));
+  edges.sort((left, right) => {
+    const a = `${left.type}:${left.from}:${left.to}`;
+    const b = `${right.type}:${right.from}:${right.to}`;
+    return a.localeCompare(b);
+  });
   return { nodes, edges };
 }
 
@@ -592,6 +692,7 @@ class TmuxStreamManager {
 module.exports = {
   TmuxStreamManager,
   buildCockpitSnapshot,
+  buildTopology,
   computeStreamDelta,
   listStateEntries,
   parseStatus,

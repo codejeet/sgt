@@ -14,6 +14,16 @@ const appState = {
   desiredTargets: new Set(),
   streams: new Map(),
   sections: ["overview", "streams", "topology", "dispatch", "logs"],
+  topology: {
+    renderer: "canvas",
+    modeLabel: "Canvas fallback",
+    layout: new Map(),
+    hoveredId: "",
+    selectedId: "",
+    gl: null,
+    program: null,
+    buffers: null,
+  },
 };
 
 const refs = {
@@ -46,6 +56,7 @@ const refs = {
   serverTimeLabel: document.getElementById("serverTimeLabel"),
   topologyMode: document.getElementById("topologyMode"),
   topologyCanvas: document.getElementById("topologyCanvas"),
+  topologySummary: document.getElementById("topologySummary"),
   topologyList: document.getElementById("topologyList"),
   logSummary: document.getElementById("logSummary"),
   logViewer: document.getElementById("logViewer"),
@@ -68,7 +79,7 @@ initialize();
 function initialize() {
   setCompact(localStorage.getItem(COMPACT_KEY) === "1");
   bindEvents();
-  detectTopologyMode();
+  setupTopologyCanvas();
   loadRigs();
   loadLogs();
   connectWs();
@@ -123,6 +134,9 @@ function bindEvents() {
   });
 
   window.addEventListener("resize", renderTopology);
+  refs.topologyCanvas.addEventListener("mousemove", handleTopologyPointerMove);
+  refs.topologyCanvas.addEventListener("mouseleave", () => updateTopologyHover(""));
+  refs.topologyCanvas.addEventListener("click", handleTopologyClick);
 }
 
 function emptyCockpit() {
@@ -726,83 +740,503 @@ function closePeek() {
 
 function renderTopology() {
   const topology = appState.cockpit.topology || { nodes: [], edges: [] };
-  refs.topologyList.innerHTML = (topology.edges || []).slice(0, 16).map((edge) => `
-    <div class="topology-item">${esc(edge.from)} -> ${esc(edge.to)} (${esc(edge.type)})</div>
-  `).join("");
-
   const canvas = refs.topologyCanvas;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
   const width = canvas.clientWidth || canvas.width;
   const height = canvas.clientHeight || canvas.height;
-  canvas.width = width * devicePixelRatio;
-  canvas.height = height * devicePixelRatio;
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  ctx.clearRect(0, 0, width, height);
+  const renderState = buildTopologyRenderState(topology, width, height);
 
-  const nodes = topology.nodes || [];
-  const edges = topology.edges || [];
-  if (nodes.length === 0) {
-    ctx.fillStyle = "#7fa9bc";
-    ctx.font = "14px IBM Plex Sans";
-    ctx.fillText("Topology data will appear when the cockpit snapshot contains nodes.", 20, 34);
+  refs.topologyList.innerHTML = renderTopologyFeed(renderState);
+  refs.topologySummary.innerHTML = renderTopologySummary(renderState);
+
+  if (renderState.nodes.length === 0) {
+    renderTopologyCanvasFallback(renderState, width, height);
     return;
   }
 
-  const positions = new Map();
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const radius = Math.max(120, Math.min(width, height) / 2.8);
+  const renderedWithWebGl = renderTopologyWebGl(renderState, width, height);
+  if (!renderedWithWebGl) {
+    renderTopologyCanvasFallback(renderState, width, height);
+  }
+}
 
-  nodes.forEach((node, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1) - Math.PI / 2;
-    positions.set(node.id, {
-      x: centerX + Math.cos(angle) * radius,
-      y: centerY + Math.sin(angle) * radius,
-      color: topologyColor(node.type, node.state),
-    });
-  });
-
-  ctx.lineWidth = 1.2;
-  edges.forEach((edge) => {
-    const from = positions.get(edge.from);
-    const to = positions.get(edge.to);
-    if (!from || !to) return;
-    ctx.strokeStyle = "rgba(77, 214, 255, 0.28)";
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-  });
-
-  nodes.forEach((node) => {
-    const pos = positions.get(node.id);
-    if (!pos) return;
-    ctx.fillStyle = pos.color;
-    ctx.shadowBlur = 18;
-    ctx.shadowColor = pos.color;
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#d9f4ff";
-    ctx.font = "12px IBM Plex Sans";
-    ctx.fillText(node.label || node.id, pos.x + 12, pos.y + 4);
-  });
+function setupTopologyCanvas() {
+  detectTopologyMode();
 }
 
 function detectTopologyMode() {
   const hasWebGl = Boolean(window.WebGLRenderingContext && document.createElement("canvas").getContext("webgl"));
-  refs.topologyMode.textContent = hasWebGl ? "WebGL-ready browser, canvas radar active" : "Canvas fallback";
+  appState.topology.renderer = hasWebGl ? "webgl" : "canvas";
+  appState.topology.modeLabel = hasWebGl ? "WebGL live topology" : "Canvas fallback";
+  refs.topologyMode.textContent = appState.topology.modeLabel;
 }
 
 function topologyColor(type, state) {
   if (type === "blocker" || state === "blocked") return "#ff6b6b";
   if (type === "rig") return "#8bf0ff";
   if (type === "queue") return "#f8b84a";
+  if (type === "issue") return "#c58fff";
+  if (type === "pr") return "#7da8ff";
   if (state === "alive" || state === "active") return "#9df77d";
   return "#7da8ff";
+}
+
+function buildTopologyRenderState(topology, width, height) {
+  const nodes = Array.isArray(topology.nodes) ? topology.nodes : [];
+  const edges = Array.isArray(topology.edges) ? topology.edges : [];
+  const layout = appState.topology.layout;
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const rigIds = nodes.filter((node) => node.type === "rig").map((node) => node.id);
+
+  for (const id of Array.from(layout.keys())) {
+    if (!nodeMap.has(id)) layout.delete(id);
+  }
+
+  const bounds = {
+    minX: 30,
+    maxX: Math.max(30, width - 30),
+    minY: 30,
+    maxY: Math.max(30, height - 30),
+  };
+
+  nodes.forEach((node) => {
+    const anchor = topologyAnchor(node, width, height, rigIds);
+    const existing = layout.get(node.id);
+    const position = existing || {
+      x: anchor.x + ((hashString(node.id) % 23) - 11) * 2.2,
+      y: anchor.y + ((hashString(`${node.id}:y`) % 23) - 11) * 1.9,
+      vx: 0,
+      vy: 0,
+    };
+    layout.set(node.id, {
+      id: node.id,
+      ...position,
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      radius: topologyRadius(node),
+      color: topologyColor(node.type, node.state),
+      label: node.label || node.id,
+      detail: node.detail || "",
+      rig: node.rig || "",
+      type: node.type || "node",
+      state: node.state || "",
+    });
+  });
+
+  for (let iteration = 0; iteration < 30; iteration += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      const left = layout.get(nodes[i].id);
+      if (!left) continue;
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const right = layout.get(nodes[j].id);
+        if (!right) continue;
+        const dx = left.x - right.x;
+        const dy = left.y - right.y;
+        const distanceSq = Math.max(dx * dx + dy * dy, 1);
+        const distance = Math.sqrt(distanceSq);
+        const force = 1600 / distanceSq;
+        const pushX = (dx / distance) * force;
+        const pushY = (dy / distance) * force;
+        left.vx += pushX;
+        left.vy += pushY;
+        right.vx -= pushX;
+        right.vy -= pushY;
+      }
+    }
+
+    edges.forEach((edge) => {
+      const from = layout.get(edge.from);
+      const to = layout.get(edge.to);
+      if (!from || !to) return;
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const distance = Math.max(Math.hypot(dx, dy), 1);
+      const desired = preferredTopologyEdgeLength(from, to, width, height);
+      const pull = (distance - desired) * 0.0034;
+      const shiftX = (dx / distance) * pull;
+      const shiftY = (dy / distance) * pull;
+      from.vx += shiftX;
+      from.vy += shiftY;
+      to.vx -= shiftX;
+      to.vy -= shiftY;
+    });
+
+    nodes.forEach((node) => {
+      const current = layout.get(node.id);
+      if (!current) return;
+      current.vx += (current.anchorX - current.x) * 0.018;
+      current.vy += (current.anchorY - current.y) * 0.018;
+      current.vx *= 0.82;
+      current.vy *= 0.82;
+      current.x = clamp(current.x + current.vx, bounds.minX, bounds.maxX);
+      current.y = clamp(current.y + current.vy, bounds.minY, bounds.maxY);
+    });
+  }
+
+  const renderNodes = nodes.map((node) => ({ id: node.id, ...layout.get(node.id) }));
+  const renderNodeMap = new Map(renderNodes.map((node) => [node.id, node]));
+  const renderEdges = edges
+    .map((edge) => ({ ...edge, fromNode: renderNodeMap.get(edge.from), toNode: renderNodeMap.get(edge.to) }))
+    .filter((edge) => edge.fromNode && edge.toNode);
+
+  const activeId = appState.topology.selectedId || appState.topology.hoveredId || renderNodes[0]?.id || "";
+  const activeNode = activeId ? renderNodeMap.get(activeId) : null;
+
+  return {
+    width,
+    height,
+    nodes: renderNodes,
+    edges: renderEdges,
+    nodeMap: renderNodeMap,
+    activeNode,
+    activeId: activeNode ? activeNode.id : "",
+  };
+}
+
+function renderTopologyFeed(renderState) {
+  if (renderState.edges.length === 0) {
+    return `<div class="empty-state">Relationship edges will appear here once the cockpit snapshot includes linked rigs, workers, blockers, or queue items.</div>`;
+  }
+
+  const activeId = renderState.activeId;
+  const prioritized = [...renderState.edges].sort((left, right) => {
+    const leftScore = left.from === activeId || left.to === activeId ? 1 : 0;
+    const rightScore = right.from === activeId || right.to === activeId ? 1 : 0;
+    return rightScore - leftScore;
+  });
+
+  return prioritized.slice(0, 18).map((edge) => `
+    <div class="topology-item">${esc(shortTopologyLabel(renderState.nodeMap.get(edge.from)))} -> ${esc(shortTopologyLabel(renderState.nodeMap.get(edge.to)))} (${esc(edge.type)})</div>
+  `).join("");
+}
+
+function renderTopologySummary(renderState) {
+  if (renderState.nodes.length === 0) {
+    return `<strong>No topology yet</strong>Waiting for snapshot nodes and edges from the cockpit backend.`;
+  }
+
+  const node = renderState.activeNode;
+  if (!node) {
+    return `<strong>Live graph ready</strong>${esc(renderState.nodes.length)} nodes, ${esc(renderState.edges.length)} edges. Select a node in the graph to inspect its connected lanes.`;
+  }
+
+  const connected = renderState.edges.filter((edge) => edge.from === node.id || edge.to === node.id);
+  const detailParts = [node.type];
+  if (node.rig) detailParts.push(node.rig);
+  if (node.state) detailParts.push(node.state);
+  return `
+    <strong>${esc(node.label)}</strong>
+    ${esc(detailParts.join(" • "))}<br>
+    ${esc(node.detail || "No extra detail recorded.")}<br>
+    ${esc(connected.length)} linked relationship${connected.length === 1 ? "" : "s"} in the current cockpit snapshot.
+  `;
+}
+
+function renderTopologyCanvasFallback(renderState, width, height) {
+  const canvas = refs.topologyCanvas;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(width * dpr));
+  canvas.height = Math.max(1, Math.round(height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  refs.topologyMode.textContent = appState.topology.renderer === "webgl" ? "Canvas fallback (WebGL init failed)" : appState.topology.modeLabel;
+
+  drawTopologyBackdrop(ctx, width, height);
+
+  if (renderState.nodes.length === 0) {
+    ctx.fillStyle = "#7fa9bc";
+    ctx.font = "14px IBM Plex Sans";
+    ctx.fillText("Topology data will appear when the cockpit snapshot contains nodes.", 20, 34);
+    return;
+  }
+
+  renderState.edges.forEach((edge) => {
+    const emphasis = edge.from === renderState.activeId || edge.to === renderState.activeId;
+    ctx.strokeStyle = emphasis ? "rgba(248, 184, 74, 0.72)" : "rgba(77, 214, 255, 0.24)";
+    ctx.lineWidth = emphasis ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.moveTo(edge.fromNode.x, edge.fromNode.y);
+    ctx.lineTo(edge.toNode.x, edge.toNode.y);
+    ctx.stroke();
+  });
+
+  renderState.nodes.forEach((node) => {
+    const selected = node.id === renderState.activeId;
+    const hovered = node.id === appState.topology.hoveredId;
+    ctx.fillStyle = node.color;
+    ctx.shadowBlur = selected || hovered ? 20 : 12;
+    ctx.shadowColor = node.color;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius + (selected ? 2 : 0), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#d9f4ff";
+    ctx.font = selected ? "600 12px IBM Plex Sans" : "12px IBM Plex Sans";
+    ctx.fillText(node.label, node.x + node.radius + 8, node.y + 4);
+  });
+}
+
+function renderTopologyWebGl(renderState, width, height) {
+  if (appState.topology.renderer !== "webgl") return false;
+  const gl = ensureTopologyGl();
+  if (!gl) return false;
+
+  refs.topologyMode.textContent = appState.topology.modeLabel;
+  const canvas = refs.topologyCanvas;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(width * dpr));
+  canvas.height = Math.max(1, Math.round(height * dpr));
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.015, 0.05, 0.08, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const edgeVertices = [];
+  const edgeColors = [];
+  renderState.edges.forEach((edge) => {
+    const emphasis = edge.from === renderState.activeId || edge.to === renderState.activeId;
+    const rgba = emphasis ? [0.973, 0.722, 0.29, 0.95] : [0.302, 0.839, 1, 0.24];
+    pushGlVertex(edgeVertices, edge.fromNode.x, edge.fromNode.y, width, height);
+    pushGlVertex(edgeVertices, edge.toNode.x, edge.toNode.y, width, height);
+    edgeColors.push(...rgba, ...rgba);
+  });
+
+  const nodeVertices = [];
+  const nodeColors = [];
+  const nodeSizes = [];
+  renderState.nodes.forEach((node) => {
+    pushGlVertex(nodeVertices, node.x, node.y, width, height);
+    nodeColors.push(...hexToRgb(topologyColor(node.type, node.state)), 1);
+    const emphasis = node.id === renderState.activeId ? 5 : node.id === appState.topology.hoveredId ? 3 : 0;
+    nodeSizes.push((node.radius + emphasis) * (window.devicePixelRatio || 1));
+  });
+
+  const { program, buffers } = appState.topology;
+  gl.useProgram(program.handle);
+
+  if (edgeVertices.length > 0) {
+    bindGlAttribute(gl, buffers.edgePosition, program.attributes.aPosition, new Float32Array(edgeVertices), 2);
+    bindGlAttribute(gl, buffers.edgeColor, program.attributes.aColor, new Float32Array(edgeColors), 4);
+    gl.disableVertexAttribArray(program.attributes.aPointSize);
+    gl.vertexAttrib1f(program.attributes.aPointSize, 1);
+    gl.uniform1f(program.uniforms.uRenderPoints, 0);
+    gl.drawArrays(gl.LINES, 0, edgeVertices.length / 2);
+  }
+
+  bindGlAttribute(gl, buffers.nodePosition, program.attributes.aPosition, new Float32Array(nodeVertices), 2);
+  bindGlAttribute(gl, buffers.nodeColor, program.attributes.aColor, new Float32Array(nodeColors), 4);
+  bindGlAttribute(gl, buffers.nodeSize, program.attributes.aPointSize, new Float32Array(nodeSizes), 1);
+  gl.uniform1f(program.uniforms.uRenderPoints, 1);
+  gl.drawArrays(gl.POINTS, 0, nodeVertices.length / 2);
+  return true;
+}
+
+function ensureTopologyGl() {
+  if (appState.topology.gl) return appState.topology.gl;
+  const canvas = refs.topologyCanvas;
+  const gl = canvas.getContext("webgl", { antialias: true, alpha: false, preserveDrawingBuffer: false });
+  if (!gl) {
+    appState.topology.renderer = "canvas";
+    appState.topology.modeLabel = "Canvas fallback";
+    return null;
+  }
+
+  const vertexSource = `
+    attribute vec2 aPosition;
+    attribute vec4 aColor;
+    attribute float aPointSize;
+    varying vec4 vColor;
+    uniform float uRenderPoints;
+    void main() {
+      gl_Position = vec4(aPosition, 0.0, 1.0);
+      gl_PointSize = max(aPointSize, 1.0);
+      vColor = aColor;
+    }
+  `;
+  const fragmentSource = `
+    precision mediump float;
+    varying vec4 vColor;
+    uniform float uRenderPoints;
+    void main() {
+      if (uRenderPoints > 0.5) {
+        vec2 p = gl_PointCoord * 2.0 - 1.0;
+        if (dot(p, p) > 1.0) discard;
+      }
+      gl_FragColor = vColor;
+    }
+  `;
+
+  const program = createGlProgram(gl, vertexSource, fragmentSource);
+  if (!program) {
+    appState.topology.renderer = "canvas";
+    appState.topology.modeLabel = "Canvas fallback";
+    return null;
+  }
+
+  appState.topology.gl = gl;
+  appState.topology.program = {
+    handle: program,
+    attributes: {
+      aPosition: gl.getAttribLocation(program, "aPosition"),
+      aColor: gl.getAttribLocation(program, "aColor"),
+      aPointSize: gl.getAttribLocation(program, "aPointSize"),
+    },
+    uniforms: {
+      uRenderPoints: gl.getUniformLocation(program, "uRenderPoints"),
+    },
+  };
+  appState.topology.buffers = {
+    edgePosition: gl.createBuffer(),
+    edgeColor: gl.createBuffer(),
+    nodePosition: gl.createBuffer(),
+    nodeColor: gl.createBuffer(),
+    nodeSize: gl.createBuffer(),
+  };
+  gl.useProgram(program);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  return gl;
+}
+
+function handleTopologyPointerMove(event) {
+  const hit = topologyHitTest(event);
+  updateTopologyHover(hit ? hit.id : "");
+}
+
+function handleTopologyClick(event) {
+  const hit = topologyHitTest(event);
+  appState.topology.selectedId = hit ? hit.id : "";
+  renderTopology();
+}
+
+function topologyHitTest(event) {
+  const canvas = refs.topologyCanvas;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  let nearest = null;
+  let nearestDistance = 28;
+
+  for (const node of appState.topology.layout.values()) {
+    const distance = Math.hypot(node.x - x, node.y - y);
+    if (distance < nearestDistance) {
+      nearest = node;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest;
+}
+
+function updateTopologyHover(id) {
+  if (appState.topology.hoveredId === id) return;
+  appState.topology.hoveredId = id;
+  renderTopology();
+}
+
+function topologyAnchor(node, width, height, rigIds) {
+  const rigIndex = node.rig ? rigIds.indexOf(`rig:${node.rig}`) : -1;
+  const rigCount = Math.max(rigIds.length, 1);
+  const rigX = rigIndex >= 0 ? width * (0.18 + (0.64 * (rigIndex + 0.5)) / rigCount) : width * 0.5;
+  const rigY = height * 0.42;
+
+  if (node.id === "mayor") return { x: width * 0.5, y: height * 0.14 };
+  if (node.type === "rig") return { x: rigX, y: rigY };
+  if (node.type === "polecat" || node.type === "dog") return { x: rigX, y: Math.min(height - 60, rigY + 95) };
+  if (node.type === "issue") return { x: rigX - 54, y: Math.min(height - 40, rigY + 182) };
+  if (node.type === "pr") return { x: rigX + 56, y: Math.min(height - 40, rigY + 180) };
+  if (node.type === "blocker") return { x: rigX, y: Math.max(52, rigY - 112) };
+  if (node.type === "queue") return { x: rigX + 96, y: Math.max(60, rigY - 28) };
+  return { x: width * 0.5, y: height * 0.5 };
+}
+
+function preferredTopologyEdgeLength(from, to, width, height) {
+  if (from.type === "rig" || to.type === "rig") return Math.min(width, height) * 0.18;
+  if (from.type === "blocker" || to.type === "blocker") return Math.min(width, height) * 0.2;
+  return Math.min(width, height) * 0.14;
+}
+
+function topologyRadius(node) {
+  if (node.type === "mayor" || node.id === "mayor") return 14;
+  if (node.type === "rig") return 11;
+  if (node.type === "blocker") return 9;
+  if (node.type === "queue") return 8;
+  return 7;
+}
+
+function drawTopologyBackdrop(ctx, width, height) {
+  ctx.clearRect(0, 0, width, height);
+  const gradient = ctx.createRadialGradient(width * 0.5, height * 0.48, 30, width * 0.5, height * 0.48, Math.max(width, height) * 0.44);
+  gradient.addColorStop(0, "rgba(77, 214, 255, 0.12)");
+  gradient.addColorStop(1, "rgba(3, 14, 22, 0.98)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "rgba(77, 214, 255, 0.08)";
+  ctx.lineWidth = 1;
+  for (let ring = 1; ring <= 4; ring += 1) {
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, (Math.min(width, height) * ring) / 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function shortTopologyLabel(node) {
+  return node ? node.label || node.id : "unknown";
+}
+
+function pushGlVertex(target, x, y, width, height) {
+  target.push((x / width) * 2 - 1, 1 - (y / height) * 2);
+}
+
+function bindGlAttribute(gl, buffer, attribute, data, size) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(attribute);
+  gl.vertexAttribPointer(attribute, size, gl.FLOAT, false, 0, 0);
+}
+
+function createGlProgram(gl, vertexSource, fragmentSource) {
+  const vertexShader = compileGlShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragmentShader = compileGlShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vertexShader || !fragmentShader) return null;
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+  return program;
+}
+
+function compileGlShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return null;
+  return shader;
+}
+
+function hexToRgb(hex) {
+  const value = hex.replace("#", "");
+  const normalized = value.length === 3 ? value.split("").map((item) => `${item}${item}`).join("") : value;
+  const intValue = Number.parseInt(normalized, 16);
+  return [
+    ((intValue >> 16) & 255) / 255,
+    ((intValue >> 8) & 255) / 255,
+    (intValue & 255) / 255,
+  ];
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function workerPriority(worker) {

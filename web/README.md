@@ -41,7 +41,7 @@ Environment variables:
 - **Live tmux monitoring** — Mayor gets a dedicated live monitor, while all active polecats can stay open simultaneously in a filtered multi-pane wall with per-pane tail/focus/peek controls
 - **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
-- **Topology radar** — Canvas relationship view driven from normalized `topology` nodes/edges, with a clean fallback when WebGL is absent
+- **Topology radar** — Live WebGL relationship graph for Mayor, rigs, workers, issues, PRs, blockers, and queue links, with clean canvas fallback when WebGL is absent
 - **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
 - **Dispatch** — Sling polecats and dogs without leaving the shell
 
