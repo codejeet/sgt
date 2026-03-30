@@ -7436,6 +7436,19 @@ cmd_status_json() {
 
     local alive="dead"
     tmux has-session -t "$session" 2>/dev/null && alive="alive"
+    local runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args
+    runtime_classification="${RUNTIME_CLASSIFICATION:-}"
+    runtime_reason="${RUNTIME_REASON_CODE:-}"
+    runtime_summary="${RUNTIME_SUMMARY:-}"
+    runtime_output_age="${RUNTIME_OUTPUT_AGE_SECS:-}"
+    runtime_busy_pid="${RUNTIME_BUSY_PID:-}"
+    runtime_busy_comm="${RUNTIME_BUSY_COMM:-}"
+    runtime_busy_args=""
+    if [[ "$alive" == "alive" ]]; then
+      local runtime_meta
+      runtime_meta="$(_polecat_runtime_classify "$session" "${CREATED:-}" "${OUTPUT_LOG:-}")"
+      IFS='|' read -r runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args <<< "$runtime_meta"
+    fi
     local pr_number pr_state pr_title warning_text
     pr_number=""
     pr_state=""
@@ -7470,8 +7483,11 @@ cmd_status_json() {
     if [[ "$alive" == "dead" && -z "$pr_number" && -z "$warning_text" ]]; then
       warning_text="PR metadata unavailable (possible race)"
     fi
+    if [[ "$alive" == "alive" && -n "$runtime_summary" && "$runtime_classification" != "active-output" ]]; then
+      warning_text="$runtime_summary"
+    fi
 
-    polecats+=("{\"name\":$(_json_quote "$pname"),\"status\":$(_json_quote "$alive"),\"issue\":$(_json_quote "$issue"),\"rig\":$(_json_quote "$rig"),\"repo\":$(_json_quote "$repo"),\"branch\":$(_json_quote "$branch"),\"session\":$(_json_quote "$session"),\"pr\":{\"number\":$(_json_quote "$pr_number"),\"state\":$(_json_quote "$pr_state"),\"title\":$(_json_quote "$pr_title")},\"warning\":$(_json_quote "$warning_text")}")
+    polecats+=("{\"name\":$(_json_quote "$pname"),\"status\":$(_json_quote "$alive"),\"issue\":$(_json_quote "$issue"),\"rig\":$(_json_quote "$rig"),\"repo\":$(_json_quote "$repo"),\"branch\":$(_json_quote "$branch"),\"session\":$(_json_quote "$session"),\"pr\":{\"number\":$(_json_quote "$pr_number"),\"state\":$(_json_quote "$pr_state"),\"title\":$(_json_quote "$pr_title")},\"runtime\":{\"classification\":$(_json_quote "$runtime_classification"),\"reason_code\":$(_json_quote "$runtime_reason"),\"summary\":$(_json_quote "$runtime_summary"),\"output_age_seconds\":$(_json_quote "$runtime_output_age"),\"busy_pid\":$(_json_quote "$runtime_busy_pid"),\"busy_comm\":$(_json_quote "$runtime_busy_comm"),\"busy_args\":$(_json_quote "$runtime_busy_args")},\"warning\":$(_json_quote "$warning_text")}")
   done
 
   printf '{\n'
@@ -7804,6 +7820,7 @@ _cmd_status_human() {
       local session rig repo branch issue missing_fields
       local pr_number pr_state pr_title pr_chunk pr_meta pr_title_cols
       local canonical_repo resolve_meta resolve_code resolve_reason
+      local runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args runtime_meta
       if ! source "$f" 2>/dev/null; then
         printf "  %s%-14s%s %s\n" "$(_bold)" "$pname" "$(_reset)" "$(_status_badge "unknown")"
         printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ metadata unreadable (possibly mid-write race); retry 'sgt status'." "$(_reset)"
@@ -7828,6 +7845,17 @@ _cmd_status_human() {
       fi
       local alive="dead"
       tmux has-session -t "$session" 2>/dev/null && alive="alive"
+      runtime_classification="${RUNTIME_CLASSIFICATION:-}"
+      runtime_reason="${RUNTIME_REASON_CODE:-}"
+      runtime_summary="${RUNTIME_SUMMARY:-}"
+      runtime_output_age="${RUNTIME_OUTPUT_AGE_SECS:-}"
+      runtime_busy_pid="${RUNTIME_BUSY_PID:-}"
+      runtime_busy_comm="${RUNTIME_BUSY_COMM:-}"
+      runtime_busy_args=""
+      if [[ "$alive" == "alive" ]]; then
+        runtime_meta="$(_polecat_runtime_classify "$session" "${CREATED:-}" "${OUTPUT_LOG:-}")"
+        IFS='|' read -r runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args <<< "$runtime_meta"
+      fi
 
       pr_number=""
       pr_state=""
@@ -7869,6 +7897,9 @@ _cmd_status_human() {
 
       if [[ "$alive" == "dead" && -z "$pr_number" ]]; then
         printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ PR metadata unavailable (possible race); retry 'sgt status' or run 'sgt nuke $pname' if stale." "$(_reset)"
+      fi
+      if [[ "$alive" == "alive" && -n "$runtime_summary" && "$runtime_classification" != "active-output" ]]; then
+        printf "  %s%s%s\n" "$(_fg_yellow)" "      ↳ ${runtime_classification}: ${runtime_summary}" "$(_reset)"
       fi
 
       # Optional: show PR title as a second dense line (only if present)
@@ -8544,6 +8575,186 @@ _witness_dead_polecat_backend_limit() {
   return 1
 }
 
+_polecat_quiet_output_stale_secs() {
+  local secs="${SGT_POLECAT_QUIET_OUTPUT_STALE_SECS:-900}"
+  [[ "$secs" =~ ^[0-9]+$ && "$secs" -gt 0 ]] || secs=900
+  echo "$secs"
+}
+
+_polecat_stall_secs() {
+  local secs="${SGT_POLECAT_STALL_SECS:-1800}"
+  [[ "$secs" =~ ^[0-9]+$ && "$secs" -gt 0 ]] || secs=1800
+  echo "$secs"
+}
+
+_polecat_busy_child_min_age_secs() {
+  local secs="${SGT_POLECAT_BUSY_CHILD_MIN_AGE_SECS:-120}"
+  [[ "$secs" =~ ^[0-9]+$ && "$secs" -gt 0 ]] || secs=120
+  echo "$secs"
+}
+
+_polecat_busy_child_min_cpu_pct() {
+  local pct="${SGT_POLECAT_BUSY_CHILD_MIN_CPU_PCT:-5}"
+  if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    pct=5
+  fi
+  echo "$pct"
+}
+
+_polecat_output_age_seconds() {
+  local output_log="${1:-}" now_epoch="${2:-$(date +%s)}"
+  local mtime=""
+  [[ -n "$output_log" && -f "$output_log" ]] || {
+    echo "-1"
+    return 0
+  }
+  mtime="$(stat -c %Y "$output_log" 2>/dev/null || stat -f %m "$output_log" 2>/dev/null || true)"
+  if [[ ! "$mtime" =~ ^[0-9]+$ ]]; then
+    echo "-1"
+    return 0
+  fi
+  echo $(( now_epoch - mtime ))
+}
+
+_polecat_created_age_seconds() {
+  local created_at="${1:-}" now_epoch="${2:-$(date +%s)}"
+  local created_epoch
+  created_epoch=$(date -d "$created_at" +%s 2>/dev/null || echo "-1")
+  if [[ ! "$created_epoch" =~ ^-?[0-9]+$ || "$created_epoch" -lt 0 ]]; then
+    echo "-1"
+    return 0
+  fi
+  echo $(( now_epoch - created_epoch ))
+}
+
+_polecat_session_root_pid() {
+  local session="${1:-}"
+  [[ -n "$session" ]] || return 1
+  tmux display-message -p -t "$session" '#{pane_pid}' 2>/dev/null || true
+}
+
+_polecat_find_busy_child() {
+  local root_pid="${1:-}" min_age="${2:-$(_polecat_busy_child_min_age_secs)}" min_cpu="${3:-$(_polecat_busy_child_min_cpu_pct)}"
+  [[ "$root_pid" =~ ^[0-9]+$ ]] || return 1
+  ps -eo pid=,ppid=,etimes=,pcpu=,stat=,comm=,args= 2>/dev/null | awk \
+    -v root="$root_pid" \
+    -v min_age="$min_age" \
+    -v min_cpu="$min_cpu" '
+      function ignored(comm) {
+        return comm ~ /^(bash|sh|dash|zsh|fish|tmux|tee|cat|sleep|timeout|env|stdbuf)$/;
+      }
+      {
+        pid=$1;
+        ppid=$2;
+        etimes=$3;
+        pcpu=$4 + 0;
+        stat=$5;
+        comm=$6;
+        args="";
+        for (i = 7; i <= NF; i++) {
+          args = args (i == 7 ? "" : " ") $i;
+        }
+        parent[pid] = ppid;
+        row[pid] = pid "|" ppid "|" etimes "|" pcpu "|" stat "|" comm "|" args;
+      }
+      END {
+        active[root] = 1;
+        changed = 1;
+        while (changed) {
+          changed = 0;
+          for (pid in parent) {
+            if (active[parent[pid]] && !active[pid]) {
+              active[pid] = 1;
+              changed = 1;
+            }
+          }
+        }
+        best = "";
+        best_cpu = -1;
+        best_age = -1;
+        for (pid in active) {
+          if (pid == root) {
+            continue;
+          }
+          split(row[pid], f, "|");
+          etimes = f[3] + 0;
+          pcpu = f[4] + 0;
+          stat = f[5];
+          comm = f[6];
+          if (ignored(comm) || etimes < min_age) {
+            continue;
+          }
+          if (pcpu >= min_cpu || stat ~ /^[RD]/) {
+            if (pcpu > best_cpu || (pcpu == best_cpu && etimes > best_age)) {
+              best = row[pid];
+              best_cpu = pcpu;
+              best_age = etimes;
+            }
+          }
+        }
+        if (best != "") {
+          print best;
+        }
+      }
+    '
+}
+
+_polecat_runtime_classify() {
+  local session="${1:-}" created_at="${2:-}" output_log="${3:-}"
+  local now_epoch quiet_secs stall_secs output_age created_age root_pid busy_child min_age min_cpu
+  local busy_pid busy_ppid busy_etimes busy_cpu busy_stat busy_comm busy_args
+  now_epoch=$(date +%s)
+  quiet_secs="$(_polecat_quiet_output_stale_secs)"
+  stall_secs="$(_polecat_stall_secs)"
+  min_age="$(_polecat_busy_child_min_age_secs)"
+  min_cpu="$(_polecat_busy_child_min_cpu_pct)"
+  output_age="$(_polecat_output_age_seconds "$output_log" "$now_epoch")"
+  created_age="$(_polecat_created_age_seconds "$created_at" "$now_epoch")"
+
+  if [[ "$output_age" =~ ^[0-9]+$ ]] && [[ "$output_age" -le "$quiet_secs" ]]; then
+    printf 'active-output|recent-output|terminal output refreshed %ss ago|%s|||\n' "$output_age" "$output_age"
+    return 0
+  fi
+
+  root_pid="$(_polecat_session_root_pid "$session")"
+  if busy_child="$(_polecat_find_busy_child "$root_pid" "$min_age" "$min_cpu")" && [[ -n "$busy_child" ]]; then
+    IFS='|' read -r busy_pid busy_ppid busy_etimes busy_cpu busy_stat busy_comm busy_args <<< "$busy_child"
+    printf 'busy-long-running|substantive-child-running|quiet output but substantive child %s pid=%s cpu=%s age=%ss state=%s|%s|%s|%s|%s\n' \
+      "${busy_comm:-process}" \
+      "${busy_pid:-unknown}" \
+      "${busy_cpu:-0}" \
+      "${busy_etimes:-0}" \
+      "${busy_stat:-unknown}" \
+      "${output_age:--1}" \
+      "${busy_pid:-}" \
+      "${busy_comm:-}" \
+      "${busy_args:-}"
+    return 0
+  fi
+
+  if [[ "$output_age" =~ ^[0-9]+$ ]]; then
+    if [[ "$output_age" -lt "$stall_secs" ]]; then
+      printf 'stale-but-allowed|quiet-within-stall-budget|quiet output for %ss with no substantive child yet; below %ss stall threshold|%s|||\n' \
+        "$output_age" "$stall_secs" "$output_age"
+      return 0
+    fi
+    if [[ "$created_age" =~ ^[0-9]+$ ]] && [[ "$created_age" -lt "$stall_secs" ]]; then
+      printf 'stale-but-allowed|young-session|quiet output for %ss, but session age is only %ss (stall threshold %ss)|%s|||\n' \
+        "$output_age" "$created_age" "$stall_secs" "$output_age"
+      return 0
+    fi
+    printf 'stalled|no-substantive-child|quiet output for %ss with no substantive child process detected|%s|||\n' "$output_age" "$output_age"
+    return 0
+  fi
+
+  if [[ "$created_age" =~ ^[0-9]+$ ]] && [[ "$created_age" -lt "$stall_secs" ]]; then
+    printf 'stale-but-allowed|output-log-missing|session age %ss, output log missing, and no substantive child detected yet|%s|||\n' "$created_age" "$output_age"
+    return 0
+  fi
+
+  printf 'stalled|output-log-missing|output log missing and no substantive child process detected|%s|||\n' "$output_age"
+}
+
 _witness_loop() {
   local rig="$1"
   local repo
@@ -8567,7 +8778,8 @@ _witness_loop() {
 
       # Source in subshell to avoid polluting
       local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge p_output_log
-      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND|OUTPUT_LOG)=' "$f")"
+      local p_runtime_classification p_runtime_reason_code p_runtime_summary p_runtime_output_age p_runtime_busy_pid p_runtime_busy_comm
+      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND|OUTPUT_LOG|RUNTIME_CLASSIFICATION|RUNTIME_REASON_CODE|RUNTIME_SUMMARY|RUNTIME_OUTPUT_AGE_SECS|RUNTIME_BUSY_PID|RUNTIME_BUSY_COMM)=' "$f")"
       p_session="$SESSION"
       p_branch="$BRANCH"
       p_issue="$ISSUE"
@@ -8576,6 +8788,12 @@ _witness_loop() {
       p_repo="$REPO"
       p_auto_merge="${AUTO_MERGE:-false}"
       p_output_log="${OUTPUT_LOG:-}"
+      p_runtime_classification="${RUNTIME_CLASSIFICATION:-}"
+      p_runtime_reason_code="${RUNTIME_REASON_CODE:-}"
+      p_runtime_summary="${RUNTIME_SUMMARY:-}"
+      p_runtime_output_age="${RUNTIME_OUTPUT_AGE_SECS:-}"
+      p_runtime_busy_pid="${RUNTIME_BUSY_PID:-}"
+      p_runtime_busy_comm="${RUNTIME_BUSY_COMM:-}"
 
       local alive=false
       tmux has-session -t "$p_session" 2>/dev/null && alive=true
@@ -8613,6 +8831,63 @@ _witness_loop() {
           if [[ "$age" -gt 1800 ]]; then
             echo "[witness/$rig] $pname has been running for $((age/60))m — still alive"
             log_event "WITNESS_LONG_RUNNING $pname age=${age}s"
+          fi
+
+          local pr_meta pr_number pr_state runtime_meta runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args runtime_changed
+          pr_meta="$(_witness_pr_meta "$p_repo" "$p_branch")"
+          IFS=$'\t' read -r pr_number pr_state <<< "$pr_meta"
+          runtime_meta="$(_polecat_runtime_classify "$p_session" "$p_created" "$p_output_log")"
+          IFS='|' read -r runtime_classification runtime_reason runtime_summary runtime_output_age runtime_busy_pid runtime_busy_comm runtime_busy_args <<< "$runtime_meta"
+          runtime_changed=false
+          if [[ "$runtime_classification" != "$p_runtime_classification" || "$runtime_reason" != "$p_runtime_reason_code" || "$runtime_summary" != "$p_runtime_summary" || "$runtime_output_age" != "$p_runtime_output_age" || "$runtime_busy_pid" != "$p_runtime_busy_pid" || "$runtime_busy_comm" != "$p_runtime_busy_comm" ]]; then
+            runtime_changed=true
+            _merge_queue_set_field "$f" "RUNTIME_CLASSIFICATION" "$runtime_classification" || true
+            _merge_queue_set_field "$f" "RUNTIME_REASON_CODE" "$runtime_reason" || true
+            _merge_queue_set_field "$f" "RUNTIME_SUMMARY" "$runtime_summary" || true
+            _merge_queue_set_field "$f" "RUNTIME_OUTPUT_AGE_SECS" "$runtime_output_age" || true
+            _merge_queue_set_field "$f" "RUNTIME_BUSY_PID" "$runtime_busy_pid" || true
+            _merge_queue_set_field "$f" "RUNTIME_BUSY_COMM" "$runtime_busy_comm" || true
+          fi
+          if $runtime_changed; then
+            log_event "WITNESS_RUNTIME_CLASSIFICATION polecat=$pname rig=$rig issue=#$p_issue classification=$runtime_classification reason_code=$runtime_reason output_age=${runtime_output_age:-unknown}s busy_pid=${runtime_busy_pid:-none} busy_comm=$(_escape_quotes "${runtime_busy_comm:-none}") summary=\"$(_escape_quotes "${runtime_summary:-}")\""
+          fi
+
+          if [[ -z "$pr_number" && "$runtime_classification" == "stalled" ]]; then
+            echo "[witness/$rig] $pname is STALLED (alive session, no PR, no substantive child process)"
+            log_event "WITNESS_STALLED $pname issue=#$p_issue reason_code=$runtime_reason output_age=${runtime_output_age:-unknown}s mode=alive-session"
+            _wake_refinery "$rig" "stalled:$pname:#$p_issue:$runtime_reason"
+
+            gh issue comment "$p_issue" --repo "$p_repo" \
+              --body "[sgt-witness] Polecat \`$pname\` was classified as truly stalled while still alive: quiet output with no substantive child process detected. Cleaning up and re-slinging." 2>/dev/null || true
+
+            tmux kill-session -t "$p_session" 2>/dev/null || true
+            if [[ -d "$p_worktree" ]]; then
+              local rpath
+              rpath="$(rig_path "$rig")"
+              git -C "$rpath" worktree remove --force "$p_worktree" 2>/dev/null || rm -rf "$p_worktree"
+            fi
+            git -C "$(rig_path "$rig")" push origin --delete "$p_branch" 2>/dev/null || true
+            rm -f "$f"
+
+            local issue_title
+            issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+            if [[ -n "$issue_title" ]]; then
+              if _mayor_rig_manually_hibernated "$rig"; then
+                echo "[witness/$rig] rig manually hibernated — leaving stalled issue #$p_issue parked"
+                log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=manual-hibernation"
+                continue
+              fi
+              echo "[witness/$rig] re-slinging issue #$p_issue: $issue_title"
+              log_event "WITNESS_RESLING $pname issue=#$p_issue reason_code=$runtime_reason"
+              if ! _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled" "witness-stalled:$pname:#$p_issue"; then
+                echo "[witness/$rig] re-sling failed for issue #$p_issue — recording durable follow-up"
+                _witness_record_stalled_followup "$rig" "$p_repo" "$p_issue" "$issue_title" "$pname" "witness-stalled-resling-failed"
+              fi
+            else
+              echo "[witness/$rig] unable to reload issue #$p_issue title after stall — recording durable follow-up"
+              _witness_record_stalled_followup "$rig" "$p_repo" "$p_issue" "" "$pname" "witness-stalled-issue-title-unavailable"
+            fi
+            continue
           fi
         fi
       fi

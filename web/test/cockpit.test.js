@@ -32,6 +32,15 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
           branch: 'sgt/sgt-34784812',
           session: 'sgt-sgt-34784812',
           pr: { number: '', state: '', title: '' },
+          runtime: {
+            classification: 'busy-long-running',
+            reason_code: 'substantive-child-running',
+            summary: 'quiet output but substantive child python3 pid=321 cpu=97 age=840s state=R',
+            output_age_seconds: '1200',
+            busy_pid: '321',
+            busy_comm: 'python3',
+            busy_args: 'python3 scripts/example.py',
+          },
         },
       ],
       dogs: [],
@@ -79,6 +88,8 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.rigs[0].blockers, 1);
   assert.equal(snapshot.rigs[0].activeWorkers, 1);
   assert.equal(snapshot.workers[0].stream.target, 'sgt-34784812');
+  assert.equal(snapshot.workers[0].runtime.classification, 'busy-long-running');
+  assert.equal(snapshot.workers[0].runtime.busy_comm, 'python3');
   assert.equal(snapshot.queue.summary.total, 1);
   assert.equal(snapshot.blockers[0].title, 'Acceptance still red');
   assert.equal(snapshot.alerts[0].kind, 'blocker-opened');
