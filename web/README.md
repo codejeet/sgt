@@ -9,7 +9,7 @@ For the research-first redesign constraints that govern the next visual refineme
 
 ```bash
 cd web
-npm install
+npm ci
 npm start
 # open http://localhost:4747
 ```
@@ -37,7 +37,7 @@ Override the live target without editing the script:
 SGT_WEB_LIVE_DIR=/srv/sgt/web web/scripts/sync-live-copy.sh
 ```
 
-`web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/`, `package-lock.json`, and `webui.log`, and runs `npm install` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
+`web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, copies the repo-tracked `package-lock.json`, and runs `npm ci` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
 
 ## Configuration
 
@@ -76,7 +76,7 @@ Run this on a fresh checkout of the latest `master`/mainline commit when you wan
 
 That proof path bundles:
 
-- `npm --prefix web test` for the cockpit snapshot/topology/blocker alert contracts plus the operator-shell UI and docs/deploy-helper assertions
+- `npm --prefix web ci && npm --prefix web test` for a fresh-checkout dependency install plus the cockpit snapshot/topology/blocker alert contracts, operator-shell UI, and docs/deploy-helper assertions
 - `web/scripts/sync-live-copy.sh --dry-run <tempdir>` so the canonical repo `web/` to live-copy sync path is exercised without touching `/root/sgt/web`
 
 ## Features

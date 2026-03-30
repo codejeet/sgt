@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+npm --prefix "$REPO_ROOT/web" ci
 npm --prefix "$REPO_ROOT/web" test
 "$REPO_ROOT/web/scripts/sync-live-copy.sh" --dry-run "$TMP_DIR/live"
 
