@@ -39,6 +39,8 @@ SGT_MAYOR_RIG_ACTIVITY_DIR="$SGT_CONFIG/mayor-rig-activity"
 SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS="${SGT_MAYOR_AGENT_HEARTBEAT_DEDUPE_SECS:-900}" # 15 minutes
 SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN="${SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN:-600}" # 10 minutes
 SGT_MAYOR_BRIEFING_STALE_SECS="${SGT_MAYOR_BRIEFING_STALE_SECS:-5}" # 5 seconds
+SGT_MAYOR_AUTO_REFRESH_TOKENS="${SGT_MAYOR_AUTO_REFRESH_TOKENS:-150000}" # 150k estimated tokens
+SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS="${SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS:-900}" # 15 minutes
 SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS="${SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS:-300}" # 5 minutes
 SGT_MAYOR_RIG_ACTIVITY="${SGT_MAYOR_RIG_ACTIVITY:-1}" # 1=track per-rig mayor activity state
 SGT_MAYOR_RIG_AUTO_HIBERNATE_SECS="${SGT_MAYOR_RIG_AUTO_HIBERNATE_SECS:-0}" # 0=disabled
@@ -401,6 +403,90 @@ _mayor_notify_alert_state_clear() {
   rm -f "$SGT_MAYOR_NOTIFY_ALERT_STATE"
 }
 
+_mayor_prompt_budget_state_file() {
+  echo "$(_mayor_scope_dir)/mayor-prompt-budget.state"
+}
+
+_mayor_prompt_budget_state_read() {
+  local ts="" measured_at="" estimated_tokens="" char_count="" threshold="" over_budget="" source_path=""
+  local state_file
+  state_file="$(_mayor_prompt_budget_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts measured_at estimated_tokens char_count threshold over_budget source_path < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$measured_at" \
+    "$estimated_tokens" \
+    "$char_count" \
+    "$threshold" \
+    "$over_budget" \
+    "$source_path"
+}
+
+_mayor_prompt_budget_state_write() {
+  local ts="${1:-}" measured_at="${2:-}" estimated_tokens="${3:-0}" char_count="${4:-0}" threshold="${5:-$(_mayor_auto_refresh_threshold_tokens)}" over_budget="${6:-false}" source_path="${7:-}"
+  local state_file state_tmp
+  state_file="$(_mayor_prompt_budget_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$(_escape_wake_value "$measured_at")" \
+    "$estimated_tokens" \
+    "$char_count" \
+    "$threshold" \
+    "$(_escape_wake_value "$over_budget")" \
+    "$(_escape_wake_value "$source_path")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_mayor_auto_refresh_state_file() {
+  echo "$(_mayor_scope_dir)/mayor-auto-refresh.state"
+}
+
+_mayor_auto_refresh_state_read() {
+  local ts="" refreshed_at="" trigger="" estimated_tokens="" char_count="" threshold="" handoff_path="" handoff_token="" status=""
+  local state_file
+  state_file="$(_mayor_auto_refresh_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts refreshed_at trigger estimated_tokens char_count threshold handoff_path handoff_token status < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$refreshed_at" \
+    "$trigger" \
+    "$estimated_tokens" \
+    "$char_count" \
+    "$threshold" \
+    "$handoff_path" \
+    "$handoff_token" \
+    "$status"
+}
+
+_mayor_auto_refresh_state_write() {
+  local ts="${1:-}" refreshed_at="${2:-}" trigger="${3:-budget-exceeded}" estimated_tokens="${4:-0}" char_count="${5:-0}" threshold="${6:-$(_mayor_auto_refresh_threshold_tokens)}" handoff_path="${7:-}" handoff_token="${8:-}" status="${9:-completed}"
+  local state_file state_tmp
+  state_file="$(_mayor_auto_refresh_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$ts" \
+    "$(_escape_wake_value "$refreshed_at")" \
+    "$(_escape_wake_value "$trigger")" \
+    "$estimated_tokens" \
+    "$char_count" \
+    "$threshold" \
+    "$(_escape_wake_value "$handoff_path")" \
+    "$(_escape_wake_value "$handoff_token")" \
+    "$(_escape_wake_value "$status")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
 _mayor_start_receipt_file() {
   echo "$(_mayor_scope_dir "${1:-}")/mayor-start.receipt"
 }
@@ -677,6 +763,43 @@ _mayor_start_log_tail() {
   fi
 }
 
+_mayor_auto_refresh_threshold_tokens() {
+  local raw="${SGT_MAYOR_AUTO_REFRESH_TOKENS:-150000}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -le 0 ]]; then
+    raw="150000"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_auto_refresh_cooldown_secs() {
+  local raw="${SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS:-900}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -lt 0 ]]; then
+    raw="900"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_mayor_prompt_token_estimate_from_chars() {
+  local char_count="${1:-0}"
+  [[ "$char_count" =~ ^[0-9]+$ ]] || char_count=0
+  if [[ "$char_count" -le 0 ]]; then
+    printf '0\n'
+    return 0
+  fi
+  printf '%s\n' $(( (char_count + 3) / 4 ))
+}
+
+_mayor_prompt_budget_measure_file() {
+  local prompt_file="${1:-}"
+  local char_count=0 estimated_tokens=0
+  if [[ -n "$prompt_file" && -f "$prompt_file" ]]; then
+    char_count="$(wc -c < "$prompt_file" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$char_count" =~ ^[0-9]+$ ]] || char_count=0
+  fi
+  estimated_tokens="$(_mayor_prompt_token_estimate_from_chars "$char_count")"
+  printf '%s|%s\n' "$estimated_tokens" "$char_count"
+}
+
 _mayor_refresh_handoffs_dir() {
   echo "$(_mayor_scope_dir)/handoffs"
 }
@@ -795,6 +918,129 @@ $(tail -20 "$decisions_log" 2>/dev/null)
 \`\`\`
 EOF
   fi
+}
+
+_mayor_auto_refresh_resume() {
+  local scope_rig="${1:-}"
+  local waited=0 max_wait=20 session refresh_ts refresh_at trigger estimated_tokens char_count threshold handoff_path handoff_token refresh_status wake_reason
+  ensure_init
+  _mayor_scope_apply "$scope_rig"
+  session="$(_mayor_scope_session_name "$scope_rig")"
+  while tmux has-session -t "$session" 2>/dev/null; do
+    if [[ "$waited" -ge "$max_wait" ]]; then
+      log_event "MAYOR_AUTO_REFRESH_RESUME_SKIPPED scope=${scope_rig:-shared} reason=session-still-live waited=${waited}s"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  IFS='|' read -r refresh_ts refresh_at trigger estimated_tokens char_count threshold handoff_path handoff_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+  if [[ -z "$refresh_ts" || "$refresh_status" != "scheduled" ]]; then
+    return 0
+  fi
+
+  if ! _cmd_mayor_start_one "$scope_rig"; then
+    _mayor_scope_apply "$scope_rig"
+    _mayor_auto_refresh_state_write "$refresh_ts" "$refresh_at" "$trigger" "$estimated_tokens" "$char_count" "$threshold" "$handoff_path" "$handoff_token" "start-failed"
+    log_event "MAYOR_AUTO_REFRESH_RESUME_FAILED scope=${scope_rig:-shared} reason=start-failed tokens=${estimated_tokens:-0} threshold=${threshold:-0} handoff=\"$(_escape_quotes "$handoff_path")\""
+    return 1
+  fi
+
+  _mayor_scope_apply "$scope_rig"
+  if [[ -n "$scope_rig" ]]; then
+    wake_reason="auto-refresh|rig=$scope_rig|tokens=${estimated_tokens:-0}|threshold=${threshold:-0}|handoff=${handoff_token:-unknown}"
+  else
+    wake_reason="auto-refresh|tokens=${estimated_tokens:-0}|threshold=${threshold:-0}|handoff=${handoff_token:-unknown}"
+  fi
+  _mayor_auto_refresh_state_write "$refresh_ts" "$refresh_at" "$trigger" "$estimated_tokens" "$char_count" "$threshold" "$handoff_path" "$handoff_token" "completed"
+  log_event "MAYOR_AUTO_REFRESH_RESUMED scope=${scope_rig:-shared} tokens=${estimated_tokens:-0} threshold=${threshold:-0} handoff=\"$(_escape_quotes "$handoff_path")\" wake=\"$(_escape_quotes "$wake_reason")\""
+  cmd_wake_mayor "$wake_reason"
+}
+
+_mayor_schedule_auto_refresh_resume() {
+  local scope_rig="${1:-}"
+  local sgt_exec
+  sgt_exec="$(_sgt_exec_path)"
+  if [[ -n "$scope_rig" ]]; then
+    nohup env SGT_ROOT="$SGT_ROOT" SGT_MAYOR_ARCHITECTURE="$SGT_MAYOR_ARCHITECTURE" SGT_EXEC_PATH="$sgt_exec" "$sgt_exec" _mayor-auto-refresh-resume "$scope_rig" >/dev/null 2>&1 &
+  else
+    nohup env SGT_ROOT="$SGT_ROOT" SGT_MAYOR_ARCHITECTURE="$SGT_MAYOR_ARCHITECTURE" SGT_EXEC_PATH="$sgt_exec" "$sgt_exec" _mayor-auto-refresh-resume >/dev/null 2>&1 &
+  fi
+}
+
+_mayor_trigger_auto_refresh() {
+  local estimated_tokens="${1:-0}" char_count="${2:-0}" threshold="${3:-$(_mayor_auto_refresh_threshold_tokens)}" trigger="${4:-budget-exceeded}" prompt_file="${5:-}"
+  local scope_rig="${SGT_MAYOR_SCOPE_RIG:-}" handoff_token handoff_dir handoff_file status_snapshot now_epoch now_iso was_running
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  was_running="true"
+
+  handoff_token="$(_mayor_refresh_token)"
+  handoff_dir="$(_mayor_refresh_handoffs_dir)/$handoff_token"
+  handoff_file="$handoff_dir/handoff.md"
+  mkdir -p "$handoff_dir"
+
+  status_snapshot="$(cmd_status 2>&1 || true)"
+  _mayor_scope_apply "$scope_rig"
+  _mayor_refresh_archive_transients "$handoff_dir" >/dev/null || true
+  _mayor_refresh_write_handoff "$handoff_file" "$handoff_token" "$was_running" "$status_snapshot"
+  cat >> "$handoff_file" <<EOF
+
+## Auto-Refresh Trigger
+- trigger: $trigger
+- estimated_tokens: $estimated_tokens
+- estimated_chars: $char_count
+- threshold_tokens: $threshold
+- prompt_file: ${prompt_file:-unknown}
+EOF
+  _mayor_auto_refresh_state_write "$now_epoch" "$now_iso" "$trigger" "$estimated_tokens" "$char_count" "$threshold" "$handoff_file" "$handoff_token" "scheduled"
+  log_event "MAYOR_AUTO_REFRESH_TRIGGERED scope=${scope_rig:-shared} trigger=$trigger estimated_tokens=$estimated_tokens threshold=$threshold char_count=$char_count handoff=\"$(_escape_quotes "$handoff_file")\""
+  _mayor_record_decision "MAYOR AUTO REFRESH trigger=$trigger estimated_tokens=$estimated_tokens threshold=$threshold char_count=$char_count handoff=\"$handoff_file\"" "auto-refresh-threshold" "$SGT_ROOT" || true
+  _mayor_schedule_auto_refresh_resume "$scope_rig"
+  printf '%s\n' "$handoff_file"
+}
+
+_mayor_prompt_budget_guard() {
+  local prompt_file="${1:-}" trigger="${2:-ai-cycle}"
+  local estimated_tokens char_count threshold over_budget measured_at now_epoch cooldown_secs
+  local refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status
+  local age cooldown_remaining handoff_file
+
+  IFS='|' read -r estimated_tokens char_count <<< "$(_mayor_prompt_budget_measure_file "$prompt_file")"
+  threshold="$(_mayor_auto_refresh_threshold_tokens)"
+  measured_at="$(date -Iseconds)"
+  now_epoch="$(date +%s)"
+  over_budget="false"
+  if [[ "$estimated_tokens" =~ ^[0-9]+$ && "$threshold" =~ ^[0-9]+$ ]] && (( estimated_tokens > threshold )); then
+    over_budget="true"
+  fi
+  _mayor_prompt_budget_state_write "$now_epoch" "$measured_at" "$estimated_tokens" "$char_count" "$threshold" "$over_budget" "$prompt_file"
+  log_event "MAYOR_PROMPT_BUDGET scope=${SGT_MAYOR_SCOPE_RIG:-shared} estimated_tokens=$estimated_tokens threshold=$threshold char_count=$char_count over_budget=$over_budget prompt=\"$(_escape_quotes "$prompt_file")\""
+
+  if [[ "$over_budget" != "true" ]]; then
+    printf 'ok|%s|%s|%s|0|\n' "$estimated_tokens" "$char_count" "$threshold"
+    return 0
+  fi
+
+  cooldown_secs="$(_mayor_auto_refresh_cooldown_secs)"
+  IFS='|' read -r refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+  cooldown_remaining=0
+  if [[ "$cooldown_secs" =~ ^[0-9]+$ && "$cooldown_secs" -gt 0 && "$refresh_ts" =~ ^[0-9]+$ ]]; then
+    age=$((now_epoch - refresh_ts))
+    (( age < 0 )) && age=0
+    if (( age < cooldown_secs )); then
+      cooldown_remaining=$((cooldown_secs - age))
+      log_event "MAYOR_AUTO_REFRESH_SKIPPED scope=${SGT_MAYOR_SCOPE_RIG:-shared} reason=cooldown-active estimated_tokens=$estimated_tokens threshold=$threshold char_count=$char_count remaining=${cooldown_remaining}s previous_handoff=\"$(_escape_quotes "$refresh_handoff")\""
+      _mayor_record_decision "MAYOR AUTO REFRESH SKIP reason=cooldown-active estimated_tokens=$estimated_tokens threshold=$threshold char_count=$char_count remaining=${cooldown_remaining}s" "auto-refresh-cooldown" "$SGT_ROOT" || true
+      printf 'cooldown|%s|%s|%s|%s|%s\n' "$estimated_tokens" "$char_count" "$threshold" "$cooldown_remaining" "$refresh_handoff"
+      return 2
+    fi
+  fi
+
+  handoff_file="$(_mayor_trigger_auto_refresh "$estimated_tokens" "$char_count" "$threshold" "$trigger" "$prompt_file")"
+  printf 'refresh|%s|%s|%s|0|%s\n' "$estimated_tokens" "$char_count" "$threshold" "$handoff_file"
+  return 1
 }
 
 _mayor_wait_for_start() {
@@ -7321,6 +7567,8 @@ cmd_status_json() {
       local mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status mayor_exit_age
       local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
       local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+      local budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source budget_age
+      local refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status refresh_age
       local review_watch_count review_watch_oldest review_watch_threshold
       mayor_alive="off"
       tmux has-session -t "$(_mayor_scope_session_name "$mayor_scope_rig")" 2>/dev/null && mayor_alive="on"
@@ -7346,8 +7594,20 @@ cmd_status_json() {
         notify_alert_age=$(( $(date +%s) - notify_alert_ts ))
         (( notify_alert_age < 0 )) && notify_alert_age=0
       fi
+      IFS='|' read -r budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source <<< "$(_mayor_prompt_budget_state_read)"
+      budget_age=""
+      if [[ "$budget_ts" =~ ^[0-9]+$ ]]; then
+        budget_age=$(( $(date +%s) - budget_ts ))
+        (( budget_age < 0 )) && budget_age=0
+      fi
+      IFS='|' read -r refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+      refresh_age=""
+      if [[ "$refresh_ts" =~ ^[0-9]+$ ]]; then
+        refresh_age=$(( $(date +%s) - refresh_ts ))
+        (( refresh_age < 0 )) && refresh_age=0
+      fi
       IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-      agents+=("{\"name\":$(_json_quote "mayor/$mayor_scope_rig"),\"rig\":$(_json_quote "$mayor_scope_rig"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+      agents+=("{\"name\":$(_json_quote "mayor/$mayor_scope_rig"),\"rig\":$(_json_quote "$mayor_scope_rig"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"prompt_budget\":{\"timestamp\":$(_json_quote "$budget_ts"),\"age_seconds\":$(_json_quote "$budget_age"),\"measured_at\":$(_json_quote "$budget_measured_at"),\"estimated_tokens\":$(_json_quote "$budget_tokens"),\"char_count\":$(_json_quote "$budget_chars"),\"threshold\":$(_json_quote "$budget_threshold"),\"over_budget\":$(_json_quote "$budget_over"),\"source_path\":$(_json_quote "$budget_source")},\"auto_refresh\":{\"timestamp\":$(_json_quote "$refresh_ts"),\"age_seconds\":$(_json_quote "$refresh_age"),\"refreshed_at\":$(_json_quote "$refresh_at"),\"trigger\":$(_json_quote "$refresh_trigger"),\"estimated_tokens\":$(_json_quote "$refresh_tokens"),\"char_count\":$(_json_quote "$refresh_chars"),\"threshold\":$(_json_quote "$refresh_threshold"),\"handoff_path\":$(_json_quote "$refresh_handoff"),\"handoff_token\":$(_json_quote "$refresh_token"),\"status\":$(_json_quote "$refresh_status")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
     done
     _mayor_scope_apply ""
   else
@@ -7386,9 +7646,27 @@ cmd_status_json() {
         notify_alert_age=0
       fi
     fi
+    local budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source budget_age
+    IFS='|' read -r budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source <<< "$(_mayor_prompt_budget_state_read)"
+    budget_age=""
+    if [[ "$budget_ts" =~ ^[0-9]+$ ]]; then
+      budget_age=$(( $(date +%s) - budget_ts ))
+      if [[ "$budget_age" -lt 0 ]]; then
+        budget_age=0
+      fi
+    fi
+    local refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status refresh_age
+    IFS='|' read -r refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+    refresh_age=""
+    if [[ "$refresh_ts" =~ ^[0-9]+$ ]]; then
+      refresh_age=$(( $(date +%s) - refresh_ts ))
+      if [[ "$refresh_age" -lt 0 ]]; then
+        refresh_age=0
+      fi
+    fi
     local review_watch_count review_watch_oldest review_watch_threshold
     IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
-    agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
+    agents+=("{\"name\":$(_json_quote "mayor"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"prompt_budget\":{\"timestamp\":$(_json_quote "$budget_ts"),\"age_seconds\":$(_json_quote "$budget_age"),\"measured_at\":$(_json_quote "$budget_measured_at"),\"estimated_tokens\":$(_json_quote "$budget_tokens"),\"char_count\":$(_json_quote "$budget_chars"),\"threshold\":$(_json_quote "$budget_threshold"),\"over_budget\":$(_json_quote "$budget_over"),\"source_path\":$(_json_quote "$budget_source")},\"auto_refresh\":{\"timestamp\":$(_json_quote "$refresh_ts"),\"age_seconds\":$(_json_quote "$refresh_age"),\"refreshed_at\":$(_json_quote "$refresh_at"),\"trigger\":$(_json_quote "$refresh_trigger"),\"estimated_tokens\":$(_json_quote "$refresh_tokens"),\"char_count\":$(_json_quote "$refresh_chars"),\"threshold\":$(_json_quote "$refresh_threshold"),\"handoff_path\":$(_json_quote "$refresh_handoff"),\"handoff_token\":$(_json_quote "$refresh_token"),\"status\":$(_json_quote "$refresh_status")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
   fi
 
   local df dname
@@ -7643,6 +7921,8 @@ _cmd_status_human() {
       local mayor_exit_ts mayor_exit_reason mayor_exit_code mayor_exit_signal mayor_exit_unexpected mayor_exit_pid mayor_exit_trigger mayor_exit_cycle_at mayor_exit_cycle_status mayor_exit_age
       local log_fail_ts log_fail_context log_fail_workspace log_fail_error log_fail_age
       local notify_alert_ts notify_alert_channel notify_alert_target notify_alert_message_key notify_alert_attempt notify_alert_outcome notify_alert_reason notify_alert_matcher notify_alert_fail_open notify_alert_age
+      local budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source budget_age
+      local refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status refresh_age
       local review_watch_count review_watch_oldest review_watch_threshold
       mayor_alive="off"
       tmux has-session -t "$(_mayor_scope_session_name "$mayor_scope_rig")" 2>/dev/null && mayor_alive="on"
@@ -7686,6 +7966,18 @@ _cmd_status_human() {
         notify_alert_age=$(( $(date +%s) - notify_alert_ts ))
         (( notify_alert_age < 0 )) && notify_alert_age=0
         printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "notify warning: ${notify_alert_age}s ago outcome=${notify_alert_outcome:-unknown} reason=${notify_alert_reason:-unknown} matcher=${notify_alert_matcher:-unknown} fail_open=${notify_alert_fail_open:-true} target=${notify_alert_target:-unknown}" "$(_reset)"
+      fi
+      IFS='|' read -r budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source <<< "$(_mayor_prompt_budget_state_read)"
+      if [[ "$budget_ts" =~ ^[0-9]+$ ]]; then
+        budget_age=$(( $(date +%s) - budget_ts ))
+        (( budget_age < 0 )) && budget_age=0
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "prompt budget: ${budget_age}s ago estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} over_budget=${budget_over:-false}" "$(_reset)"
+      fi
+      IFS='|' read -r refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+      if [[ "$refresh_ts" =~ ^[0-9]+$ ]]; then
+        refresh_age=$(( $(date +%s) - refresh_ts ))
+        (( refresh_age < 0 )) && refresh_age=0
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "auto refresh: ${refresh_age}s ago trigger=${refresh_trigger:-unknown} status=${refresh_status:-unknown} estimated_tokens=${refresh_tokens:-0} threshold=${refresh_threshold:-0} handoff=${refresh_handoff:-unknown}" "$(_reset)"
       fi
       IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
       if [[ "$review_watch_count" =~ ^[0-9]+$ && "$review_watch_count" -gt 0 ]]; then
@@ -7752,6 +8044,24 @@ _cmd_status_human() {
         notify_alert_age=0
       fi
       printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "notify warning: ${notify_alert_age}s ago outcome=${notify_alert_outcome:-unknown} reason=${notify_alert_reason:-unknown} matcher=${notify_alert_matcher:-unknown} fail_open=${notify_alert_fail_open:-true} target=${notify_alert_target:-unknown}" "$(_reset)"
+    fi
+    local budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source budget_age
+    IFS='|' read -r budget_ts budget_measured_at budget_tokens budget_chars budget_threshold budget_over budget_source <<< "$(_mayor_prompt_budget_state_read)"
+    if [[ "$budget_ts" =~ ^[0-9]+$ ]]; then
+      budget_age=$(( $(date +%s) - budget_ts ))
+      if [[ "$budget_age" -lt 0 ]]; then
+        budget_age=0
+      fi
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "prompt budget: ${budget_age}s ago estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} over_budget=${budget_over:-false}" "$(_reset)"
+    fi
+    local refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status refresh_age
+    IFS='|' read -r refresh_ts refresh_at refresh_trigger refresh_tokens refresh_chars refresh_threshold refresh_handoff refresh_token refresh_status <<< "$(_mayor_auto_refresh_state_read)"
+    if [[ "$refresh_ts" =~ ^[0-9]+$ ]]; then
+      refresh_age=$(( $(date +%s) - refresh_ts ))
+      if [[ "$refresh_age" -lt 0 ]]; then
+        refresh_age=0
+      fi
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "auto refresh: ${refresh_age}s ago trigger=${refresh_trigger:-unknown} status=${refresh_status:-unknown} estimated_tokens=${refresh_tokens:-0} threshold=${refresh_threshold:-0} handoff=${refresh_handoff:-unknown}" "$(_reset)"
     fi
     local review_watch_count review_watch_oldest review_watch_threshold
     IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
@@ -11349,6 +11659,16 @@ _mayor_exit_receipt() {
     decision_context="mayor-stop-unexpected"
   fi
 
+  if [[ -n "${_MAYOR_EXIT_REASON_OVERRIDE:-}" ]]; then
+    reason_code="${_MAYOR_EXIT_REASON_OVERRIDE}"
+    decision_context="${_MAYOR_EXIT_DECISION_CONTEXT_OVERRIDE:-mayor-stop}"
+    if [[ -n "${_MAYOR_EXIT_UNEXPECTED_OVERRIDE:-}" ]]; then
+      unexpected="${_MAYOR_EXIT_UNEXPECTED_OVERRIDE}"
+    elif [[ "$exit_code" -eq 0 ]]; then
+      unexpected="false"
+    fi
+  fi
+
   IFS='|' read -r last_cycle_ts last_cycle_at last_cycle_trigger last_cycle_status <<< "$(_mayor_last_cycle_state_read)"
   _mayor_exit_state_write "$reason_code" "$exit_code" "$signal" "$unexpected" "$$" "$last_cycle_trigger" "$last_cycle_at" "$last_cycle_status"
   log_event "MAYOR_STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected last_cycle_trigger=\"$(_escape_quotes "${last_cycle_trigger:-unknown}")\" last_cycle_status=${last_cycle_status:-unknown} last_cycle_at=\"$(_escape_quotes "${last_cycle_at:-unknown}")\""
@@ -12144,6 +12464,41 @@ If a blocker has no active work left, recreate actionable follow-up work or a pl
 
 After deciding, report your actions: sgt mayor notify "<summary of what you did>"
 MAYORMD
+
+      local budget_guard budget_state budget_tokens budget_chars budget_threshold budget_extra budget_handoff
+      budget_guard="$(_mayor_prompt_budget_guard "$mayor_workspace/CLAUDE.md" "ai-cycle-prompt")"
+      IFS='|' read -r budget_state budget_tokens budget_chars budget_threshold budget_extra budget_handoff <<< "${budget_guard:-unknown|0|0|$(_mayor_auto_refresh_threshold_tokens)|0|}"
+      case "${budget_state:-unknown}" in
+        ok)
+          ;;
+        refresh)
+          echo "[mayor] AI cycle aborted — auto-refresh scheduled (estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} handoff=${budget_handoff:-unknown})"
+          _mayor_record_decision "MAYOR AI CYCLE ABORT reason_code=auto-refresh-threshold estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} char_count=${budget_chars:-0} handoff=\"${budget_handoff:-unknown}\"" "auto-refresh-threshold" "$SGT_ROOT" || true
+          log_event "MAYOR_AI_CYCLE aborted reason=auto-refresh-threshold estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} char_count=${budget_chars:-0} handoff=\"$(_escape_quotes "${budget_handoff:-unknown}")\""
+          _mayor_last_cycle_state_write "$wake_reason" "auto-refresh-scheduled" || true
+          _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
+          _MAYOR_EXIT_REASON_OVERRIDE="auto-refresh-threshold"
+          _MAYOR_EXIT_DECISION_CONTEXT_OVERRIDE="auto-refresh-threshold"
+          _MAYOR_EXIT_UNEXPECTED_OVERRIDE="false"
+          exit 0
+          ;;
+        cooldown)
+          echo "[mayor] AI cycle aborted — auto-refresh cooldown active (estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} retry_in=${budget_extra:-0}s)"
+          _mayor_record_decision "MAYOR AI CYCLE ABORT reason_code=auto-refresh-cooldown estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} char_count=${budget_chars:-0} cooldown_remaining=${budget_extra:-0}s" "auto-refresh-cooldown" "$SGT_ROOT" || true
+          log_event "MAYOR_AI_CYCLE aborted reason=auto-refresh-cooldown estimated_tokens=${budget_tokens:-0} threshold=${budget_threshold:-0} char_count=${budget_chars:-0} cooldown_remaining=${budget_extra:-0}s"
+          _mayor_last_cycle_state_write "$wake_reason" "auto-refresh-cooldown" || true
+          _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
+          continue
+          ;;
+        *)
+          echo "[mayor] AI cycle aborted — prompt budget guard failed"
+          _mayor_record_decision "MAYOR AI CYCLE ABORT reason_code=prompt-budget-guard-failed" "prompt-budget-guard" "$SGT_ROOT" || true
+          log_event "MAYOR_AI_CYCLE aborted reason=prompt-budget-guard-failed"
+          _mayor_last_cycle_state_write "$wake_reason" "budget-guard-aborted" || true
+          _mayor_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
+          continue
+          ;;
+      esac
 
       local backend="$(_ai_backend_default)"
 
@@ -13687,6 +14042,8 @@ Environment:
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
   SGT_MAYOR_AI_CYCLE_TIMEOUT_SECS  Timebox mayor AI decision runs in seconds (default: 300, set >0)
+  SGT_MAYOR_AUTO_REFRESH_TOKENS  Auto-refresh Mayor when estimated prompt tokens exceed N (default: 150000, set >0)
+  SGT_MAYOR_AUTO_REFRESH_COOLDOWN_SECS  Minimum seconds between automatic Mayor refreshes (default: 900, set 0 to disable cooldown)
   SGT_MAYOR_HEARTBEAT_STALE_SECS  Restart mayor when runtime heartbeat is older than N seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
   SGT_MAYOR_ACTION_FENCE       Enable mayor post-action receipt verification fence for dispatch/nuke/merge (default: 0)
   SGT_MAYOR_LOCK_LEASE_SECS    Mayor lock lease length in seconds (default: SGT_MAYOR_INTERVAL + 120, set >0)
@@ -13737,6 +14094,7 @@ main() {
     _daemon)        _daemon_loop ;;
     _boot)          _boot_check ;;
     _mayor)         _mayor_loop ;;
+    _mayor-auto-refresh-resume) _mayor_auto_refresh_resume "$@" ;;
 
     init)           cmd_init ;;
     rig)
