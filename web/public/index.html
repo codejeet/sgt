@@ -149,8 +149,13 @@
         <span class="panel-meta" id="topologyMode">Canvas fallback</span>
       </div>
       <div class="topology-wrap">
-        <canvas id="topologyCanvas" width="960" height="520"></canvas>
+        <div class="topology-stage">
+          <canvas id="topologyCanvas" width="960" height="520"></canvas>
+          <canvas id="topologyOverlay" width="960" height="520"></canvas>
+        </div>
         <div class="topology-sidebar">
+          <div class="subpanel-title">Focus</div>
+          <div class="topology-focus" id="topologyFocus"></div>
           <div class="subpanel-title">Relationship Feed</div>
           <div class="topology-list" id="topologyList"></div>
         </div>

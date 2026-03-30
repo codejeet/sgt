@@ -390,36 +390,216 @@ function normalizeWorker(worker, role) {
   };
 }
 
+function parseQueueDetail(detail = '') {
+  const text = String(detail || '');
+  const prMatch = text.match(/\bPR#(\d+)\b/i);
+  const issueMatch = text.match(/\b(?:issue|issues?)#(\d+)\b/i);
+  const rigMatch = text.match(/\b([a-z0-9_-]+)\s*$/i);
+  return {
+    prNumber: prMatch ? prMatch[1] : '',
+    issueNumber: issueMatch ? issueMatch[1] : '',
+    rig: rigMatch ? rigMatch[1] : '',
+  };
+}
+
 function buildTopology(snapshot) {
-  const nodes = [];
-  const edges = [];
+  const nodeMap = new Map();
+  const edgeMap = new Map();
 
-  nodes.push({ id: 'mayor', type: 'agent', label: 'Mayor' });
-  for (const rig of snapshot.rigs) {
-    nodes.push({ id: `rig:${rig.name}`, type: 'rig', label: rig.name, state: rig.state });
-    edges.push({ from: 'mayor', to: `rig:${rig.name}`, type: 'oversees' });
+  function addNode(node) {
+    if (!node || !node.id) return;
+    const existing = nodeMap.get(node.id) || {};
+    nodeMap.set(node.id, {
+      ...existing,
+      ...node,
+      metadata: {
+        ...(existing.metadata || {}),
+        ...(node.metadata || {}),
+      },
+    });
   }
 
-  for (const worker of snapshot.workers) {
+  function addEdge(edge) {
+    if (!edge || !edge.from || !edge.to || !edge.type) return;
+    const id = `${edge.from}|${edge.to}|${edge.type}`;
+    edgeMap.set(id, {
+      id,
+      label: edge.type,
+      ...edge,
+    });
+  }
+
+  addNode({
+    id: 'agent:mayor',
+    type: 'agent',
+    label: 'Mayor',
+    state: snapshot.agents.some((agent) => agent.name === 'mayor' && String(agent.status).startsWith('on')) ? 'active' : 'idle',
+    metadata: {
+      role: 'mayor',
+    },
+  });
+
+  for (const agent of snapshot.agents || []) {
+    if (!agent || !agent.name || agent.name === 'mayor') continue;
+    const agentId = `agent:${agent.name}`;
+    addNode({
+      id: agentId,
+      type: 'agent',
+      label: agent.name,
+      state: agent.status || 'unknown',
+      rig: agent.rig || '',
+      metadata: {
+        heartbeat: agent.heartbeat || null,
+      },
+    });
+    if (agent.rig) {
+      addEdge({ from: 'agent:mayor', to: `rig:${agent.rig}`, type: 'oversees' });
+      addEdge({ from: `rig:${agent.rig}`, to: agentId, type: 'supports' });
+    }
+  }
+
+  for (const rig of snapshot.rigs || []) {
+    const rigId = `rig:${rig.name}`;
+    addNode({
+      id: rigId,
+      type: 'rig',
+      label: rig.name,
+      state: rig.state || 'unknown',
+      rig: rig.name,
+      metadata: {
+        repo: rig.repo || '',
+        blockers: rig.blockers || 0,
+        activeWorkers: rig.activeWorkers || 0,
+        mergeQueue: rig.mergeQueue || 0,
+        hibernationMode: rig.hibernationMode || 'none',
+        reason: rig.reason || '',
+      },
+    });
+    addEdge({ from: 'agent:mayor', to: rigId, type: 'oversees' });
+  }
+
+  for (const worker of snapshot.workers || []) {
+    const rigName = worker.rig || 'unknown';
+    const rigId = `rig:${rigName}`;
     const workerNode = `worker:${worker.id}`;
-    nodes.push({ id: workerNode, type: worker.role, label: worker.name, state: worker.status });
-    if (worker.rig) edges.push({ from: `rig:${worker.rig}`, to: workerNode, type: 'runs' });
-    if (worker.issue) edges.push({ from: workerNode, to: `issue:${worker.rig || 'unknown'}:${worker.issue}`, type: 'tracks' });
-    if (worker.pr && worker.pr.number) edges.push({ from: workerNode, to: `pr:${worker.rig || 'unknown'}:${worker.pr.number}`, type: 'owns' });
+    addNode({
+      id: workerNode,
+      type: worker.role,
+      label: worker.name,
+      state: worker.status || 'unknown',
+      rig: worker.rig || '',
+      metadata: {
+        issue: worker.issue || '',
+        branch: worker.branch || '',
+        repo: worker.repo || '',
+        pr: worker.pr || {},
+        warning: worker.warning || '',
+        session: worker.session || '',
+      },
+    });
+    if (worker.rig) addEdge({ from: rigId, to: workerNode, type: 'runs' });
+
+    if (worker.issue) {
+      const issueNode = `issue:${rigName}:${worker.issue}`;
+      addNode({
+        id: issueNode,
+        type: 'issue',
+        label: `#${worker.issue}`,
+        state: worker.status === 'alive' ? 'active' : 'open',
+        rig: worker.rig || '',
+        metadata: {
+          branch: worker.branch || '',
+          worker: worker.name,
+        },
+      });
+      addEdge({ from: rigId, to: issueNode, type: 'tracks' });
+      addEdge({ from: workerNode, to: issueNode, type: 'works-on' });
+    }
+
+    if (worker.pr && worker.pr.number) {
+      const prNode = `pr:${rigName}:${worker.pr.number}`;
+      addNode({
+        id: prNode,
+        type: 'pr',
+        label: `PR #${worker.pr.number}`,
+        state: worker.pr.state || 'open',
+        rig: worker.rig || '',
+        metadata: {
+          title: worker.pr.title || '',
+          worker: worker.name,
+        },
+      });
+      addEdge({ from: workerNode, to: prNode, type: 'owns' });
+      if (worker.issue) addEdge({ from: prNode, to: `issue:${rigName}:${worker.issue}`, type: 'resolves' });
+    }
   }
 
-  for (const blocker of snapshot.blockers) {
+  for (const blocker of snapshot.blockers || []) {
     const blockerNode = `blocker:${blocker.id}`;
-    nodes.push({ id: blockerNode, type: 'blocker', label: blocker.title, state: blocker.status });
-    if (blocker.rig) edges.push({ from: `rig:${blocker.rig}`, to: blockerNode, type: 'blocked-by' });
+    addNode({
+      id: blockerNode,
+      type: 'blocker',
+      label: blocker.title,
+      state: blocker.status || 'open',
+      rig: blocker.rig || '',
+      metadata: {
+        requester: blocker.requester || '',
+        createdAt: blocker.createdAt || '',
+        updatedAt: blocker.updatedAt || '',
+        evidence: blocker.evidence || '',
+      },
+    });
+    if (blocker.rig) addEdge({ from: `rig:${blocker.rig}`, to: blockerNode, type: 'blocked-by' });
   }
 
-  for (const item of snapshot.queue.items) {
+  for (const item of snapshot.queue.items || []) {
     const queueNode = `queue:${item.name}`;
-    nodes.push({ id: queueNode, type: 'queue', label: item.name, detail: item.detail || '' });
+    const parsed = parseQueueDetail(item.detail || '');
+    addNode({
+      id: queueNode,
+      type: 'queue',
+      label: item.name,
+      state: 'queued',
+      rig: parsed.rig || '',
+      metadata: {
+        detail: item.detail || '',
+        prNumber: parsed.prNumber,
+        issueNumber: parsed.issueNumber,
+      },
+    });
+
+    if (parsed.rig) addEdge({ from: `rig:${parsed.rig}`, to: queueNode, type: 'queues' });
+    if (parsed.prNumber) {
+      const prNode = `pr:${parsed.rig || 'unknown'}:${parsed.prNumber}`;
+      addNode({
+        id: prNode,
+        type: 'pr',
+        label: `PR #${parsed.prNumber}`,
+        state: 'queued',
+        rig: parsed.rig || '',
+        metadata: {
+          title: item.detail || '',
+        },
+      });
+      addEdge({ from: queueNode, to: prNode, type: 'contains' });
+    }
+    if (parsed.issueNumber) {
+      const issueNode = `issue:${parsed.rig || 'unknown'}:${parsed.issueNumber}`;
+      addNode({
+        id: issueNode,
+        type: 'issue',
+        label: `#${parsed.issueNumber}`,
+        state: 'queued',
+        rig: parsed.rig || '',
+      });
+      addEdge({ from: queueNode, to: issueNode, type: 'waiting-on' });
+    }
   }
 
-  return { nodes, edges };
+  return {
+    nodes: Array.from(nodeMap.values()),
+    edges: Array.from(edgeMap.values()),
+  };
 }
 
 function buildRigMap({ rigs, mayorRigs, workers, blockers, mergeQueue }) {
