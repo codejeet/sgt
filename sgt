@@ -8211,6 +8211,99 @@ _sweep_watchdog_resling_open_authorized_issues() {
   done <<< "$issue_rows"
 }
 
+_mayor_recover_stranded_actionable_rig() {
+  local rig="${1:-}" repo="${2:-}"
+  local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
+  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason source_event source_event_key
+  local resling_output blocked_reason_code blocked_detail dispatched_limit resling_log
+
+  _MAYOR_STRANDED_RECOVERY_DISPATCHED=0
+  _MAYOR_STRANDED_RECOVERY_BLOCKED=0
+  _MAYOR_STRANDED_RECOVERY_DETAILS=""
+
+  [[ -n "$rig" && -n "$repo" ]] || return 0
+  if _mayor_rig_hibernated "$rig"; then
+    return 0
+  fi
+
+  snapshot="$(_mayor_rig_activity_snapshot "$rig")"
+  IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
+  [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=0
+  [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=0
+  [[ "$active_polecats" =~ ^[0-9]+$ ]] || active_polecats=0
+  [[ "$merge_queue" =~ ^[0-9]+$ ]] || merge_queue=0
+
+  if (( open_authorized == 0 || open_prs > 0 || active_polecats > 0 || merge_queue > 0 )); then
+    return 0
+  fi
+
+  source_event="mayor-zero-worker-recovery"
+  dispatched_limit=1
+  issue_rows="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --limit 100 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)"
+  [[ -n "$issue_rows" ]] || return 0
+
+  while IFS=$'\t' read -r issue_number issue_title; do
+    [[ -n "$issue_number" ]] || continue
+    source_event_key="${source_event}:${rig}:issue#${issue_number}"
+
+    if existing_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$existing_polecat" ]]; then
+      _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+      _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|active-polecat-existing|polecat=${existing_polecat}"$'\n'
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=active-polecat-existing polecat=$existing_polecat source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
+
+    if backend_limited_reason="$(_issue_backend_dispatch_limited_reason "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$backend_limited_reason" ]]; then
+      _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+      _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|${backend_limited_reason}|backend-limited"$'\n'
+      echo "[mayor] stranded rig $rig leaving issue #$issue_number blocked ($backend_limited_reason)"
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$backend_limited_reason source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
+
+    open_pr="$(_sweep_watchdog_find_open_pr_for_issue "$repo" "$issue_number" || true)"
+    if [[ -n "$open_pr" ]]; then
+      _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+      _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|open-pr-exists|pr=${open_pr}"$'\n'
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=open-pr-exists pr=#$open_pr source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
+
+    echo "[mayor] stranded rig $rig recovering issue #$issue_number (no active polecat, no open PR)"
+    resling_log="$(mktemp "${TMPDIR:-/tmp}/sgt-mayor-stranded.XXXXXX")"
+    if _resling_existing_issue "$rig" "$issue_number" "$issue_title" "$repo" "$(_ai_backend_default)" "" "$source_event" "$source_event_key" >"$resling_log" 2>&1; then
+      resling_output="$(cat "$resling_log" 2>/dev/null || true)"
+      rm -f "$resling_log"
+      _MAYOR_STRANDED_RECOVERY_DISPATCHED=$((_MAYOR_STRANDED_RECOVERY_DISPATCHED + 1))
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_DISPATCH issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=no-active-polecat-no-open-pr polecat=${_RESLING_LAST_POLECAT:-unknown} source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      if (( _MAYOR_STRANDED_RECOVERY_DISPATCHED >= dispatched_limit )); then
+        break
+      fi
+      continue
+    fi
+    resling_output="$(cat "$resling_log" 2>/dev/null || true)"
+    rm -f "$resling_log"
+
+    blocked_reason_code="dispatch-failed"
+    blocked_detail="$(_one_line "${resling_output:-dispatch failed}")"
+    if [[ "$blocked_detail" == *"dispatch-instant gate"* ]]; then
+      blocked_reason_code="final-gate"
+    elif [[ "$blocked_detail" == *"stale event"* ]]; then
+      blocked_reason_code="stale-event"
+    elif [[ "$blocked_detail" == *"lacks sgt-authorized label"* ]]; then
+      blocked_reason_code="unauthorized"
+    elif [[ "$blocked_detail" == *"backend-limited"* ]]; then
+      blocked_reason_code="backend-limited"
+    elif [[ "$blocked_detail" == *"already has active polecat"* ]]; then
+      blocked_reason_code="active-polecat-existing"
+    fi
+    _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+    _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|${blocked_reason_code}|${blocked_detail}"$'\n'
+    echo "[mayor] stranded rig $rig could not recover issue #$issue_number ($blocked_reason_code)"
+    log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$blocked_reason_code detail=\"$(_escape_quotes "$blocked_detail")\" source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+  done <<< "$issue_rows"
+}
+
 cmd_sweep() {
   ensure_init
   local cleaned=0
@@ -11599,6 +11692,28 @@ _mayor_loop() {
             fi
           fi
         done <<< "$orphan_prs"
+      fi
+    done
+
+    # === 5e. Recover actionable rigs stranded with zero workers ===
+    for rig_file in "$SGT_RIGS"/*; do
+      [[ -f "$rig_file" ]] || continue
+      local rname repo
+      rname="$(basename "$rig_file")"
+      if _mayor_scope_skip_rig "$rname"; then
+        continue
+      fi
+      if _mayor_rig_hibernated "$rname" && [[ -z "${cycle_target_rigs[$rname]+x}" ]]; then
+        continue
+      fi
+      repo="$(cat "$rig_file")"
+      _mayor_recover_stranded_actionable_rig "$rname" "$repo"
+      if [[ "${_MAYOR_STRANDED_RECOVERY_DISPATCHED:-0}" =~ ^[0-9]+$ ]] && (( _MAYOR_STRANDED_RECOVERY_DISPATCHED > 0 )); then
+        actions_taken+="  - recovered stranded rig $rname (dispatches=${_MAYOR_STRANDED_RECOVERY_DISPATCHED})\n"
+      fi
+      if [[ "${_MAYOR_STRANDED_RECOVERY_BLOCKED:-0}" =~ ^[0-9]+$ ]] && (( _MAYOR_STRANDED_RECOVERY_BLOCKED > 0 )); then
+        issues_found+="  - stranded actionable rig $rname remained blocked with zero workers (blocked_issues=${_MAYOR_STRANDED_RECOVERY_BLOCKED}; see MAYOR_STRANDED_RIG_RECOVERY_BLOCKED telemetry)\n"
+        needs_ai=true
       fi
     done
 
