@@ -183,6 +183,163 @@ function readAcceptanceBlockers(configDir) {
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
+function mapById(items = []) {
+  const mapped = new Map();
+  for (const item of items) {
+    if (!item || !item.id) continue;
+    mapped.set(item.id, item);
+  }
+  return mapped;
+}
+
+function blockerAlertMessage(kind, blocker, context = {}) {
+  const rig = blocker.rig || 'unknown rig';
+  if (kind === 'blocker-opened') {
+    return `${rig} blocker opened: ${blocker.title}`;
+  }
+  if (kind === 'blocker-followup') {
+    return `${rig} blocker needs follow-up: ${blocker.title}`;
+  }
+  if (kind === 'blocker-resolved') {
+    if (context.remainingRigBlockers === 0 && context.remainingTotalBlockers === 0) {
+      return `${rig} blocker resolved. All acceptance blockers are clear.`;
+    }
+    if (context.remainingRigBlockers === 0) {
+      return `${rig} blocker resolved. No open blockers remain on this rig.`;
+    }
+    return `${rig} blocker resolved: ${blocker.title}`;
+  }
+  return `${rig} blocker updated: ${blocker.title}`;
+}
+
+class BlockerAlertTracker {
+  constructor({
+    now = () => new Date().toISOString(),
+    historyLimit = 24,
+    voice = {},
+  } = {}) {
+    this.now = now;
+    this.historyLimit = historyLimit;
+    this.voice = {
+      enabled: Boolean(voice.enabled),
+      eventKinds: Array.isArray(voice.eventKinds) ? voice.eventKinds : [],
+      rateLimitMs: Number(voice.rateLimitMs) || 0,
+      ...voice,
+    };
+    this.previousBlockers = new Map();
+    this.events = [];
+    this.primed = false;
+    this.lastVoiceAtMs = 0;
+  }
+
+  observe(blockers = []) {
+    const nextBlockers = mapById(blockers);
+    if (!this.primed) {
+      this.previousBlockers = nextBlockers;
+      this.primed = true;
+      return this.listEvents();
+    }
+
+    const createdAt = this.now();
+    const createdMs = Date.parse(createdAt) || Date.now();
+    const rigCounts = new Map();
+    for (const blocker of blockers) {
+      const key = blocker.rig || '';
+      rigCounts.set(key, (rigCounts.get(key) || 0) + 1);
+    }
+
+    for (const [id, blocker] of nextBlockers.entries()) {
+      const previous = this.previousBlockers.get(id);
+      if (!previous) {
+        this.pushEvent({
+          id: `alert:${id}:opened:${createdAt}`,
+          blockerId: id,
+          kind: 'blocker-opened',
+          severity: 'critical',
+          createdAt,
+          blocker,
+          remainingRigBlockers: rigCounts.get(blocker.rig || '') || 0,
+          remainingTotalBlockers: blockers.length,
+        }, createdMs);
+        continue;
+      }
+      if (previous.status !== blocker.status) {
+        this.pushEvent({
+          id: `alert:${id}:status:${createdAt}`,
+          blockerId: id,
+          kind: blocker.status === 'needs-followup' ? 'blocker-followup' : 'blocker-opened',
+          severity: blocker.status === 'needs-followup' ? 'warning' : 'critical',
+          createdAt,
+          blocker,
+          remainingRigBlockers: rigCounts.get(blocker.rig || '') || 0,
+          remainingTotalBlockers: blockers.length,
+        }, createdMs);
+      }
+    }
+
+    for (const [id, blocker] of this.previousBlockers.entries()) {
+      if (nextBlockers.has(id)) continue;
+      this.pushEvent({
+        id: `alert:${id}:resolved:${createdAt}`,
+        blockerId: id,
+        kind: 'blocker-resolved',
+        severity: 'good',
+        createdAt,
+        blocker,
+        remainingRigBlockers: rigCounts.get(blocker.rig || '') || 0,
+        remainingTotalBlockers: blockers.length,
+      }, createdMs);
+    }
+
+    this.previousBlockers = nextBlockers;
+    this.events = this.events
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+      .slice(0, this.historyLimit);
+    return this.listEvents();
+  }
+
+  pushEvent(event, createdMs) {
+    const voice = this.computeVoice(event, createdMs);
+    this.events.unshift({
+      id: event.id,
+      blockerId: event.blockerId,
+      kind: event.kind,
+      severity: event.severity,
+      createdAt: event.createdAt,
+      rig: event.blocker.rig || '',
+      title: event.blocker.title || 'Verified acceptance blocker',
+      status: event.blocker.status || '',
+      requester: event.blocker.requester || 'unknown',
+      message: blockerAlertMessage(event.kind, event.blocker, event),
+      evidence: event.blocker.evidence || '',
+      voice,
+    });
+  }
+
+  computeVoice(event, createdMs) {
+    const text = blockerAlertMessage(event.kind, event.blocker, event);
+    if (!this.voice.enabled) {
+      return { enabled: false, eligible: false, reason: 'not-configured', text };
+    }
+    if (!this.voice.eventKinds.includes(event.kind)) {
+      return { enabled: true, eligible: false, reason: 'event-disabled', text };
+    }
+    if (this.voice.rateLimitMs > 0 && this.lastVoiceAtMs > 0 && createdMs - this.lastVoiceAtMs < this.voice.rateLimitMs) {
+      return { enabled: true, eligible: false, reason: 'rate-limited', text };
+    }
+    this.lastVoiceAtMs = createdMs;
+    return { enabled: true, eligible: true, reason: 'ready', text };
+  }
+
+  listEvents() {
+    return this.events.map((event) => ({ ...event }));
+  }
+
+  getEvent(alertId) {
+    return this.events.find((event) => event.id === alertId) || null;
+  }
+}
+
 function readRecentLogLines(logPath, maxLines) {
   try {
     const content = fs.readFileSync(logPath, 'utf8');
@@ -368,8 +525,10 @@ function buildCockpitSnapshot({
   statusRaw = '',
   rigs = [],
   blockers = [],
+  alerts = [],
   recentLogs = [],
   version = '1',
+  voice = {},
 }) {
   const fallbackParsed = parseStatus(statusRaw || '');
   const statusData = statusJson || {};
@@ -415,6 +574,13 @@ function buildCockpitSnapshot({
         blockers: true,
         tmuxStreaming: true,
         normalizedSnapshot: true,
+        voiceAnnouncements: Boolean(voice.enabled),
+      },
+      voice: {
+        enabled: Boolean(voice.enabled),
+        configured: Boolean(voice.configured),
+        eventKinds: Array.isArray(voice.eventKinds) ? voice.eventKinds : [],
+        rateLimitSeconds: Number(voice.rateLimitSeconds) || 0,
       },
     },
     agents,
@@ -427,6 +593,7 @@ function buildCockpitSnapshot({
       },
     },
     blockers,
+    alerts,
     logs: {
       lines: recentLogs,
       total: recentLogs.length,
@@ -590,6 +757,7 @@ class TmuxStreamManager {
 }
 
 module.exports = {
+  BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
   computeStreamDelta,

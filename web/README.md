@@ -34,12 +34,19 @@ Environment variables:
 | `SGT_WEB_PORT` | `4747` | Server port |
 | `SGT_ROOT` | `~/sgt` | SGT workspace root |
 | `SGT_BIN` | `$SGT_ROOT/sgt` | Path to sgt binary |
+| `SGT_WEB_ELEVENLABS_API_KEY` | unset | Optional ElevenLabs API key for blocker voice announcements |
+| `SGT_WEB_ELEVENLABS_VOICE_ID` | unset | Optional ElevenLabs voice id used when voice is enabled |
+| `SGT_WEB_ELEVENLABS_MODEL_ID` | `eleven_turbo_v2_5` | Optional ElevenLabs model override |
+| `SGT_WEB_VOICE_EVENT_KINDS` | `blocker-resolved` | Comma-separated blocker alert kinds eligible for voice |
+| `SGT_WEB_VOICE_RATE_LIMIT_SECS` | `90` | Minimum seconds between eligible voice announcements |
 
 ## Features
 
 - **Dense cockpit shell** — Single-page JARVIS-style HUD with command pulse, alert center, worker roster, rig matrix, topology radar, and dispatch console
 - **Live tmux monitoring** — Mayor gets a dedicated live monitor, while all active polecats can stay open simultaneously in a filtered multi-pane wall with per-pane tail/focus/peek controls
 - **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
+- **Recent alert rail** — New blocker openings, follow-up escalations, and resolutions surface as explicit alert cards instead of blending into the blocker list
+- **Optional ElevenLabs voice** — Env-gated blocker voice announcements with browser mute control plus backend dedupe and rate limiting
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
 - **Topology radar** — Canvas relationship view driven from normalized `topology` nodes/edges, with a clean fallback when WebGL is absent
 - **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
@@ -79,6 +86,11 @@ Stored under `web/docs/screenshots/`:
 - **Permissions**
   - The server shells out to `sgt` and reads `~/sgt/sgt.log`. Ensure the user running the web server can access those files.
 
+- **Voice announcements are unavailable**
+  - Set both `SGT_WEB_ELEVENLABS_API_KEY` and `SGT_WEB_ELEVENLABS_VOICE_ID`.
+  - The UI stays fully usable without them; the Voice chip will show `Unavailable`.
+  - The browser mute toggle only affects local playback. Backend event gating and rate limiting still apply for eligible announcements.
+
 ## Reasoning behind the project
 
 SGT exists because the original **Gas Town** tooling became bloated and fragile:
@@ -110,6 +122,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 | GET | `/api/dogs` | Dog state files |
 | GET | `/api/merge-queue` | Merge queue items |
 | GET | `/api/blockers` | Active acceptance blockers |
+| GET | `/api/announcements/:alertId/audio` | Optional ElevenLabs audio for an eligible blocker alert |
 | GET | `/api/peek/:target` | Peek at tmux pane output |
 | GET | `/api/logs?lines=N` | Tail sgt.log |
 | GET | `/api/plan-state/:rig` | Repo plan-state JSON for one rig |

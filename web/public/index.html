@@ -31,6 +31,10 @@
         <span>Log Feed</span>
         <strong id="lastLog">--</strong>
       </div>
+      <button class="status-chip voice-chip" id="voiceMuteBtn" type="button" aria-pressed="true">
+        <span>Voice</span>
+        <strong id="voiceStatus">Muted</strong>
+      </button>
       <button class="btn ghost" id="compactBtn">Compact</button>
       <button class="btn ghost" id="refreshSnapshotBtn">Refresh</button>
     </div>
@@ -76,6 +80,7 @@
         <span>Alert Center</span>
         <span class="panel-meta" id="blockerSummary">0 open blockers</span>
       </div>
+      <div class="alert-rail" id="alertRail"></div>
       <div class="blocker-board" id="blockerBoard"></div>
 
       <div class="overview-grid">
