@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Mayor now auto-refreshes at runtime when the estimated AI prompt exceeds `SGT_MAYOR_AUTO_REFRESH_TOKENS` (default `150000`), using the same handoff/archive path as `sgt mayor refresh` plus a cooldown guard.
+- `sgt status` and `sgt status --json` now expose the latest Mayor prompt-budget estimate and last automatic refresh metadata.
 - `sgt context index` now writes through unique fsynced temp files before `os.replace`, avoiding concurrent rebuild corruption of `~/.sgt/context/<rig>/index.json`.
 - `sgt context search` now detects malformed context indexes, warns once, rebuilds from `SGT_CONTEXT.md`, and retries instead of surfacing a raw JSON decode traceback.
 - Added deterministic malformed-index recovery coverage to `test_context_cli.sh` with a mocked embeddings API.

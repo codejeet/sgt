@@ -48,6 +48,10 @@ _escape_quotes() {
   printf "%s" "${1:-}"
 }
 
+_mayor_scope_dir() {
+  printf '%s\n' "$SGT_CONFIG"
+}
+
 write_briefing() {
   local epoch="$1"
   local iso

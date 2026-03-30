@@ -84,6 +84,12 @@ WORKTREE=$SGT_ROOT/polecats/p1
 SESSION=sgt-p1
 DEFAULT_BRANCH=master
 STATE
+cat > "$SGT_ROOT/.sgt/mayor-prompt-budget.state" <<STATE
+1774828800|2026-03-30T00:00:00Z|160000|640000|150000|true|$SGT_ROOT/.sgt/mayor-workspace/CLAUDE.md
+STATE
+cat > "$SGT_ROOT/.sgt/mayor-auto-refresh.state" <<STATE
+1774828860|2026-03-30T00:01:00Z|budget-exceeded|160000|640000|150000|$SGT_ROOT/.sgt/handoffs/auto-token/handoff.md|auto-token|completed
+STATE
 '
 
 JSON_OUT="$TMP_ROOT/status.json"
@@ -116,8 +122,15 @@ if data["summary"].get("polecat_count") != 1:
 
 if not any(a.get("name") == "daemon" for a in data["agents"]):
     raise SystemExit("missing daemon agent entry")
-if not any(a.get("name") == "mayor" for a in data["agents"]):
+mayor = next((a for a in data["agents"] if a.get("name") == "mayor"), None)
+if mayor is None:
     raise SystemExit("missing mayor agent entry")
+budget = mayor.get("prompt_budget", {})
+if budget.get("estimated_tokens") != "160000" or budget.get("threshold") != "150000":
+    raise SystemExit(f"unexpected mayor prompt budget metadata: {budget}")
+auto_refresh = mayor.get("auto_refresh", {})
+if auto_refresh.get("trigger") != "budget-exceeded" or auto_refresh.get("status") != "completed":
+    raise SystemExit(f"unexpected mayor auto_refresh metadata: {auto_refresh}")
 
 polecats = data["polecats"]
 if len(polecats) != 1:
