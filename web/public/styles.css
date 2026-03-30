@@ -456,6 +456,55 @@ a {
   margin-bottom: 16px;
 }
 
+.stream-toolbar,
+.stream-filter-row,
+.stream-filter {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.stream-toolbar {
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.stream-filter {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.stream-filter select,
+.stream-filter input {
+  min-width: 140px;
+  padding: 10px 12px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(3, 14, 22, 0.94);
+}
+
+.stream-filter-wide input {
+  min-width: 220px;
+}
+
+.monitor-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.05fr);
+  gap: var(--gap);
+}
+
+.monitor-column {
+  min-width: 0;
+}
+
+.monitor-column-wide {
+  min-width: 0;
+}
+
 .hero-card,
 .stream-card {
   padding: 14px;
@@ -519,6 +568,17 @@ a {
 
 .hero-card .stream-body {
   height: 370px;
+}
+
+#mayorMonitor .stream-card {
+  min-height: 260px;
+  background:
+    linear-gradient(180deg, rgba(77, 214, 255, 0.08), rgba(8, 28, 41, 0.82)),
+    rgba(8, 28, 41, 0.78);
+}
+
+#mayorMonitor .stream-body {
+  height: 280px;
 }
 
 .stream-empty,
@@ -724,7 +784,8 @@ a {
 
   .dispatch-grid,
   .overview-grid,
-  .topology-wrap {
+  .topology-wrap,
+  .monitor-layout {
     grid-template-columns: 1fr;
   }
 }
@@ -745,5 +806,15 @@ a {
 
   .stream-grid {
     grid-template-columns: 1fr;
+  }
+
+  .stream-toolbar {
+    align-items: flex-start;
+  }
+
+  .stream-filter,
+  .stream-filter select,
+  .stream-filter input {
+    width: 100%;
   }
 }

@@ -38,7 +38,7 @@ Environment variables:
 ## Features
 
 - **Dense cockpit shell** — Single-page JARVIS-style HUD with command pulse, alert center, worker roster, rig matrix, topology radar, and dispatch console
-- **Live tmux monitoring** — Mayor plus active worker panes subscribe on demand over WebSocket; focus mode and snapshot `peek` remain available
+- **Live tmux monitoring** — Mayor gets a dedicated live monitor, while all active polecats can stay open simultaneously in a filtered multi-pane wall with per-pane tail/focus/peek controls
 - **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
 - **Topology radar** — Canvas relationship view driven from normalized `topology` nodes/edges, with a clean fallback when WebGL is absent
@@ -124,6 +124,13 @@ Client-to-server:
 - `{"type":"snapshot/request"}` — request an immediate normalized snapshot
 - `{"type":"stream/subscribe","target":"mayor"}` — start a live tmux stream for `mayor`, `mayor/<rig>`, `witness/<rig>`, `refinery/<rig>`, `crew/<name>`, `dog/<name>`, or a polecat name
 - `{"type":"stream/unsubscribe","target":"mayor"}` — stop a live tmux stream
+
+The stream section defaults to a polecat-focused monitor wall:
+
+- rig and role filters narrow the active live panes without leaving the page
+- `Match` filters by worker name, rig, issue, or branch text
+- `Tail All` toggles auto-follow across every subscribed pane
+- each pane still supports `Tail`, `Focus`, and `Peek`
 
 Server-to-client additions:
 
