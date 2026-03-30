@@ -381,6 +381,7 @@ function normalizeWorker(worker, role) {
     repo: worker.repo || '',
     pr: worker.pr || {},
     warning: worker.warning || '',
+    runtime: worker.runtime || null,
     session,
     stream: {
       target,
