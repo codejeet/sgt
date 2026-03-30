@@ -1,6 +1,6 @@
-# SGT Web UI (Control Panel)
+# SGT Web UI (Operator Shell)
 
-SGT Web UI is a small, dependency-light **real-time dashboard** for SGT (Simple GitHub Gastown): monitor agents/polecats, tail logs, and dispatch new work.
+SGT Web UI is a small, dependency-light **real-time operator shell** for SGT (Simple GitHub Gastown): monitor Mayor and workers live, surface blockers and queue state, tail logs, inspect topology relationships, and dispatch new work.
 
 For the locked follow-on cockpit architecture and deployment path, see [`web/docs/live-cockpit-architecture.md`](docs/live-cockpit-architecture.md).
 
@@ -37,22 +37,20 @@ Environment variables:
 
 ## Features
 
-- **Dashboard** — Live agent status (incl. mayor), polecat overview, merge queue summary
-- **Polecats** — Active polecats with rig/issue/branch/PR; click to peek tmux output
-- **Logs** — Tail `sgt.log` (auto-scroll + realtime updates)
-- **Realtime WS** — Status push (poll every 3s) + log stream; reconnect/backoff + heartbeat + stale indicators
-- **Cockpit snapshot backend** — Normalized `meta/agents/rigs/workers/queue/blockers/logs/topology` document for live cockpit consumers
-- **Demand-driven tmux streams** — WebSocket `stream/subscribe` / `stream/unsubscribe` for Mayor and worker panes, with `stream/open`, `stream/data`, `stream/stale`, and `stream/close` lifecycle events
-- **High density** — Compact mode toggle (`c`), multi-column rows, collapsible cards (persisted)
-- **Keyboard shortcuts** — `1..7` switch panels, `c` toggles compact, `Esc` closes peek modal
-- **Dispatch** — Sling polecats / dogs from the UI
+- **Dense cockpit shell** — Single-page JARVIS-style HUD with command pulse, alert center, worker roster, rig matrix, topology radar, and dispatch console
+- **Live tmux monitoring** — Mayor plus active worker panes subscribe on demand over WebSocket; focus mode and snapshot `peek` remain available
+- **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
+- **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
+- **Topology radar** — Canvas relationship view driven from normalized `topology` nodes/edges, with a clean fallback when WebGL is absent
+- **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
+- **Dispatch** — Sling polecats and dogs without leaving the shell
 
 ## Theme
 
-The UI uses a **dark triadic “modern color wheel” theme** with accents used sparingly:
-- `--accentA` (Cyan) `#22D3EE`
-- `--accentB` (Amber) `#F59E0B`
-- `--accentC` (Lime) `#84CC16`
+The UI uses a dense **dark HUD / JARVIS-inspired** shell:
+- display typography via Orbitron for cockpit headers
+- IBM Plex Sans / Mono for readable dense operational content
+- cyan, amber, lime, and red accents reserved for live state and alert severity
 
 ## Screenshots
 
@@ -97,7 +95,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 ## Architecture
 
 - **Backend**: Node.js + Express. Shells out to `sgt` CLI for actions; tails `~/sgt/sgt.log`.
-- **Frontend**: Single HTML page with vanilla JS.
+- **Frontend**: Static vanilla HTML/CSS/JS served by the same process.
 - **Real-time**: WebSocket pushes status and log deltas; includes heartbeat + reconnect/backoff.
 - **Canonical source**: repo `web/` is the source of truth; `/root/sgt/web` is a deployment target.
 

@@ -3,729 +3,168 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SGT Control Panel</title>
-<style>
-  :root {
-    /* =============================
-       Theme: modern color wheel (triadic)
-       - dark UI, crisp separators
-       - accents sparingly
-       ============================= */
-
-    --bg: #0B0F14;            /* page */
-    --panel: #0F1520;         /* cards, modals */
-    --panel-2: #0C121B;       /* subtle alternate */
-    --border: #1F2A37;        /* crisp separators */
-    --border-2: #243244;
-
-    --text: #E5E7EB;
-    --muted: #9CA3AF;
-
-    --accentA: #22D3EE;       /* cyan */
-    --accentB: #F59E0B;       /* amber */
-    --accentC: #84CC16;       /* lime */
-
-    --danger: #EF4444;
-    --ok: var(--accentC);
-    --warn: var(--accentB);
-
-    /* subtle rounding only */
-    --radius: 3px;
-
-    /* density controls */
-    --pad-page: 28px;
-    --pad-card-h: 16px;
-    --pad-card-v: 16px;
-    --pad-item: 12px;
-    --font: 14px;
-    --line: 1.45;
-  }
-
-  body.compact {
-    --pad-page: 18px;
-    --pad-card-h: 12px;
-    --pad-card-v: 12px;
-    --pad-item: 10px;
-    --font: 13px;
-    --line: 1.35;
-  }
-
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    font-size: var(--font);
-    line-height: var(--line);
-    -webkit-font-smoothing: antialiased;
-  }
-  a { color: var(--text); text-decoration: underline; text-decoration-color: rgba(229,231,235,0.35); }
-  a:hover { color: var(--accentA); text-decoration-color: rgba(34,211,238,0.65); }
-
-  /* Header */
-  .header {
-    border-bottom: 1px solid var(--border);
-    padding: 18px 28px;
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    background: var(--bg);
-  }
-  body.compact .header { padding: 14px 18px; }
-
-  .header h1 {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--text);
-  }
-  .header h1 span {
-    color: var(--accentA);
-    font-size: 22px;
-    letter-spacing: 0.05em;
-    display: block;
-    text-transform: none;
-    margin-bottom: 2px;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .mini {
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--muted);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .conn-dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: var(--red);
-    flex-shrink: 0;
-  }
-  .conn-dot.connected { background: var(--ok); }
-
-  .stale {
-    color: var(--warn);
-    font-weight: 700;
-  }
-
-  /* Navigation */
-  .nav {
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 0;
-    overflow-x: auto;
-    padding: 0 28px;
-    background: var(--bg);
-  }
-  body.compact .nav { padding: 0 18px; }
-
-  .nav button {
-    background: none;
-    border: none;
-    color: var(--muted);
-    padding: 10px 0;
-    margin-right: 22px;
-    font-family: inherit;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    white-space: nowrap;
-    transition: color 0.15s;
-  }
-  .nav button:hover { color: var(--text); }
-  .nav button.active {
-    color: var(--text);
-    border-bottom-color: var(--accentA);
-  }
-
-  /* Main content */
-  .main {
-    padding: var(--pad-page);
-    max-width: 1320px;
-    background: var(--bg);
-  }
-  body.compact .main { max-width: 1600px; }
-
-  .panel { display: none; }
-  .panel.active { display: block; }
-
-  /* Cards */
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    margin-bottom: 18px;
-    overflow: hidden;
-    border-radius: var(--radius);
-  }
-  .card-header {
-    padding: var(--pad-card-v) var(--pad-card-h);
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--text);
-    text-transform: uppercase;
-    letter-spacing: 0.15em;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    background: rgba(255,255,255,0.02);
-  }
-  .card-header .right {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .card-header.collapsible { cursor: pointer; user-select: none; }
-  .card-header .chev { font-size: 12px; color: var(--muted); }
-  .card-body { padding: var(--pad-card-v) var(--pad-card-h); }
-
-  .card.collapsed .card-body { display: none; }
-  .card.collapsed .card-header { border-bottom: none; }
-
-  /* Status indicators */
-  .status-dot {
-    display: inline-block;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    margin-right: 8px;
-    flex-shrink: 0;
-  }
-  .status-on { background: var(--ok); }
-  .status-off { background: var(--border); }
-  .status-alive { background: var(--ok); }
-  .status-dead { background: var(--border); }
-
-  /* Agent grid */
-  .agent-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 10px;
-  }
-  body.compact .agent-grid {
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 8px;
-  }
-
-  .agent-item {
-    border: 1px solid var(--border);
-    padding: 12px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    border-radius: var(--radius);
-    background: rgba(255,255,255,0.01);
-  }
-  body.compact .agent-item { padding: 10px; }
-
-  .agent-item .name {
-    font-weight: 600;
-    font-size: 13px;
-    flex: 1;
-  }
-  .agent-item .meta {
-    color: var(--muted);
-    font-size: 11px;
-    text-align: right;
-  }
-
-  /* Worker lists */
-  .worker-list { display: flex; flex-direction: column; gap: 0; }
-  .worker-item {
-    padding: var(--pad-item) var(--pad-card-h);
-    cursor: pointer;
-    border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
-  }
-  .worker-item:last-child { border-bottom: none; }
-  .worker-item:hover { background: rgba(34,211,238,0.05); }
-  .worker-item .worker-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-  }
-  .worker-item .worker-name {
-    font-weight: 600;
-    font-size: 13px;
-    font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace;
-    letter-spacing: -0.01em;
-  }
-  .worker-item .worker-meta {
-    color: var(--muted);
-    font-size: 12px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 2px 16px;
-    padding-left: 16px;
-  }
-  .worker-item .worker-meta span { display: block; }
-
-  .badge {
-    font-size: 9px;
-    padding: 2px 8px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    border-radius: var(--radius);
-  }
-  .badge-alive { background: rgba(132,204,22,0.18); color: var(--accentC); border: 1px solid rgba(132,204,22,0.35); }
-  .badge-dead { background: rgba(156,163,175,0.08); color: var(--muted); border: 1px solid rgba(156,163,175,0.22); }
-  .badge-running { background: rgba(34,211,238,0.14); color: var(--accentA); border: 1px solid rgba(34,211,238,0.35); }
-
-  /* Rig cards */
-  .rig-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 12px;
-  }
-  .rig-card {
-    border: 1px solid var(--border);
-    padding: 14px;
-    border-radius: var(--radius);
-    background: rgba(255,255,255,0.01);
-  }
-  .rig-card .rig-name {
-    font-weight: 700;
-    font-size: 15px;
-    margin-bottom: 3px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .rig-card .rig-repo {
-    color: var(--muted);
-    font-size: 12px;
-    margin-bottom: 12px;
-    word-break: break-all;
-  }
-  .rig-card .rig-stats {
-    display: flex;
-    gap: 16px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    flex-wrap: wrap;
-  }
-  .rig-card .rig-stats span { color: var(--muted); }
-  .rig-card .rig-stats .val { color: var(--text); font-weight: 700; }
-
-  /* Sling form */
-  .sling-form {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    max-width: 680px;
-  }
-  .form-group { display: flex; flex-direction: column; gap: 6px; }
-  .form-group label {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--text);
-  }
-  .form-group select,
-  .form-group input,
-  .form-group textarea {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 10px;
-    font-family: inherit;
-    font-size: var(--font);
-    transition: border-color 0.15s, box-shadow 0.15s;
-    border-radius: var(--radius);
-  }
-  .form-group textarea { min-height: 92px; resize: vertical; }
-  .form-group select:focus,
-  .form-group input:focus,
-  .form-group textarea:focus {
-    outline: none;
-    border-color: rgba(34,211,238,0.65);
-    box-shadow: 0 0 0 3px rgba(34,211,238,0.18);
-  }
-  .form-row { display: flex; gap: 12px; }
-  .form-row .form-group { flex: 1; }
-
-  .btn {
-    background: rgba(34,211,238,0.14);
-    color: var(--accentA);
-    border: 1px solid rgba(34,211,238,0.35);
-    padding: 8px 14px;
-    font-family: inherit;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    cursor: pointer;
-    align-self: flex-start;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-    border-radius: var(--radius);
-  }
-  .btn:hover {
-    background: rgba(34,211,238,0.20);
-    border-color: rgba(34,211,238,0.55);
-  }
-  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
-  .btn-secondary {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text);
-  }
-  .btn-secondary:hover {
-    border-color: rgba(245,158,11,0.55);
-    background: rgba(245,158,11,0.08);
-  }
-
-  /* Log viewer */
-  .log-viewer {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    height: 520px;
-    overflow-y: auto;
-    padding: 12px;
-    font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace;
-    font-size: 12px;
-    line-height: 1.55;
-    border-radius: var(--radius);
-  }
-  body.compact .log-viewer { height: 620px; }
-
-  .log-line { white-space: pre-wrap; word-break: break-word; }
-  .log-line .timestamp { color: var(--muted); }
-  .log-line .event { color: var(--accentB); font-weight: 700; }
-
-  /* Merge queue */
-  .mq-list { display: flex; flex-direction: column; gap: 0; }
-  .mq-item {
-    padding: var(--pad-item) var(--pad-card-h);
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  .mq-item:last-child { border-bottom: none; }
-  .mq-item .mq-pr { font-weight: 700; font-size: 13px; }
-  .mq-item .mq-meta { color: var(--muted); font-size: 12px; flex: 1; }
-
-  /* Peek modal */
-  .modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.4);
-    z-index: 100;
-    align-items: center;
-    justify-content: center;
-  }
-  .modal-overlay.active { display: flex; }
-  .modal {
-    background: var(--panel);
-    border: 2px solid var(--border-2);
-    width: 92%;
-    max-width: 940px;
-    max-height: 84vh;
-    display: flex;
-    flex-direction: column;
-    border-radius: calc(var(--radius) + 1px);
-    overflow: hidden;
-  }
-  .modal-header {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-weight: 700;
-    font-size: 11px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
-  .modal-header button {
-    background: none;
-    border: none;
-    color: var(--text);
-    font-size: 22px;
-    cursor: pointer;
-    line-height: 1;
-  }
-  .modal-header button:hover { color: var(--accentA); }
-  .modal-body {
-    padding: 16px;
-    overflow-y: auto;
-    flex: 1;
-  }
-  .modal-body pre {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace;
-    font-size: 12px;
-    line-height: 1.55;
-  }
-
-  /* Empty state */
-  .empty {
-    color: var(--muted);
-    text-align: center;
-    padding: 26px 18px;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-  }
-
-  /* Toast notifications */
-  .toast-container {
-    position: fixed;
-    bottom: 18px;
-    right: 18px;
-    z-index: 200;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .toast {
-    background: var(--panel);
-    color: var(--text);
-    border: 1px solid var(--border);
-    padding: 10px 14px;
-    font-size: 12px;
-    font-weight: 500;
-    max-width: 420px;
-    animation: slideIn 0.2s ease-out;
-    border-radius: var(--radius);
-  }
-  .toast.error { border-color: rgba(239,68,68,0.55); color: #fecaca; }
-  .toast.success { border-color: rgba(132,204,22,0.55); color: #d9f99d; }
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  /* Section titles */
-  .section-title {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.15em;
-    margin-bottom: 14px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    color: var(--muted);
-  }
-  .count {
-    background: rgba(34,211,238,0.14);
-    color: var(--accentA);
-    border: 1px solid rgba(34,211,238,0.35);
-    padding: 2px 8px;
-    font-size: 10px;
-    font-weight: 700;
-    border-radius: var(--radius);
-  }
-
-  /* Keyboard hint */
-  .kbd {
-    border: 1px solid var(--border);
-    font-family: 'SF Mono', 'Consolas', 'Liberation Mono', monospace;
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: var(--radius);
-    color: var(--muted);
-    background: rgba(255,255,255,0.03);
-    text-transform: none;
-    letter-spacing: 0;
-  }
-</style>
+<title>SGT Operator Shell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-
-<div class="header">
-  <h1><span>SGT</span> Control Panel</h1>
-  <div class="header-right">
-    <div class="mini" title="WebSocket connection">
-      <div class="conn-dot" id="connDot"></div>
-      <span id="connLabel">Disconnected</span>
+<div class="shell-grid">
+  <header class="topbar panel">
+    <div>
+      <div class="eyebrow">SGT Operator Shell</div>
+      <h1>JARVIS Cockpit</h1>
+      <p class="lead">Dense live control surface for Mayor, active workers, blockers, queue state, and dispatch.</p>
     </div>
-
-    <div class="mini" title="Last successful status update">
-      <span>Updated</span>
-      <span id="lastUpdated" class="stale">—</span>
+    <div class="topbar-controls">
+      <div class="status-chip" id="wsHealth">
+        <span class="pill-dot"></span>
+        <span>Link</span>
+        <strong id="connLabel">Disconnected</strong>
+      </div>
+      <div class="status-chip">
+        <span>Snapshot</span>
+        <strong id="lastUpdated">--</strong>
+      </div>
+      <div class="status-chip">
+        <span>Log Feed</span>
+        <strong id="lastLog">--</strong>
+      </div>
+      <button class="btn ghost" id="compactBtn">Compact</button>
+      <button class="btn ghost" id="refreshSnapshotBtn">Refresh</button>
     </div>
+  </header>
 
-    <button class="btn btn-secondary" id="compactBtn" title="Toggle compact mode (c)">
-      Compact <span class="kbd">c</span>
-    </button>
-  </div>
-</div>
+  <nav class="section-nav panel">
+    <button data-section="overview" class="nav-btn active">Overview <span class="kbd">1</span></button>
+    <button data-section="streams" class="nav-btn">Streams <span class="kbd">2</span></button>
+    <button data-section="topology" class="nav-btn">Topology <span class="kbd">3</span></button>
+    <button data-section="dispatch" class="nav-btn">Dispatch <span class="kbd">4</span></button>
+    <button data-section="logs" class="nav-btn">Logs <span class="kbd">5</span></button>
+  </nav>
 
-<nav class="nav" id="nav">
-  <button class="active" data-panel="dashboard">Dashboard <span class="kbd">1</span></button>
-  <button data-panel="polecats">Polecats <span class="kbd">2</span></button>
-  <button data-panel="dogs">Dogs <span class="kbd">3</span></button>
-  <button data-panel="rigs">Rigs <span class="kbd">4</span></button>
-  <button data-panel="sling">Sling <span class="kbd">5</span></button>
-  <button data-panel="logs">Logs <span class="kbd">6</span></button>
-  <button data-panel="merge-queue">Merge Queue <span class="kbd">7</span></button>
-</nav>
-
-<div class="main">
-  <!-- Dashboard -->
-  <div class="panel active" id="panel-dashboard">
-    <div class="card" data-collapse-key="agents">
-      <div class="card-header collapsible" data-collapse>
-        <span>Agents</span>
-        <span class="right"><span class="chev" aria-hidden="true">▾</span></span>
+  <aside class="sidebar">
+    <section class="panel command-panel">
+      <div class="panel-title">
+        <span>Command Pulse</span>
+        <span class="panel-meta" id="serverTimeLabel">waiting</span>
       </div>
-      <div class="card-body">
-        <div class="agent-grid" id="agentGrid"></div>
-      </div>
-    </div>
+      <div class="metric-stack" id="commandMetrics"></div>
+    </section>
 
-    <div class="card" data-collapse-key="dash_polecats">
-      <div class="card-header collapsible" data-collapse>
-        <span>Polecats</span>
-        <span class="right"><span class="count" id="polecatCount">0</span><span class="chev" aria-hidden="true">▾</span></span>
+    <section class="panel roster-panel">
+      <div class="panel-title">
+        <span>Worker Roster</span>
+        <span class="panel-meta" id="workerCountLabel">0 tracked</span>
       </div>
-      <div class="card-body" style="padding:0;">
-        <div class="worker-list" id="dashPolecats"></div>
+      <div class="roster-list" id="workerRoster"></div>
+    </section>
+
+    <section class="panel roster-panel">
+      <div class="panel-title">
+        <span>Rig Matrix</span>
+        <span class="panel-meta" id="rigCountLabel">0 rigs</span>
       </div>
-    </div>
+      <div class="rig-list" id="rigMatrix"></div>
+    </section>
+  </aside>
 
-    <div class="card" data-collapse-key="dash_merge_queue">
-      <div class="card-header collapsible" data-collapse>
-        <span>Merge Queue</span>
-        <span class="right"><span class="count" id="mqCount">0</span><span class="chev" aria-hidden="true">▾</span></span>
+  <main class="main-column">
+    <section class="panel section active" id="section-overview">
+      <div class="panel-title">
+        <span>Alert Center</span>
+        <span class="panel-meta" id="blockerSummary">0 open blockers</span>
       </div>
-      <div class="card-body" style="padding:0;">
-        <div class="mq-list" id="dashMergeQueue"></div>
+      <div class="blocker-board" id="blockerBoard"></div>
+
+      <div class="overview-grid">
+        <div class="subpanel">
+          <div class="subpanel-title">Mayor Focus</div>
+          <div class="stream-hero" id="overviewHero"></div>
+        </div>
+        <div class="subpanel">
+          <div class="subpanel-title">Queue + Issues</div>
+          <div class="queue-list" id="queueBoard"></div>
+        </div>
       </div>
-    </div>
-  </div>
+    </section>
 
-  <!-- Polecats -->
-  <div class="panel" id="panel-polecats">
-    <div class="section-title">Active Polecats <span class="count" id="polecatCount2">0</span></div>
-    <div class="worker-list" id="polecatList"></div>
-  </div>
-
-  <!-- Dogs -->
-  <div class="panel" id="panel-dogs">
-    <div class="section-title">Active Dogs <span class="count" id="dogCount">0</span></div>
-    <div class="worker-list" id="dogList"></div>
-  </div>
-
-  <!-- Rigs -->
-  <div class="panel" id="panel-rigs">
-    <div class="section-title">Registered Rigs <span class="count" id="rigCount">0</span></div>
-    <div class="rig-grid" id="rigGrid"></div>
-  </div>
-
-  <!-- Sling -->
-  <div class="panel" id="panel-sling">
-    <div class="card" data-collapse-key="sling_polecat">
-      <div class="card-header collapsible" data-collapse>
-        <span>Dispatch Polecat</span>
-        <span class="right"><span class="chev" aria-hidden="true">▾</span></span>
+    <section class="panel section" id="section-streams">
+      <div class="panel-title">
+        <span>Live Streams</span>
+        <span class="panel-meta" id="streamSummary">0 subscriptions</span>
       </div>
-      <div class="card-body">
-        <form class="sling-form" id="slingForm">
-          <div class="form-group">
-            <label>Rig</label>
-            <select id="slingRig" required></select>
+      <div class="focus-stream" id="focusStream"></div>
+      <div class="stream-grid" id="streamGrid"></div>
+    </section>
+
+    <section class="panel section" id="section-topology">
+      <div class="panel-title">
+        <span>Topology Radar</span>
+        <span class="panel-meta" id="topologyMode">Canvas fallback</span>
+      </div>
+      <div class="topology-wrap">
+        <canvas id="topologyCanvas" width="960" height="520"></canvas>
+        <div class="topology-sidebar">
+          <div class="subpanel-title">Relationship Feed</div>
+          <div class="topology-list" id="topologyList"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="section-dispatch">
+      <div class="panel-title">
+        <span>Dispatch Console</span>
+        <span class="panel-meta">Repo-tracked web/ remains canonical</span>
+      </div>
+      <div class="dispatch-grid">
+        <form class="dispatch-form" id="slingForm">
+          <div class="subpanel-title">Sling Polecat</div>
+          <label for="slingRig">Rig</label>
+          <select id="slingRig" required></select>
+          <label for="slingTask">Task</label>
+          <textarea id="slingTask" placeholder="Describe the operator task..." required></textarea>
+          <label for="slingLabels">Labels</label>
+          <input type="text" id="slingLabels" placeholder="enhancement, plan-SGT31">
+          <label for="slingConvoy">Convoy</label>
+          <input type="text" id="slingConvoy" placeholder="Optional convoy">
+          <button type="submit" class="btn" id="slingBtn">Dispatch Polecat</button>
+        </form>
+
+        <form class="dispatch-form" id="dogForm">
+          <div class="subpanel-title">Sling Dog</div>
+          <label for="dogRig">Rig</label>
+          <select id="dogRig" required></select>
+          <label for="dogIssue">Issue</label>
+          <input type="text" id="dogIssue" placeholder="#266" required>
+          <button type="submit" class="btn" id="dogBtn">Dispatch Dog</button>
+          <div class="dispatch-note">
+            Dog dispatch remains available from the operator shell so the redesign does not regress existing utility.
           </div>
-          <div class="form-group">
-            <label>Task Description</label>
-            <textarea id="slingTask" placeholder="Describe the task..." required></textarea>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Labels (comma-separated)</label>
-              <input type="text" id="slingLabels" placeholder="enhancement, bug...">
-            </div>
-            <div class="form-group">
-              <label>Convoy (Milestone)</label>
-              <input type="text" id="slingConvoy" placeholder="Optional milestone name">
-            </div>
-          </div>
-          <button type="submit" class="btn" id="slingBtn">Sling Polecat</button>
         </form>
       </div>
-    </div>
+    </section>
 
-    <div class="card" data-collapse-key="sling_dog">
-      <div class="card-header collapsible" data-collapse>
-        <span>Dispatch Dog</span>
-        <span class="right"><span class="chev" aria-hidden="true">▾</span></span>
+    <section class="panel section" id="section-logs">
+      <div class="panel-title">
+        <span>Operator Log Feed</span>
+        <span class="panel-meta" id="logSummary">0 lines buffered</span>
       </div>
-      <div class="card-body">
-        <form class="sling-form" id="dogForm">
-          <div class="form-group">
-            <label>Rig</label>
-            <select id="dogRig" required></select>
-          </div>
-          <div class="form-group">
-            <label>Issue Number</label>
-            <input type="text" id="dogIssue" placeholder="#7 or 7" required>
-          </div>
-          <button type="submit" class="btn" id="dogBtn">Sling Dog</button>
-        </form>
+      <div class="log-toolbar">
+        <button class="btn ghost" id="refreshLogsBtn">Refresh Logs</button>
+        <span class="panel-meta">Auto-follows when the viewport stays near the tail.</span>
       </div>
-    </div>
-  </div>
-
-  <!-- Logs -->
-  <div class="panel" id="panel-logs">
-    <div class="card" data-collapse-key="logs">
-      <div class="card-header">
-        <span>sgt.log</span>
-        <span class="right">
-          <span class="mini" style="gap:6px;">
-            <span>Last log</span>
-            <span id="lastLog" class="stale">—</span>
-          </span>
-          <button class="btn btn-secondary" id="refreshLogsBtn" style="padding:4px 10px;font-size:10px;">Refresh</button>
-        </span>
-      </div>
-      <div class="card-body" style="padding:0;">
-        <div class="log-viewer" id="logViewer"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Merge Queue -->
-  <div class="panel" id="panel-merge-queue">
-    <div class="section-title">Refinery Merge Queue <span class="count" id="mqCount2">0</span></div>
-    <div class="mq-list" id="mergeQueueList"></div>
-  </div>
+      <div class="log-viewer" id="logViewer"></div>
+    </section>
+  </main>
 </div>
 
-<!-- Peek Modal -->
 <div class="modal-overlay" id="peekModal">
   <div class="modal">
     <div class="modal-header">
       <span id="peekTitle">Peek</span>
-      <button onclick="closePeek()" aria-label="Close">&times;</button>
+      <button id="peekCloseBtn" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
       <pre id="peekOutput">Loading...</pre>
@@ -733,462 +172,8 @@
   </div>
 </div>
 
-<!-- Toast Container -->
 <div class="toast-container" id="toasts"></div>
 
-<script>
-// --- State ---
-let ws = null;
-let state = { agents: [], polecats: [], dogs: [], crew: [], mergeQueue: [] };
-let rigs = [];
-
-let lastStatusAt = 0;
-let lastLogAt = 0;
-let staleTimer = null;
-
-// --- Nav ---
-function activatePanel(name) {
-  document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('active', b.dataset.panel === name));
-  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
-  if (name === 'logs') loadLogs();
-  if (name === 'rigs') loadRigs();
-}
-
-document.getElementById('nav').addEventListener('click', (e) => {
-  if (e.target.tagName !== 'BUTTON') return;
-  activatePanel(e.target.dataset.panel);
-});
-
-// --- Compact mode ---
-const COMPACT_KEY = 'sgt_web_compact';
-function setCompact(on) {
-  document.body.classList.toggle('compact', !!on);
-  localStorage.setItem(COMPACT_KEY, on ? '1' : '0');
-}
-setCompact(localStorage.getItem(COMPACT_KEY) === '1');
-
-document.getElementById('compactBtn').addEventListener('click', () => {
-  setCompact(!document.body.classList.contains('compact'));
-});
-
-// --- Collapsible cards ---
-function initCollapsibles() {
-  document.querySelectorAll('.card[data-collapse-key]').forEach(card => {
-    const key = 'sgt_web_collapse_' + card.dataset.collapseKey;
-    const collapsed = localStorage.getItem(key) === '1';
-    card.classList.toggle('collapsed', collapsed);
-    const header = card.querySelector('[data-collapse]');
-    if (!header) return;
-    header.addEventListener('click', () => {
-      const now = !card.classList.contains('collapsed');
-      card.classList.toggle('collapsed', now);
-      localStorage.setItem(key, now ? '1' : '0');
-    });
-  });
-}
-initCollapsibles();
-
-// --- WebSocket (robust reconnect + stale indicators) ---
-let wsAttempts = 0;
-let wsReconnectTimer = null;
-
-function wsUrl() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return proto + '//' + location.host;
-}
-
-function connectWs() {
-  clearTimeout(wsReconnectTimer);
-
-  try {
-    ws = new WebSocket(wsUrl());
-  } catch {
-    scheduleReconnect();
-    return;
-  }
-
-  ws.onopen = () => {
-    wsAttempts = 0;
-    setConn(true);
-  };
-
-  ws.onclose = () => {
-    setConn(false);
-    scheduleReconnect();
-  };
-
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
-
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-
-    if (msg.type === 'status') {
-      state = msg.parsed;
-      lastStatusAt = Date.now();
-      updateLastUpdated();
-      renderDashboard();
-      renderPolecats();
-      renderDogs();
-      renderMergeQueue();
-
-    } else if (msg.type === 'log') {
-      lastLogAt = Date.now();
-      updateLastLog();
-      appendLogLines(msg.lines);
-
-    } else if (msg.type === 'log_reset') {
-      // log file rotated / truncated
-      const viewer = document.getElementById('logViewer');
-      viewer.innerHTML = '';
-      loadLogs();
-
-    } else if (msg.type === 'hello') {
-      // no-op (reserved for future)
-    }
-  };
-}
-
-function scheduleReconnect() {
-  wsAttempts += 1;
-  // exponential backoff w/ jitter (0.5x..1.2x)
-  const base = Math.min(30000, 500 * Math.pow(2, Math.min(wsAttempts, 8)));
-  const jitter = 0.5 + Math.random() * 0.7;
-  const delay = Math.round(base * jitter);
-  wsReconnectTimer = setTimeout(connectWs, delay);
-}
-
-function setConn(isConnected) {
-  const dot = document.getElementById('connDot');
-  dot.classList.toggle('connected', !!isConnected);
-  document.getElementById('connLabel').textContent = isConnected ? 'Connected' : 'Disconnected';
-}
-
-function fmtTime(ms) {
-  if (!ms) return '—';
-  const d = new Date(ms);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-function updateLastUpdated() {
-  const el = document.getElementById('lastUpdated');
-  el.textContent = fmtTime(lastStatusAt);
-}
-
-function updateLastLog() {
-  const el = document.getElementById('lastLog');
-  el.textContent = fmtTime(lastLogAt);
-}
-
-function updateStaleIndicators() {
-  const now = Date.now();
-  const statusAge = lastStatusAt ? (now - lastStatusAt) : Infinity;
-  const logAge = lastLogAt ? (now - lastLogAt) : Infinity;
-
-  document.getElementById('lastUpdated').classList.toggle('stale', statusAge > 12000);
-  document.getElementById('lastLog').classList.toggle('stale', logAge > 20000);
-}
-
-connectWs();
-staleTimer = setInterval(updateStaleIndicators, 1000);
-
-// --- Keyboard shortcuts ---
-document.addEventListener('keydown', (e) => {
-  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
-
-  if (e.key === 'c' || e.key === 'C') {
-    setCompact(!document.body.classList.contains('compact'));
-  }
-
-  const map = {
-    '1': 'dashboard',
-    '2': 'polecats',
-    '3': 'dogs',
-    '4': 'rigs',
-    '5': 'sling',
-    '6': 'logs',
-    '7': 'merge-queue',
-  };
-  if (map[e.key]) activatePanel(map[e.key]);
-
-  if (e.key === 'Escape') closePeek();
-});
-
-// --- Render: Dashboard ---
-function renderDashboard() {
-  // Agents
-  const grid = document.getElementById('agentGrid');
-  grid.innerHTML = state.agents.map(a => {
-    const isOn = a.status.startsWith('on');
-    return `<div class="agent-item">
-      <span class="status-dot ${isOn ? 'status-on' : 'status-off'}"></span>
-      <span class="name">${esc(a.name)}</span>
-      <span class="meta">${esc(a.status)}${a.heartbeat ? '<br>' + esc(a.heartbeat) : ''}</span>
-    </div>`;
-  }).join('');
-
-  // Polecats summary
-  document.getElementById('polecatCount').textContent = state.polecats.length;
-  const dashP = document.getElementById('dashPolecats');
-  if (state.polecats.length === 0) {
-    dashP.innerHTML = '<div class="empty">No active polecats</div>';
-  } else {
-    dashP.innerHTML = state.polecats.map(p => workerHtml(p)).join('');
-  }
-
-  // Merge queue summary
-  document.getElementById('mqCount').textContent = state.mergeQueue.length;
-  const dashMq = document.getElementById('dashMergeQueue');
-  if (state.mergeQueue.length === 0) {
-    dashMq.innerHTML = '<div class="empty">Merge queue empty</div>';
-  } else {
-    dashMq.innerHTML = state.mergeQueue.map(m =>
-      `<div class="mq-item">
-        <span class="mq-pr">${esc(m.name)}</span>
-        <span class="mq-meta">${esc(m.detail)}</span>
-      </div>`
-    ).join('');
-  }
-}
-
-function workerHtml(p) {
-  const isAlive = p.alive === 'alive';
-  return `<div class="worker-item" onclick="peek('${esc(p.name)}')">
-    <div class="worker-header">
-      <span class="status-dot ${isAlive ? 'status-alive' : 'status-dead'}"></span>
-      <span class="worker-name">${esc(p.name)}</span>
-      <span class="badge ${isAlive ? 'badge-alive' : 'badge-dead'}">${isAlive ? 'alive' : 'dead'}</span>
-    </div>
-    <div class="worker-meta">
-      ${p.rig ? '<span>rig: ' + esc(p.rig) + '</span>' : ''}
-      ${p.issue ? '<span>issue: ' + esc(p.issue) + '</span>' : ''}
-      ${p.branch ? '<span>branch: ' + esc(p.branch) + '</span>' : ''}
-      ${p.pr ? '<span>pr: ' + esc(p.pr) + '</span>' : ''}
-    </div>
-  </div>`;
-}
-
-// --- Render: Polecats ---
-function renderPolecats() {
-  document.getElementById('polecatCount2').textContent = state.polecats.length;
-  const list = document.getElementById('polecatList');
-  if (state.polecats.length === 0) {
-    list.innerHTML = '<div class="empty">No active polecats</div>';
-  } else {
-    list.innerHTML = state.polecats.map(p => workerHtml(p)).join('');
-  }
-}
-
-// --- Render: Dogs ---
-function renderDogs() {
-  document.getElementById('dogCount').textContent = state.dogs.length;
-  const list = document.getElementById('dogList');
-  if (state.dogs.length === 0) {
-    list.innerHTML = '<div class="empty">No active dogs</div>';
-  } else {
-    list.innerHTML = state.dogs.map(d =>
-      `<div class="worker-item">
-        <div class="worker-header">
-          <span class="status-dot ${d.alive === 'alive' ? 'status-alive' : 'status-dead'}"></span>
-          <span class="worker-name">${esc(d.name)}</span>
-          <span class="badge ${d.alive === 'alive' ? 'badge-alive' : 'badge-dead'}">${d.alive}</span>
-        </div>
-        <div class="worker-meta"><span>${esc(d.issue)}</span></div>
-      </div>`
-    ).join('');
-  }
-}
-
-// --- Render: Merge Queue ---
-function renderMergeQueue() {
-  document.getElementById('mqCount2').textContent = state.mergeQueue.length;
-  const list = document.getElementById('mergeQueueList');
-  if (state.mergeQueue.length === 0) {
-    list.innerHTML = '<div class="empty">Merge queue empty</div>';
-  } else {
-    list.innerHTML = state.mergeQueue.map(m =>
-      `<div class="mq-item">
-        <span class="mq-pr">${esc(m.name)}</span>
-        <span class="mq-meta">${esc(m.detail)}</span>
-      </div>`
-    ).join('');
-  }
-}
-
-// --- Rigs ---
-async function loadRigs() {
-  try {
-    const res = await fetch('/api/rigs');
-    rigs = await res.json();
-    renderRigs();
-    populateRigSelects();
-  } catch {}
-}
-
-function renderRigs() {
-  document.getElementById('rigCount').textContent = rigs.length;
-  const grid = document.getElementById('rigGrid');
-  if (rigs.length === 0) {
-    grid.innerHTML = '<div class="empty">No rigs registered</div>';
-    return;
-  }
-  grid.innerHTML = rigs.map(r =>
-    `<div class="rig-card">
-      <div class="rig-name">${esc(r.name)}</div>
-      <div class="rig-repo"><a href="${esc(r.repo)}" target="_blank">${esc(r.repo)}</a></div>
-      <div class="rig-stats">
-        <span>polecats: <span class="val">${r.polecats ?? '?'}</span></span>
-        <span>witness: <span class="val">${esc(r.witness ?? '?')}</span></span>
-        <span>refinery: <span class="val">${esc(r.refinery ?? '?')}</span></span>
-      </div>
-    </div>`
-  ).join('');
-}
-
-function populateRigSelects() {
-  const opts = rigs.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('');
-  const placeholder = '<option value="">Select a rig...</option>';
-  document.getElementById('slingRig').innerHTML = placeholder + opts;
-  document.getElementById('dogRig').innerHTML = placeholder + opts;
-}
-
-// Load rigs on start
-loadRigs();
-
-// --- Sling Form ---
-document.getElementById('slingForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('slingBtn');
-  btn.disabled = true;
-  btn.textContent = 'Dispatching...';
-  try {
-    const labels = document.getElementById('slingLabels').value
-      .split(',').map(l => l.trim()).filter(Boolean);
-    const res = await fetch('/api/sling', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rig: document.getElementById('slingRig').value,
-        task: document.getElementById('slingTask').value,
-        labels,
-        convoy: document.getElementById('slingConvoy').value || undefined,
-      }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      toast('Polecat dispatched!', 'success');
-      document.getElementById('slingTask').value = '';
-      document.getElementById('slingLabels').value = '';
-      document.getElementById('slingConvoy').value = '';
-    } else {
-      toast('Error: ' + data.error, 'error');
-    }
-  } catch (err) {
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Sling Polecat';
-  }
-});
-
-document.getElementById('dogForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('dogBtn');
-  btn.disabled = true;
-  btn.textContent = 'Dispatching...';
-  try {
-    const issue = document.getElementById('dogIssue').value.replace('#', '');
-    const res = await fetch('/api/sling-dog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rig: document.getElementById('dogRig').value,
-        issue,
-      }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      toast('Dog dispatched!', 'success');
-      document.getElementById('dogIssue').value = '';
-    } else {
-      toast('Error: ' + data.error, 'error');
-    }
-  } catch (err) {
-    toast('Error: ' + err.message, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Sling Dog';
-  }
-});
-
-// --- Logs ---
-document.getElementById('refreshLogsBtn').addEventListener('click', loadLogs);
-
-async function loadLogs() {
-  try {
-    const res = await fetch('/api/logs?lines=250');
-    const data = await res.json();
-    const viewer = document.getElementById('logViewer');
-    viewer.innerHTML = data.lines.map(formatLogLine).join('');
-    viewer.scrollTop = viewer.scrollHeight;
-  } catch {}
-}
-
-function appendLogLines(lines) {
-  const viewer = document.getElementById('logViewer');
-  const wasAtBottom = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight < 50;
-  viewer.innerHTML += lines.map(formatLogLine).join('');
-  if (wasAtBottom) viewer.scrollTop = viewer.scrollHeight;
-}
-
-function formatLogLine(line) {
-  const m = line.match(/^\[([^\]]+)\]\s+(\S+)\s*(.*)/);
-  if (m) {
-    return `<div class="log-line"><span class="timestamp">[${esc(m[1])}]</span> <span class="event">${esc(m[2])}</span> ${esc(m[3])}</div>`;
-  }
-  return `<div class="log-line">${esc(line)}</div>`;
-}
-
-// --- Peek ---
-async function peek(target) {
-  document.getElementById('peekModal').classList.add('active');
-  document.getElementById('peekTitle').textContent = 'Peek: ' + target;
-  document.getElementById('peekOutput').textContent = 'Loading...';
-  try {
-    const res = await fetch('/api/peek/' + encodeURIComponent(target));
-    const data = await res.json();
-    document.getElementById('peekOutput').textContent = data.output || data.error || 'No output';
-  } catch (err) {
-    document.getElementById('peekOutput').textContent = 'Error: ' + err.message;
-  }
-}
-
-function closePeek() {
-  document.getElementById('peekModal').classList.remove('active');
-}
-
-document.getElementById('peekModal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) closePeek();
-});
-
-// --- Toast ---
-function toast(msg, type) {
-  const container = document.getElementById('toasts');
-  const el = document.createElement('div');
-  el.className = 'toast ' + (type || '');
-  el.textContent = msg;
-  container.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
-}
-
-// --- Util ---
-function esc(s) {
-  if (s == null) return '';
-  const d = document.createElement('div');
-  d.textContent = String(s);
-  return d.innerHTML;
-}
-</script>
+<script src="/app.js"></script>
 </body>
 </html>
