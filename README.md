@@ -12,6 +12,7 @@ The repo includes a minimal Web UI for realtime monitoring and dispatch:
 
 - Docs / quick start: [`web/README.md`](web/README.md)
 - Default URL: `http://localhost:4747`
+- Latest-main cockpit proof: `./test_web_cockpit_latest_main_proof.sh`
 
 ## Why SGT exists (short)
 

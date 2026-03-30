@@ -174,6 +174,19 @@ web/scripts/sync-live-copy.sh
 
 That script syncs repo `web/` into the live target, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, and runs `npm install` in the live directory so the served copy reflects the repo source.
 
+## Latest-main proof path
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that the repo-tracked cockpit still matches the locked deploy/config/proof contract:
+
+```bash
+./test_web_cockpit_latest_main_proof.sh
+```
+
+This proof path is intentionally narrow:
+
+- `npm --prefix web test` verifies the normalized cockpit snapshot/topology contracts, operator-shell UI structure, and the docs/deploy-helper assertions for the canonical repo copy
+- `web/scripts/sync-live-copy.sh --dry-run <tempdir>` exercises the documented repo `web/` to live-copy deployment helper without mutating `/root/sgt/web`
+
 ## Guardrails For Follow-on Work
 
 - Do not split the app into multiple deployables for this plan.
