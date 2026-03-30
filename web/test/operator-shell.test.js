@@ -19,6 +19,8 @@ test("operator shell html includes cockpit sections and assets", () => {
   assert.match(html, /id="blockerBoard"/);
   assert.match(html, /id="voiceMuteBtn"/);
   assert.match(html, /id="topologyCanvas"/);
+  assert.match(html, /id="topologyOverlay"/);
+  assert.match(html, /id="topologyFocus"/);
   assert.match(html, /src="\/app\.js"/);
   assert.match(html, /href="\/styles\.css"/);
 });
@@ -36,5 +38,8 @@ test("operator shell script consumes snapshot and tmux stream events", () => {
   assert.match(script, /maybePlayVoiceAnnouncement/);
   assert.match(script, /renderAlerts/);
   assert.match(script, /renderTopology/);
+  assert.match(script, /initializeTopologyRenderer/);
+  assert.match(script, /drawWebGlTopology/);
+  assert.match(script, /handleTopologyPointerClick/);
   assert.match(script, /renderStreamDeck/);
 });

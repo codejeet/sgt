@@ -19,6 +19,16 @@ const appState = {
   alertIdsSeen: new Set(),
   alertsBootstrapped: false,
   activeAnnouncement: null,
+  topology: {
+    mode: "pending",
+    renderer: null,
+    overlay: null,
+    simNodes: [],
+    simEdges: [],
+    selectedId: "",
+    hoverId: "",
+    animationFrame: 0,
+  },
 };
 
 const refs = {
@@ -54,6 +64,8 @@ const refs = {
   serverTimeLabel: document.getElementById("serverTimeLabel"),
   topologyMode: document.getElementById("topologyMode"),
   topologyCanvas: document.getElementById("topologyCanvas"),
+  topologyOverlay: document.getElementById("topologyOverlay"),
+  topologyFocus: document.getElementById("topologyFocus"),
   topologyList: document.getElementById("topologyList"),
   logSummary: document.getElementById("logSummary"),
   logViewer: document.getElementById("logViewer"),
@@ -77,7 +89,7 @@ function initialize() {
   setCompact(localStorage.getItem(COMPACT_KEY) === "1");
   setVoiceMuted(localStorage.getItem(VOICE_MUTE_KEY) !== "0");
   bindEvents();
-  detectTopologyMode();
+  initializeTopology();
   loadRigs();
   loadLogs();
   connectWs();
@@ -132,7 +144,57 @@ function bindEvents() {
     }
   });
 
-  window.addEventListener("resize", renderTopology);
+  window.addEventListener("resize", handleTopologyResize);
+}
+
+function initializeTopology() {
+  const overlay = refs.topologyOverlay.getContext("2d");
+  appState.topology.overlay = overlay;
+  initializeTopologyRenderer();
+  refs.topologyOverlay.addEventListener("mousemove", handleTopologyPointerMove);
+  refs.topologyOverlay.addEventListener("mouseleave", handleTopologyPointerLeave);
+  refs.topologyOverlay.addEventListener("click", handleTopologyPointerClick);
+  handleTopologyResize();
+  kickTopologyLoop();
+}
+
+function initializeTopologyRenderer() {
+  const canvas = refs.topologyCanvas;
+  const gl = canvas.getContext("webgl", { alpha: true, antialias: true });
+  if (gl) {
+    const renderer = createTopologyWebGlRenderer(gl);
+    if (renderer) {
+      appState.topology.mode = "webgl";
+      appState.topology.renderer = renderer;
+      refs.topologyMode.textContent = "WebGL live graph";
+      return;
+    }
+  }
+
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    appState.topology.mode = "canvas";
+    appState.topology.renderer = { ctx };
+    refs.topologyMode.textContent = "Canvas fallback";
+    return;
+  }
+
+  appState.topology.mode = "unsupported";
+  appState.topology.renderer = null;
+  refs.topologyMode.textContent = "Topology unavailable";
+}
+
+function handleTopologyResize() {
+  const baseWidth = refs.topologyCanvas.clientWidth || refs.topologyCanvas.width || 960;
+  const baseHeight = refs.topologyCanvas.clientHeight || 520;
+  [refs.topologyCanvas, refs.topologyOverlay].forEach((canvas) => {
+    canvas.width = Math.max(1, Math.floor(baseWidth * devicePixelRatio));
+    canvas.height = Math.max(1, Math.floor(baseHeight * devicePixelRatio));
+  });
+  if (appState.topology.mode === "webgl" && appState.topology.renderer && appState.topology.renderer.gl) {
+    appState.topology.renderer.gl.viewport(0, 0, refs.topologyCanvas.width, refs.topologyCanvas.height);
+  }
+  renderTopology();
 }
 
 function emptyCockpit() {
@@ -773,79 +835,445 @@ function closePeek() {
 
 function renderTopology() {
   const topology = appState.cockpit.topology || { nodes: [], edges: [] };
-  refs.topologyList.innerHTML = (topology.edges || []).slice(0, 16).map((edge) => `
-    <div class="topology-item">${esc(edge.from)} -> ${esc(edge.to)} (${esc(edge.type)})</div>
-  `).join("");
+  buildSimulatedTopology(topology);
+  renderTopologySidebar(topology);
 
-  const canvas = refs.topologyCanvas;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  if (appState.topology.mode === "webgl") {
+    drawWebGlTopology();
+  } else if (appState.topology.mode === "canvas") {
+    drawCanvasTopology();
+  }
+  drawTopologyOverlay();
+}
 
-  const width = canvas.clientWidth || canvas.width;
-  const height = canvas.clientHeight || canvas.height;
-  canvas.width = width * devicePixelRatio;
-  canvas.height = height * devicePixelRatio;
+function buildSimulatedTopology(topology) {
+  const width = refs.topologyCanvas.clientWidth || 960;
+  const height = refs.topologyCanvas.clientHeight || 520;
+  const previous = new Map(appState.topology.simNodes.map((node) => [node.id, node]));
+  const rigOrder = (appState.cockpit.rigs || []).map((rig) => rig.name);
+  const rigCount = Math.max(rigOrder.length, 1);
+
+  appState.topology.simNodes = (topology.nodes || []).map((node, index) => {
+    const existing = previous.get(node.id);
+    const rigIndex = Math.max(0, rigOrder.indexOf(node.rig || ""));
+    const seeded = topologySeed(node.id, rigIndex, width, height, rigCount);
+    return {
+      ...node,
+      radius: topologyRadius(node.type),
+      x: existing ? existing.x : seeded.x,
+      y: existing ? existing.y : seeded.y,
+      vx: existing ? existing.vx : 0,
+      vy: existing ? existing.vy : 0,
+      anchorX: topologyAnchorX(rigIndex, rigCount, width, node.type),
+      anchorY: topologyAnchorY(node.type, height),
+      order: index,
+    };
+  });
+
+  const nodeIds = new Set(appState.topology.simNodes.map((node) => node.id));
+  appState.topology.simEdges = (topology.edges || []).filter((edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to));
+
+  if (!appState.topology.selectedId || !nodeIds.has(appState.topology.selectedId)) {
+    const preferred = appState.topology.simNodes.find((node) => node.type === "blocker")
+      || appState.topology.simNodes.find((node) => node.type === "polecat")
+      || appState.topology.simNodes.find((node) => node.type === "rig")
+      || appState.topology.simNodes[0];
+    appState.topology.selectedId = preferred ? preferred.id : "";
+  }
+  if (appState.topology.hoverId && !nodeIds.has(appState.topology.hoverId)) {
+    appState.topology.hoverId = "";
+  }
+}
+
+function topologySeed(id, rigIndex, width, height, rigCount) {
+  const hash = Array.from(id).reduce((total, ch) => total + ch.charCodeAt(0), 0);
+  const baseX = topologyAnchorX(rigIndex, rigCount, width, "");
+  const spread = 26 + (hash % 40);
+  return {
+    x: baseX + Math.cos(hash) * spread,
+    y: topologyAnchorY("", height) + Math.sin(hash) * spread,
+  };
+}
+
+function topologyAnchorX(rigIndex, rigCount, width, type) {
+  if (type === "agent" && rigIndex === 0) return width / 2;
+  if (rigCount <= 1) return width / 2;
+  const gutter = Math.min(120, width * 0.14);
+  const usable = Math.max(1, width - gutter * 2);
+  return gutter + (usable * (rigIndex + 0.5)) / rigCount;
+}
+
+function topologyAnchorY(type, height) {
+  if (type === "agent") return height * 0.14;
+  if (type === "queue") return height * 0.26;
+  if (type === "rig") return height * 0.38;
+  if (type === "polecat" || type === "dog") return height * 0.54;
+  if (type === "issue" || type === "pr") return height * 0.72;
+  if (type === "blocker") return height * 0.84;
+  return height * 0.52;
+}
+
+function topologyRadius(type) {
+  if (type === "rig") return 9;
+  if (type === "agent") return 8;
+  if (type === "blocker") return 8;
+  if (type === "queue") return 7;
+  return 6;
+}
+
+function kickTopologyLoop() {
+  if (appState.topology.animationFrame) return;
+  appState.topology.animationFrame = requestAnimationFrame(runTopologyFrame);
+}
+
+function runTopologyFrame() {
+  appState.topology.animationFrame = 0;
+  stepTopologySimulation();
+  if (appState.topology.mode === "webgl") {
+    drawWebGlTopology();
+  } else if (appState.topology.mode === "canvas") {
+    drawCanvasTopology();
+  }
+  drawTopologyOverlay();
+  kickTopologyLoop();
+}
+
+function stepTopologySimulation() {
+  const nodes = appState.topology.simNodes;
+  if (nodes.length === 0) return;
+  const width = refs.topologyCanvas.clientWidth || 960;
+  const height = refs.topologyCanvas.clientHeight || 520;
+  const index = new Map(nodes.map((node) => [node.id, node]));
+
+  for (let outer = 0; outer < nodes.length; outer += 1) {
+    const left = nodes[outer];
+    for (let inner = outer + 1; inner < nodes.length; inner += 1) {
+      const right = nodes[inner];
+      let dx = right.x - left.x;
+      let dy = right.y - left.y;
+      const distSq = Math.max(dx * dx + dy * dy, 36);
+      const force = 1100 / distSq;
+      const dist = Math.sqrt(distSq);
+      dx /= dist;
+      dy /= dist;
+      left.vx -= dx * force;
+      left.vy -= dy * force;
+      right.vx += dx * force;
+      right.vy += dy * force;
+    }
+  }
+
+  for (const edge of appState.topology.simEdges) {
+    const from = index.get(edge.from);
+    const to = index.get(edge.to);
+    if (!from || !to) continue;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = Math.max(20, Math.sqrt(dx * dx + dy * dy));
+    const target = 70 + (from.type === "rig" || to.type === "rig" ? 26 : 0);
+    const force = (dist - target) * 0.0028;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    from.vx += nx * force;
+    from.vy += ny * force;
+    to.vx -= nx * force;
+    to.vy -= ny * force;
+  }
+
+  for (const node of nodes) {
+    node.vx += (node.anchorX - node.x) * 0.0046;
+    node.vy += (node.anchorY - node.y) * 0.0046;
+    node.vx *= 0.88;
+    node.vy *= 0.88;
+    node.x = clamp(node.x + node.vx, node.radius + 14, width - node.radius - 14);
+    node.y = clamp(node.y + node.vy, node.radius + 14, height - node.radius - 14);
+  }
+}
+
+function drawCanvasTopology() {
+  const renderer = appState.topology.renderer;
+  if (!renderer || !renderer.ctx) return;
+  const ctx = renderer.ctx;
+  const width = refs.topologyCanvas.clientWidth || 960;
+  const height = refs.topologyCanvas.clientHeight || 520;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const nodes = topology.nodes || [];
-  const edges = topology.edges || [];
-  if (nodes.length === 0) {
+  if (appState.topology.simNodes.length === 0) {
     ctx.fillStyle = "#7fa9bc";
     ctx.font = "14px IBM Plex Sans";
     ctx.fillText("Topology data will appear when the cockpit snapshot contains nodes.", 20, 34);
     return;
   }
 
-  const positions = new Map();
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const radius = Math.max(120, Math.min(width, height) / 2.8);
-
-  nodes.forEach((node, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1) - Math.PI / 2;
-    positions.set(node.id, {
-      x: centerX + Math.cos(angle) * radius,
-      y: centerY + Math.sin(angle) * radius,
-      color: topologyColor(node.type, node.state),
-    });
-  });
-
-  ctx.lineWidth = 1.2;
-  edges.forEach((edge) => {
-    const from = positions.get(edge.from);
-    const to = positions.get(edge.to);
-    if (!from || !to) return;
-    ctx.strokeStyle = "rgba(77, 214, 255, 0.28)";
+  ctx.lineWidth = 1.15;
+  for (const edge of appState.topology.simEdges) {
+    const from = appState.topology.simNodes.find((node) => node.id === edge.from);
+    const to = appState.topology.simNodes.find((node) => node.id === edge.to);
+    if (!from || !to) continue;
+    ctx.strokeStyle = edgeTouchesActive(edge) ? "rgba(248, 184, 74, 0.78)" : "rgba(77, 214, 255, 0.22)";
     ctx.beginPath();
     ctx.moveTo(from.x, from.y);
     ctx.lineTo(to.x, to.y);
     ctx.stroke();
-  });
+  }
 
-  nodes.forEach((node) => {
-    const pos = positions.get(node.id);
-    if (!pos) return;
-    ctx.fillStyle = pos.color;
-    ctx.shadowBlur = 18;
-    ctx.shadowColor = pos.color;
+  for (const node of appState.topology.simNodes) {
     ctx.beginPath();
-    ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = topologyColor(node.type, node.state);
+    ctx.shadowBlur = node.id === topologyActiveNodeId() ? 24 : 12;
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.arc(node.x, node.y, node.radius + (node.id === topologyActiveNodeId() ? 2 : 0), 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#d9f4ff";
-    ctx.font = "12px IBM Plex Sans";
-    ctx.fillText(node.label || node.id, pos.x + 12, pos.y + 4);
-  });
+  }
+  ctx.shadowBlur = 0;
 }
 
-function detectTopologyMode() {
-  const hasWebGl = Boolean(window.WebGLRenderingContext && document.createElement("canvas").getContext("webgl"));
-  refs.topologyMode.textContent = hasWebGl ? "WebGL-ready browser, canvas radar active" : "Canvas fallback";
+function drawTopologyOverlay() {
+  const ctx = appState.topology.overlay;
+  if (!ctx) return;
+  const width = refs.topologyOverlay.clientWidth || 960;
+  const height = refs.topologyOverlay.clientHeight || 520;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  if (appState.topology.simNodes.length === 0) return;
+
+  const activeId = topologyActiveNodeId();
+  for (const node of appState.topology.simNodes) {
+    if (node.id !== activeId && node.id !== appState.topology.hoverId) continue;
+    ctx.strokeStyle = node.id === appState.topology.hoverId ? "rgba(248, 184, 74, 0.95)" : "rgba(77, 214, 255, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius + 8, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.font = "12px IBM Plex Sans";
+  ctx.fillStyle = "#d9f4ff";
+  for (const node of appState.topology.simNodes) {
+    if (node.type === "issue" && appState.topology.simNodes.length > 18 && node.id !== activeId) continue;
+    ctx.fillText(node.label || node.id, node.x + node.radius + 8, node.y + 4);
+  }
+}
+
+function drawWebGlTopology() {
+  const renderer = appState.topology.renderer;
+  if (!renderer || !renderer.gl) return;
+  const { gl, program, attributes, uniforms } = renderer;
+  gl.clearColor(0.02, 0.07, 0.1, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(program);
+  gl.uniform2f(uniforms.uResolution, refs.topologyCanvas.clientWidth || 960, refs.topologyCanvas.clientHeight || 520);
+
+  const index = new Map(appState.topology.simNodes.map((node) => [node.id, node]));
+  const lineVertices = [];
+  for (const edge of appState.topology.simEdges) {
+    const from = index.get(edge.from);
+    const to = index.get(edge.to);
+    if (!from || !to) continue;
+    const rgba = edgeTouchesActive(edge) ? [0.97, 0.72, 0.29, 0.82] : [0.3, 0.84, 1, 0.18];
+    lineVertices.push(from.x, from.y, 1, ...rgba, to.x, to.y, 1, ...rgba);
+  }
+
+  if (lineVertices.length > 0) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, renderer.lineBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineVertices), gl.DYNAMIC_DRAW);
+    gl.vertexAttribPointer(attributes.aPosition, 2, gl.FLOAT, false, 28, 0);
+    gl.enableVertexAttribArray(attributes.aPosition);
+    gl.vertexAttribPointer(attributes.aSize, 1, gl.FLOAT, false, 28, 8);
+    gl.enableVertexAttribArray(attributes.aSize);
+    gl.vertexAttribPointer(attributes.aColor, 4, gl.FLOAT, false, 28, 12);
+    gl.enableVertexAttribArray(attributes.aColor);
+    gl.drawArrays(gl.LINES, 0, lineVertices.length / 7);
+  }
+
+  const pointVertices = [];
+  for (const node of appState.topology.simNodes) {
+    const rgba = hexToRgba(topologyColor(node.type, node.state), node.id === topologyActiveNodeId() ? 1 : 0.92);
+    pointVertices.push(node.x, node.y, node.radius * devicePixelRatio * (node.id === topologyActiveNodeId() ? 2 : 1.7), ...rgba);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, renderer.pointBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pointVertices), gl.DYNAMIC_DRAW);
+  gl.vertexAttribPointer(attributes.aPosition, 2, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(attributes.aPosition);
+  gl.vertexAttribPointer(attributes.aSize, 1, gl.FLOAT, false, 28, 8);
+  gl.enableVertexAttribArray(attributes.aSize);
+  gl.vertexAttribPointer(attributes.aColor, 4, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(attributes.aColor);
+  gl.drawArrays(gl.POINTS, 0, pointVertices.length / 7);
+}
+
+function renderTopologySidebar(topology) {
+  const active = topologyActiveNode();
+  if (!active) {
+    refs.topologyFocus.innerHTML = `<div class="empty-state">Hover or click a node to inspect its live relationships.</div>`;
+    refs.topologyList.innerHTML = "";
+    return;
+  }
+
+  const relatedEdges = (topology.edges || []).filter((edge) => edge.from === active.id || edge.to === active.id);
+  refs.topologyFocus.innerHTML = `
+    <div class="topology-focus-title">${esc(active.label || active.id)}</div>
+    <div class="topology-focus-meta">${esc([active.type, active.rig, active.state].filter(Boolean).join(" • "))}</div>
+    <div class="topology-focus-detail">${esc(topologyNodeDetail(active, relatedEdges.length))}</div>
+  `;
+
+  refs.topologyList.innerHTML = relatedEdges.slice(0, 18).map((edge) => {
+    const otherId = edge.from === active.id ? edge.to : edge.from;
+    const other = (topology.nodes || []).find((node) => node.id === otherId);
+    const activeClass = other && other.id === appState.topology.hoverId ? " active" : "";
+    return `<div class="topology-item${activeClass}">${esc(edge.type)}: ${esc(other ? other.label : otherId)}</div>`;
+  }).join("") || `<div class="empty-state">No direct relationships for this node yet.</div>`;
+}
+
+function topologyNodeDetail(node, edgeCount) {
+  const details = [];
+  if (node.metadata && node.metadata.title) details.push(node.metadata.title);
+  if (node.metadata && node.metadata.detail) details.push(node.metadata.detail);
+  if (node.metadata && node.metadata.evidence) details.push(snippet(node.metadata.evidence, 140));
+  if (node.metadata && node.metadata.reason) details.push(node.metadata.reason);
+  details.push(`${edgeCount} live link${edgeCount === 1 ? "" : "s"}`);
+  return details.filter(Boolean).join(" · ");
+}
+
+function topologyActiveNodeId() {
+  return appState.topology.hoverId || appState.topology.selectedId;
+}
+
+function topologyActiveNode() {
+  return appState.topology.simNodes.find((node) => node.id === topologyActiveNodeId()) || null;
+}
+
+function edgeTouchesActive(edge) {
+  const activeId = topologyActiveNodeId();
+  return Boolean(activeId && (edge.from === activeId || edge.to === activeId));
+}
+
+function handleTopologyPointerMove(event) {
+  const point = topologyPointer(event);
+  const nearest = findNearestTopologyNode(point.x, point.y);
+  const nextId = nearest ? nearest.id : "";
+  if (nextId !== appState.topology.hoverId) {
+    appState.topology.hoverId = nextId;
+    renderTopologySidebar(appState.cockpit.topology || { nodes: [], edges: [] });
+  }
+}
+
+function handleTopologyPointerLeave() {
+  if (appState.topology.hoverId) {
+    appState.topology.hoverId = "";
+    renderTopologySidebar(appState.cockpit.topology || { nodes: [], edges: [] });
+  }
+}
+
+function handleTopologyPointerClick(event) {
+  const point = topologyPointer(event);
+  const nearest = findNearestTopologyNode(point.x, point.y);
+  if (nearest) {
+    appState.topology.selectedId = nearest.id;
+    renderTopologySidebar(appState.cockpit.topology || { nodes: [], edges: [] });
+  }
+}
+
+function topologyPointer(event) {
+  const rect = refs.topologyOverlay.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function findNearestTopologyNode(x, y) {
+  let nearest = null;
+  let best = 24;
+  for (const node of appState.topology.simNodes) {
+    const dist = Math.hypot(node.x - x, node.y - y);
+    if (dist <= best) {
+      nearest = node;
+      best = dist;
+    }
+  }
+  return nearest;
+}
+
+function createTopologyWebGlRenderer(gl) {
+  const vertexShader = compileShader(gl, gl.VERTEX_SHADER, `
+    attribute vec2 aPosition;
+    attribute float aSize;
+    attribute vec4 aColor;
+    uniform vec2 uResolution;
+    varying vec4 vColor;
+    void main() {
+      vec2 zeroToOne = aPosition / uResolution;
+      vec2 clip = (zeroToOne * 2.0) - 1.0;
+      gl_Position = vec4(clip * vec2(1.0, -1.0), 0.0, 1.0);
+      gl_PointSize = aSize;
+      vColor = aColor;
+    }
+  `);
+  const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, `
+    precision mediump float;
+    varying vec4 vColor;
+    void main() {
+      gl_FragColor = vColor;
+    }
+  `);
+  if (!vertexShader || !fragmentShader) return null;
+  const program = createProgram(gl, vertexShader, fragmentShader);
+  if (!program) return null;
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  return {
+    gl,
+    program,
+    attributes: {
+      aPosition: gl.getAttribLocation(program, "aPosition"),
+      aSize: gl.getAttribLocation(program, "aSize"),
+      aColor: gl.getAttribLocation(program, "aColor"),
+    },
+    uniforms: {
+      uResolution: gl.getUniformLocation(program, "uResolution"),
+    },
+    lineBuffer: gl.createBuffer(),
+    pointBuffer: gl.createBuffer(),
+  };
+}
+
+function compileShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
+  return null;
+}
+
+function createProgram(gl, vertexShader, fragmentShader) {
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  if (gl.getProgramParameter(program, gl.LINK_STATUS)) return program;
+  return null;
+}
+
+function hexToRgba(hex, alpha = 1) {
+  const normalized = String(hex || "#7da8ff").replace("#", "");
+  const safe = normalized.length === 3
+    ? normalized.split("").map((part) => `${part}${part}`).join("")
+    : normalized.padEnd(6, "0").slice(0, 6);
+  return [
+    parseInt(safe.slice(0, 2), 16) / 255,
+    parseInt(safe.slice(2, 4), 16) / 255,
+    parseInt(safe.slice(4, 6), 16) / 255,
+    alpha,
+  ];
 }
 
 function topologyColor(type, state) {
   if (type === "blocker" || state === "blocked") return "#ff6b6b";
+  if (type === "issue") return "#7da8ff";
+  if (type === "pr") return "#8df2d8";
   if (type === "rig") return "#8bf0ff";
   if (type === "queue") return "#f8b84a";
   if (state === "alive" || state === "active") return "#9df77d";
@@ -938,6 +1366,10 @@ function formatIso(iso) {
 function snippet(value, maxLength) {
   if (!value) return "";
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function formatLogLine(line) {

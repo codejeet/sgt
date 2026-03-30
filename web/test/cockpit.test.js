@@ -83,7 +83,11 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.blockers[0].title, 'Acceptance still red');
   assert.equal(snapshot.alerts[0].kind, 'blocker-opened');
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'rig:sgt'));
+  assert.ok(snapshot.topology.nodes.some((node) => node.id === 'issue:sgt:264'));
+  assert.ok(snapshot.topology.nodes.some((node) => node.id === 'queue:sgt-pr264'));
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'rig:sgt' && edge.type === 'runs'));
+  assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'queue:sgt-pr264' && edge.type === 'contains'));
+  assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'worker:polecat:sgt-34784812' && edge.type === 'works-on'));
 });
 
 test('BlockerAlertTracker records blocker opens and resolutions with voice gating', () => {

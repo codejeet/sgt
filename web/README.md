@@ -48,7 +48,7 @@ Environment variables:
 - **Recent alert rail** — New blocker openings, follow-up escalations, and resolutions surface as explicit alert cards instead of blending into the blocker list
 - **Optional ElevenLabs voice** — Env-gated blocker voice announcements with browser mute control plus backend dedupe and rate limiting
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
-- **Topology radar** — Canvas relationship view driven from normalized `topology` nodes/edges, with a clean fallback when WebGL is absent
+- **Topology radar** — Force-laid live graph driven from normalized `topology` nodes/edges, using WebGL when available plus a canvas fallback with the same click/hover focus workflows
 - **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
 - **Dispatch** — Sling polecats and dogs without leaving the shell
 
@@ -109,6 +109,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 - **Backend**: Node.js + Express. Shells out to `sgt` CLI for actions; tails `~/sgt/sgt.log`.
 - **Frontend**: Static vanilla HTML/CSS/JS served by the same process.
 - **Real-time**: WebSocket pushes status and log deltas; includes heartbeat + reconnect/backoff.
+- **Topology rendering**: browser-side force simulation with a WebGL node/edge pass when supported; overlay labels and fallback rendering remain canvas-based so the panel still works without GPU support.
 - **Canonical source**: repo `web/` is the source of truth; `/root/sgt/web` is a deployment target.
 
 ## API Endpoints
