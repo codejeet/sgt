@@ -13,7 +13,12 @@ npm start
 # open http://localhost:4747
 ```
 
-To sync the repo-tracked `web/` copy into the live served target on the rig host:
+## Deploy path
+
+The repo-tracked `web/` directory is the only canonical source for the cockpit.
+The default live served copy on a rig host lives at `/root/sgt/web`, and the default URL is `http://localhost:4747` when you run it locally or `http://<tailscale-host>:4747` on the rig host.
+
+Sync the repo copy into the live target with:
 
 ```bash
 web/scripts/sync-live-copy.sh
@@ -25,9 +30,17 @@ Dry-run the sync first if needed:
 web/scripts/sync-live-copy.sh --dry-run
 ```
 
+Override the live target without editing the script:
+
+```bash
+SGT_WEB_LIVE_DIR=/srv/sgt/web web/scripts/sync-live-copy.sh
+```
+
+`web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, and runs `npm install` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
+
 ## Configuration
 
-Environment variables:
+Server runtime environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -39,6 +52,31 @@ Environment variables:
 | `SGT_WEB_ELEVENLABS_MODEL_ID` | `eleven_turbo_v2_5` | Optional ElevenLabs model override |
 | `SGT_WEB_VOICE_EVENT_KINDS` | `blocker-resolved` | Comma-separated blocker alert kinds eligible for voice |
 | `SGT_WEB_VOICE_RATE_LIMIT_SECS` | `90` | Minimum seconds between eligible voice announcements |
+
+Deploy-helper environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SGT_WEB_LIVE_DIR` | `/root/sgt/web` | Alternate live sync target used by `web/scripts/sync-live-copy.sh` |
+
+Behavior notes:
+
+- Voice stays optional. Without `SGT_WEB_ELEVENLABS_API_KEY` and `SGT_WEB_ELEVENLABS_VOICE_ID`, the cockpit stays fully usable and the UI reports voice as unavailable.
+- The browser mute toggle is local state only. Backend event gating and rate limiting still come from `SGT_WEB_VOICE_EVENT_KINDS` and `SGT_WEB_VOICE_RATE_LIMIT_SECS`.
+- The topology panel prefers WebGL for the live graph and falls back to the canvas/overlay path when WebGL init or GPU support is unavailable.
+
+## Latest-main proof
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that the repo-tracked cockpit still covers the documented shell, data model, and deploy path:
+
+```bash
+./test_web_cockpit_latest_main_proof.sh
+```
+
+That proof path bundles:
+
+- `npm --prefix web test` for the cockpit snapshot/topology/blocker alert contracts plus the operator-shell UI and docs/deploy-helper assertions
+- `web/scripts/sync-live-copy.sh --dry-run <tempdir>` so the canonical repo `web/` to live-copy sync path is exercised without touching `/root/sgt/web`
 
 ## Features
 
