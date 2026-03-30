@@ -27,13 +27,27 @@ if [[ "${1:-}" == "label" && "${2:-}" == "create" ]]; then
 fi
 
 if [[ "${1:-}" == "issue" && "${2:-}" == "list" ]]; then
-  python3 - "$STATE_FILE" <<'PY'
+  state_filter="OPEN"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state)
+        state_filter="${2^^}"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  python3 - "$STATE_FILE" "$state_filter" <<'PY'
 import json
 import re
 import sys
 
 state_file = sys.argv[1]
 issues = json.load(open(state_file, "r", encoding="utf-8"))
+state_filter = sys.argv[2].upper()
 
 def signature(title: str) -> str:
     out = title.lower()
@@ -43,6 +57,8 @@ def signature(title: str) -> str:
     return out
 
 for issue in issues:
+    if state_filter != "ALL" and issue.get("state", "").upper() != state_filter:
+        continue
     labels = ",".join((lbl.get("name", "").lower() for lbl in issue.get("labels", [])))
     created = issue.get("createdAt", "")
     closed = issue.get("closedAt") or ""
@@ -238,6 +254,45 @@ issues = json.load(open(state_file, "r", encoding="utf-8"))
 
 if len(issues) != 3:
     raise SystemExit(f"expected 3 issues after cooldown override dispatch, got {len(issues)}")
+PY
+
+python3 - "$MOCK_STATE" <<'PY'
+import json
+import sys
+
+state_file = sys.argv[1]
+issues = json.load(open(state_file, "r", encoding="utf-8"))
+
+for issue in issues:
+    if "unmatched quote in notify parser" in issue["title"]:
+        issue["state"] = "CLOSED"
+        issue["closedAt"] = "2099-01-01T00:00:00Z"
+        break
+else:
+    raise SystemExit("expected unmatched-quote issue to exist before close regression check")
+
+json.dump(issues, open(state_file, "w", encoding="utf-8"))
+PY
+
+"${ENV_PREFIX[@]}" bash --noprofile --norc -c '
+set -euo pipefail
+sgt sling test "Fix bash startup warning: unmatched quote in notify parser" --label high >/dev/null
+'
+
+python3 - "$MOCK_STATE" <<'PY'
+import json
+import sys
+
+state_file = sys.argv[1]
+issues = json.load(open(state_file, "r", encoding="utf-8"))
+
+matches = [issue for issue in issues if "unmatched quote in notify parser" in issue["title"]]
+if len(matches) != 2:
+    raise SystemExit(f"expected a fresh dispatch after closing the duplicate, got {len(matches)} matching issues")
+
+open_matches = [issue for issue in matches if issue["state"] == "OPEN"]
+if len(open_matches) != 1:
+    raise SystemExit(f"expected exactly one open replacement issue after closed-issue ignore check, got {len(open_matches)}")
 PY
 
 echo "ALL TESTS PASSED"

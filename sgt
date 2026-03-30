@@ -4606,7 +4606,7 @@ _find_recent_duplicate_issue() {
 
   local issues_tsv
   issues_tsv=$(
-    gh issue list --repo "$repo" --state all --limit 100 \
+    gh issue list --repo "$repo" --state open --limit 100 \
       --json number,title,state,url,createdAt,closedAt,labels \
       --jq '.[] | [
         (.number|tostring),
@@ -4636,12 +4636,8 @@ _find_recent_duplicate_issue() {
     done
     [[ "$labels_ok" == "true" ]] || continue
 
-    local reference_at="$created_at"
-    if [[ "${issue_state^^}" == "CLOSED" && -n "$closed_at" ]]; then
-      reference_at="$closed_at"
-    fi
     local reference_epoch
-    reference_epoch=$(date -d "$reference_at" +%s 2>/dev/null || echo 0)
+    reference_epoch=$(date -d "$created_at" +%s 2>/dev/null || echo 0)
     [[ "$reference_epoch" -gt 0 ]] || continue
 
     local age=$((now_epoch - reference_epoch))
