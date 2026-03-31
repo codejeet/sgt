@@ -581,6 +581,7 @@ Latest-main proof for this hierarchy:
 ```
 
 That proof path verifies the documented contract, shared-to-per-rig cutover guardrails, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
+It also proves the Web UI keeps `president` and `mayor/<rig>` directly inspectable as separate control-plane nodes.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
