@@ -558,26 +558,27 @@ export SGT_MAYOR_LOCK_LEASE_SECS=720
 Default lease is `SGT_MAYOR_INTERVAL + 120` seconds.
 
 Optional per-rig Mayor architecture:
-- Set `SGT_MAYOR_ARCHITECTURE=per-rig` to run one Mayor tmux session per rig instead of one shared `sgt-mayor`.
-- In that mode, sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises each `sgt-mayor-<rig>` independently, and `sgt status` / `sgt status --json` expose entries like `mayor/pmkb` or `mayor/sgt`.
+- Set `SGT_MAYOR_ARCHITECTURE=per-rig` to run the hierarchical control plane: one `president` tmux session supervising one Mayor tmux session per rig instead of one shared `sgt-mayor`.
+- In that mode, President state/logs live under `~/.sgt/president/`, rig-local Mayor sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises `sgt-president`, and `sgt status` / `sgt status --json` expose `president` plus entries like `mayor/pmkb` or `mayor/sgt`.
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
+- `sgt president start|stop|refresh` controls the cross-rig supervisor, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
-- This is transition scaffolding toward the documented `President -> mayor/<rig>` hierarchy in [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md); it is not the final control-plane architecture by itself.
+- President performs bounded supervision only: if a rig-local Mayor is missing, stale, or an actionable rig has no healthy forward motion, President starts, wakes, or refreshes that one Mayor instead of taking over routine repo work directly.
 
 President/per-rig Mayor architecture contract:
-- The target hierarchy is `President -> mayor/<rig> -> rig-local workers`.
+- The runtime hierarchy in per-rig mode is `President -> mayor/<rig> -> rig-local workers`.
 - The President is the cross-rig supervisor and must not take over routine repo-local Mayor work.
 - Each `mayor/<rig>` owns exactly one rig with isolated transient state and independent refresh/restart/peek semantics.
-- Operator surfaces must eventually distinguish `president` from `mayor/<rig>` explicitly in status, peek, logs, and the Web UI.
+- Operator surfaces distinguish `president` from `mayor/<rig>` explicitly in status, peek, logs, and the Web UI.
 - For the detailed role, migration, and proof contract, see [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md).
 
-Latest-main proof for this architecture contract:
+Latest-main proof for this hierarchy:
 
 ```bash
-./test_president_per_rig_mayor_contract_latest_main_proof.sh
+./test_president_runtime_latest_main_proof.sh
 ```
 
-That proof path currently verifies the in-repo contract text plus the existing per-rig Mayor runtime slice that the migration already depends on. It does not claim that the full President runtime has landed yet.
+That proof path verifies the documented contract, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
@@ -587,7 +588,7 @@ export SGT_DEACON_HEARTBEAT_STALE_SECS=300
 ```
 
 - Mayor also checks this heartbeat age and proactively restarts deacon when the heartbeat is missing/invalid/stale.
-- Deacon also supervises the mayor tmux session in shared mode, or each `sgt-mayor-<rig>` session in per-rig mode, and restarts missing/stale Mayor sessions automatically.
+- Deacon also supervises the mayor tmux session in shared mode, or `sgt-president` in per-rig mode. President then supervises each `sgt-mayor-<rig>` session.
 - Mayor shutdown/exit paths emit a durable `MAYOR_STOP` receipt with `reason_code`, `exit_code`, `signal`, and `unexpected` fields so silent exits remain visible in logs/decision history.
 - `sgt status` now shows deacon heartbeat age + health (`healthy|stale|unknown`) and the active stale threshold.
 - `sgt status` render guardrails are non-fatal: terminal width falls back safely in non-TTY/sparse envs, and polecat metadata races/misses are surfaced as actionable warning lines (for example, retry `sgt status` or run `sgt nuke <polecat>` if stale) while `sgt status` still exits `0`.

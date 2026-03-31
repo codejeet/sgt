@@ -16,6 +16,7 @@ cp "$SGT_SCRIPT" "$HOME_DIR/.local/bin/sgt"
 chmod +x "$HOME_DIR/.local/bin/sgt"
 
 cat > "$SESSIONS_FILE" <<'EOF'
+sgt-president
 sgt-mayor-alpha
 sgt-mayor-beta
 EOF
@@ -97,6 +98,8 @@ names = {agent.get("name") for agent in data.get("agents", [])}
 for expected in ("mayor/alpha", "mayor/beta"):
     if expected not in names:
         raise SystemExit(f"missing {expected} in status agents: {sorted(names)}")
+if "president" not in names:
+    raise SystemExit(f"missing president in status agents: {sorted(names)}")
 if "mayor" in names:
     raise SystemExit("legacy shared mayor entry unexpectedly present in per-rig status output")
 PY

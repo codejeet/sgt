@@ -14,11 +14,12 @@ It is intentionally explicit about two things:
 As of this contract:
 
 - the default runtime is still the legacy shared Mayor (`sgt-mayor`)
-- SGT already supports an optional per-rig Mayor runtime behind `SGT_MAYOR_ARCHITECTURE=per-rig`
+- SGT now supports a first-class President runtime when `SGT_MAYOR_ARCHITECTURE=per-rig`
+- in per-rig mode, President runs in `sgt-president` with scoped transient files under `~/.sgt/president/`
 - in per-rig mode, each rig Mayor runs in its own tmux session (`sgt-mayor-<rig>`) with scoped transient files under `~/.sgt/mayors/<rig>/`
-- no first-class President runtime or operator surface exists yet
+- operator surfaces now expose `president` separately from `mayor/<rig>` in status, peek, logs, and the Web UI
 
-That means this issue defines the architecture contract and migration rules; it does not claim the full President-led control plane is already complete.
+Shared Mayor mode remains as a legacy compatibility fallback, but the President-led runtime now exists for the per-rig control-plane path.
 
 ## Target Hierarchy
 
@@ -139,13 +140,16 @@ This contract is only useful if the repo keeps proving it.
 Current proof for the transition:
 
 - `./test_mayor_per_rig_architecture.sh` proves the existing per-rig Mayor runtime contract: separate Mayor sessions, scoped status entries, and targeted wake routing
+- `./test_president_runtime_supervision.sh` proves deacon supervises President and President can perform a bounded per-rig refresh intervention without taking over routine rig work
+- `./test_peek_mayor_log_fallback.sh` proves `sgt peek president` and `sgt peek mayor/<rig>` both retain scoped log fallback behavior
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
-- `./test_president_per_rig_mayor_contract_latest_main_proof.sh` bundles both checks as the latest-main proof for this contract-definition task
+- `./test_president_runtime_latest_main_proof.sh` bundles the runtime, surface, and contract checks as the latest-main proof for the active hierarchy
 
-Future latest-main acceptance for the full migration must additionally prove:
+The latest-main proof for the active runtime now proves:
 
 - President runtime exists and is separately inspectable
-- at least two rigs run under independent Mayors at the same time
+- status and peek surfaces distinguish `president` from `mayor/<rig>`
+- at least two rigs can appear under independent Mayors in status
 - President supervision can perform a justified per-rig unblock or recovery action without taking over routine rig-local ownership
 
 ## Summary

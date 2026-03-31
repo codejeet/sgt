@@ -20,7 +20,7 @@ case "$cmd" in
   has-session)
     [[ "${2:-}" == "-t" ]] || exit 1
     case "${3:-}" in
-      sgt-mayor|sgt-mayor-alpha) exit 0 ;;
+      sgt-president|sgt-mayor|sgt-mayor-alpha) exit 0 ;;
       *) exit 1 ;;
     esac
     ;;
@@ -70,10 +70,18 @@ chmod +x "$HOME_DIR/.local/bin/sgt"
 run_env "$HOME_DIR" bash --noprofile --norc -c '
 set -euo pipefail
 sgt init >/dev/null
+mkdir -p "$SGT_ROOT/.sgt/president"
 mkdir -p "$SGT_ROOT/.sgt/mayors/alpha"
+printf "president line\n" > "$SGT_ROOT/.sgt/president/president-start.log"
 printf "shared mayor line\n" > "$SGT_ROOT/.sgt/mayor-start.log"
 printf "per-rig mayor line\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-start.log"
 '
+
+president_out="$(run_env "$HOME_DIR" bash --noprofile --norc -c 'set -euo pipefail; sgt peek president')"
+printf '%s' "$president_out" | grep -q 'president line' || {
+  echo "expected president peek to fall back to president-start.log" >&2
+  exit 1
+}
 
 shared_out="$(run_env "$HOME_DIR" bash --noprofile --norc -c 'set -euo pipefail; sgt peek mayor')"
 printf '%s' "$shared_out" | grep -q 'shared mayor line' || {

@@ -9,7 +9,7 @@ const appState = {
   rigs: [],
   lastSnapshotAt: 0,
   lastLogAt: 0,
-  focusTarget: "mayor",
+  focusTarget: "president",
   streamFilters: { rig: "all", role: "polecat", query: "" },
   streamFollowAll: true,
   desiredTargets: new Set(),
@@ -361,11 +361,11 @@ function handleStreamEvent(message) {
 
 function preferredFocusTarget() {
   const liveWorker = monitorWorkers()[0];
-  return liveWorker ? liveWorker.stream.target : "mayor";
+  return liveWorker ? liveWorker.stream.target : rootStreamTarget();
 }
 
 function syncStreamTargets() {
-  const desired = new Set(["mayor"]);
+  const desired = new Set([rootStreamTarget()]);
   const workers = monitorWorkers().filter(matchesStreamFilters);
 
   if (appState.focusTarget) desired.add(appState.focusTarget);
@@ -388,7 +388,7 @@ function sendWs(payload) {
 }
 
 function hasTarget(target) {
-  if (target === "mayor") return true;
+  if (target === "president" || target === "mayor") return true;
   return appState.cockpit.workers.some((worker) => worker.stream && worker.stream.target === target);
 }
 
@@ -440,7 +440,7 @@ function renderMetrics() {
     {
       label: "Agents Online",
       value: `${agentsOnline}/${appState.cockpit.agents.length || 0}`,
-      detail: "Daemon, Mayor, witness, refinery, and support process health.",
+      detail: "Daemon, President, Mayor, witness, refinery, and support process health.",
     },
     {
       label: "Live Workers",
@@ -528,7 +528,7 @@ function renderRigs() {
         <span>${rig.blockers || 0} blockers</span>
         <span>${rig.mergeQueue || 0} queue</span>
       </div>
-      <div class="subtle">${esc(rig.reason || "No mayor detail available.")}</div>
+      <div class="subtle">${esc(rig.reason || "No rig-local mayor detail available.")}</div>
     </article>
   `).join("");
 }
@@ -582,9 +582,9 @@ function renderStreamDeck() {
   renderStreamFilters();
   const orderedTargets = Array.from(appState.desiredTargets);
   refs.streamSummary.textContent = `${orderedTargets.length} subscriptions`;
-  refs.overviewHero.innerHTML = renderHeroStream("mayor");
-  refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || "mayor");
-  refs.mayorMonitor.innerHTML = renderMonitorStream("mayor", { focusable: false });
+  refs.overviewHero.innerHTML = renderHeroStream(rootStreamTarget());
+  refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || rootStreamTarget());
+  refs.mayorMonitor.innerHTML = renderMonitorStream(rootStreamTarget(), { focusable: false });
 
   const visibleWorkers = monitorWorkers().filter(matchesStreamFilters);
   refs.monitorWallSummary.textContent = `${visibleWorkers.length} panes visible`;
@@ -1299,6 +1299,7 @@ function matchesStreamFilters(worker) {
 }
 
 function streamDetail(target) {
+  if (target === "president") return "President supervision loop";
   if (target === "mayor") return "Mayor command loop";
   const worker = appState.cockpit.workers.find((item) => item.stream && item.stream.target === target);
   if (!worker) return "Live worker pane";
@@ -1306,6 +1307,10 @@ function streamDetail(target) {
   if (worker.rig) detail.push(worker.rig);
   if (worker.issue) detail.push(`#${worker.issue}`);
   return detail.join(" • ");
+}
+
+function rootStreamTarget() {
+  return (appState.cockpit.agents || []).some((agent) => agent.name === "president") ? "president" : "mayor";
 }
 
 function workerStateClass(worker) {

@@ -16,12 +16,15 @@ SGT_DAEMON_PID="$SGT_CONFIG/daemon.pid"
 SGT_DAEMON_LOCK="$SGT_CONFIG/daemon.lock"
 SGT_DEACON_HEARTBEAT="$SGT_CONFIG/deacon-heartbeat.json"
 SGT_DAEMON_INTERVAL="${SGT_DAEMON_INTERVAL:-180}" # 3 minutes
+SGT_PRESIDENT_INTERVAL="${SGT_PRESIDENT_INTERVAL:-180}" # 3 minutes
 SGT_MAYOR_INTERVAL="${SGT_MAYOR_INTERVAL:-600}" # 10 minutes
 SGT_MAYOR_LOCK_LEASE_SECS="${SGT_MAYOR_LOCK_LEASE_SECS:-}" # defaults to interval + 120s
 SGT_MAYOR_DISPATCH_COOLDOWN="${SGT_MAYOR_DISPATCH_COOLDOWN:-21600}" # 6 hours
 SGT_MAYOR_WAKE_DEDUPE_TTL="${SGT_MAYOR_WAKE_DEDUPE_TTL:-15}" # 15 seconds
 SGT_DEACON_HEARTBEAT_STALE_SECS="${SGT_DEACON_HEARTBEAT_STALE_SECS:-300}" # 5 minutes
 SGT_AGENT_HEARTBEAT_STALE_SECS="${SGT_AGENT_HEARTBEAT_STALE_SECS:-180}" # 3 minutes
+SGT_PRESIDENT_INTERVENTION_STALE_SECS="${SGT_PRESIDENT_INTERVENTION_STALE_SECS:-900}" # 15 minutes
+SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS="${SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS:-600}" # 10 minutes
 SGT_MAYOR_CRITICAL_ALERT_COOLDOWN="${SGT_MAYOR_CRITICAL_ALERT_COOLDOWN:-3600}" # 1 hour
 SGT_MOLECULES="$SGT_ROOT/molecules"
 SGT_ESCALATION="$SGT_CONFIG/escalation.json"
@@ -158,6 +161,38 @@ _mayor_architecture() {
 
 _mayor_architecture_per_rig() {
   [[ "$(_mayor_architecture)" == "per-rig" ]]
+}
+
+_president_enabled() {
+  _mayor_architecture_per_rig
+}
+
+_president_runtime_dir() {
+  printf '%s/president\n' "$SGT_CONFIG"
+}
+
+_president_session_name() {
+  printf 'sgt-president\n'
+}
+
+_president_fifo() {
+  printf '%s/president.fifo\n' "$(_president_runtime_dir)"
+}
+
+_president_start_log_file() {
+  printf '%s/president-start.log\n' "$(_president_runtime_dir)"
+}
+
+_president_heartbeat_file() {
+  printf '%s/president-heartbeat.json\n' "$(_president_runtime_dir)"
+}
+
+_president_exit_state_file() {
+  printf '%s/president-exit.state\n' "$(_president_runtime_dir)"
+}
+
+_president_intervention_state_file() {
+  printf '%s/president-interventions.tsv\n' "$(_president_runtime_dir)"
 }
 
 _mayor_scope_session_name() {
@@ -517,6 +552,9 @@ _mayor_start_failure_state_file() {
 _peek_mayor_log_file_for_target() {
   local target="${1:-}"
   case "$target" in
+    president)
+      _president_start_log_file
+      ;;
     mayor)
       _mayor_start_log_file
       ;;
@@ -535,7 +573,7 @@ _peek_session_output() {
 
   pane_output="$(tmux capture-pane -t "$session" -p -S -200 2>/dev/null || true)"
   case "$target" in
-    mayor|mayor/*)
+    president|mayor|mayor/*)
       if [[ -z "${pane_output//[$' \t\r\n']/}" ]]; then
         local mayor_log=""
         mayor_log="$(_peek_mayor_log_file_for_target "$target" || true)"
@@ -654,6 +692,146 @@ _mayor_heartbeat_health() {
   else
     printf 'healthy\n'
   fi
+}
+
+_president_heartbeat_stale_secs() {
+  local default_secs raw
+  default_secs=$(( ${SGT_PRESIDENT_INTERVAL:-180} + 120 ))
+  raw="${SGT_PRESIDENT_HEARTBEAT_STALE_SECS:-$default_secs}"
+  if [[ ! "$raw" =~ ^[0-9]+$ || "$raw" -le 0 ]]; then
+    raw="$default_secs"
+  fi
+  printf '%s\n' "$raw"
+}
+
+_president_heartbeat_write() {
+  local phase="${1:-running}" trigger="${2:-periodic}" cycle="${3:-0}"
+  local state_file state_tmp now_epoch now_iso
+  state_file="$(_president_heartbeat_file)"
+  state_tmp="${state_file}.tmp.$$"
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  mkdir -p "$(dirname "$state_file")"
+  printf '%s|%s|%s|%s|%s|%s\n' \
+    "$now_epoch" \
+    "$now_iso" \
+    "$$" \
+    "$(_escape_wake_value "$phase")" \
+    "$cycle" \
+    "$(_escape_wake_value "$trigger")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_president_heartbeat_snapshot() {
+  local state_file now_epoch ts iso pid phase cycle trigger age
+  state_file="$(_president_heartbeat_file)"
+  now_epoch="$(date +%s)"
+  if [[ ! -f "$state_file" ]]; then
+    printf 'unknown|unknown|missing||||\n'
+    return 1
+  fi
+  IFS='|' read -r ts iso pid phase cycle trigger < "$state_file" 2>/dev/null || true
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    printf 'unknown|%s|invalid|%s|%s|%s|%s\n' \
+      "${iso:-unknown}" \
+      "${pid:-}" \
+      "${phase:-}" \
+      "${cycle:-}" \
+      "${trigger:-}"
+    return 1
+  fi
+  age=$((now_epoch - ts))
+  if [[ "$age" -lt 0 ]]; then
+    age=0
+  fi
+  printf '%s|%s|ok|%s|%s|%s|%s\n' \
+    "$age" \
+    "${iso:-unknown}" \
+    "${pid:-}" \
+    "${phase:-unknown}" \
+    "${cycle:-0}" \
+    "${trigger:-unknown}"
+}
+
+_president_heartbeat_health() {
+  local age="${1:-unknown}" stale_secs="${2:-$(_president_heartbeat_stale_secs)}"
+  if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [[ "$age" -gt "$stale_secs" ]]; then
+    printf 'stale\n'
+  else
+    printf 'healthy\n'
+  fi
+}
+
+_president_exit_state_read() {
+  local ts="" reason_code="" exit_code="" signal="" unexpected=""
+  local state_file
+  state_file="$(_president_exit_state_file)"
+  if [[ -f "$state_file" ]]; then
+    IFS='|' read -r ts reason_code exit_code signal unexpected < "$state_file" 2>/dev/null || true
+  fi
+  if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+    ts=""
+  fi
+  printf '%s|%s|%s|%s|%s\n' "$ts" "$reason_code" "$exit_code" "$signal" "$unexpected"
+}
+
+_president_exit_state_write() {
+  local reason_code="${1:-unknown}" exit_code="${2:-1}" signal="${3:-EXIT}" unexpected="${4:-true}"
+  local state_file state_tmp
+  state_file="$(_president_exit_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  mkdir -p "$(dirname "$state_file")"
+  printf '%s|%s|%s|%s|%s\n' \
+    "$(date +%s)" \
+    "$(_escape_wake_value "$reason_code")" \
+    "$(_escape_wake_value "$exit_code")" \
+    "$(_escape_wake_value "$signal")" \
+    "$(_escape_wake_value "$unexpected")" > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_president_exit_state_clear() {
+  rm -f "$(_president_exit_state_file)"
+}
+
+_president_intervention_state_read() {
+  local rig="${1:-}" state_file row_rig row_ts row_reason row_action
+  [[ -n "$rig" ]] || return 0
+  state_file="$(_president_intervention_state_file)"
+  [[ -f "$state_file" ]] || return 0
+  while IFS=$'\t' read -r row_rig row_ts row_reason row_action; do
+    [[ "$row_rig" == "$rig" ]] || continue
+    printf '%s|%s|%s\n' "$row_ts" "$row_reason" "$row_action"
+    return 0
+  done < "$state_file"
+}
+
+_president_intervention_state_write() {
+  local rig="${1:-}" reason="${2:-unknown}" action="${3:-unknown}"
+  local state_file state_tmp row_rig row_ts row_reason row_action
+  [[ -n "$rig" ]] || return 0
+  state_file="$(_president_intervention_state_file)"
+  state_tmp="${state_file}.tmp.$$"
+  mkdir -p "$(dirname "$state_file")"
+  {
+    if [[ -f "$state_file" ]]; then
+      while IFS=$'\t' read -r row_rig row_ts row_reason row_action; do
+        [[ -n "$row_rig" ]] || continue
+        [[ "$row_rig" == "$rig" ]] && continue
+        printf '%s\t%s\t%s\t%s\n' "$row_rig" "$row_ts" "$row_reason" "$row_action"
+      done < "$state_file"
+    fi
+    printf '%s\t%s\t%s\t%s\n' \
+      "$rig" \
+      "$(date +%s)" \
+      "$(_escape_wake_value "$reason")" \
+      "$(_escape_wake_value "$action")"
+  } > "$state_tmp"
+  mv "$state_tmp" "$state_file"
 }
 
 _mayor_last_cycle_state_file() {
@@ -7621,6 +7799,23 @@ cmd_status_json() {
   fi
   agents+=("{\"name\":$(_json_quote "deacon"),\"status\":$(_json_quote "$deacon_badge"),\"session\":$(_json_quote "$deacon_alive"),\"heartbeat\":{\"age_seconds\":$(_json_quote "$hb_age"),\"timestamp\":$(_json_quote "$hb_ts"),\"state\":$(_json_quote "$hb_state"),\"health\":$(_json_quote "$hb_health"),\"stale_seconds\":$(_json_quote "$hb_stale_secs")}}")
 
+  if _president_enabled; then
+    local president_alive president_hb_age president_hb_ts president_hb_state president_hb_pid president_hb_phase president_hb_cycle president_hb_trigger president_hb_stale president_hb_health
+    local president_exit_ts president_exit_reason president_exit_code president_exit_signal president_exit_unexpected president_exit_age
+    president_alive="off"
+    tmux has-session -t "$(_president_session_name)" 2>/dev/null && president_alive="on"
+    president_hb_stale="$(_president_heartbeat_stale_secs)"
+    IFS='|' read -r president_hb_age president_hb_ts president_hb_state president_hb_pid president_hb_phase president_hb_cycle president_hb_trigger <<< "$(_president_heartbeat_snapshot)"
+    president_hb_health="$(_president_heartbeat_health "$president_hb_age" "$president_hb_stale")"
+    IFS='|' read -r president_exit_ts president_exit_reason president_exit_code president_exit_signal president_exit_unexpected <<< "$(_president_exit_state_read)"
+    president_exit_age=""
+    if [[ "$president_exit_ts" =~ ^[0-9]+$ ]]; then
+      president_exit_age=$(( $(date +%s) - president_exit_ts ))
+      (( president_exit_age < 0 )) && president_exit_age=0
+    fi
+    agents+=("{\"name\":$(_json_quote "president"),\"status\":$(_json_quote "$president_alive"),\"heartbeat\":{\"age_seconds\":$(_json_quote "$president_hb_age"),\"timestamp\":$(_json_quote "$president_hb_ts"),\"state\":$(_json_quote "$president_hb_state"),\"health\":$(_json_quote "$president_hb_health"),\"stale_seconds\":$(_json_quote "$president_hb_stale"),\"pid\":$(_json_quote "$president_hb_pid"),\"phase\":$(_json_quote "$president_hb_phase"),\"cycle\":$(_json_quote "$president_hb_cycle"),\"trigger\":$(_json_quote "$president_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$president_exit_ts"),\"age_seconds\":$(_json_quote "$president_exit_age"),\"reason_code\":$(_json_quote "$president_exit_reason"),\"exit_code\":$(_json_quote "$president_exit_code"),\"signal\":$(_json_quote "$president_exit_signal"),\"unexpected\":$(_json_quote "$president_exit_unexpected")}}")
+  fi
+
   local rig_file rig_name w_alive r_alive
   for rig_file in "$SGT_RIGS"/*; do
     [[ -f "$rig_file" ]] || continue
@@ -7945,6 +8140,30 @@ _cmd_status_human() {
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: missing (health unknown, stale>${hb_stale_secs}s)" "$(_reset)"
   else
     printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${hb_ts:-invalid} (health unknown, stale>${hb_stale_secs}s)" "$(_reset)"
+  fi
+
+  if _president_enabled; then
+    local president_alive president_hb_age president_hb_ts president_hb_state president_hb_pid president_hb_phase president_hb_cycle president_hb_trigger president_hb_stale president_hb_health
+    local president_exit_ts president_exit_reason president_exit_code president_exit_signal president_exit_unexpected president_exit_age
+    president_alive="off"
+    tmux has-session -t "$(_president_session_name)" 2>/dev/null && president_alive="on"
+    president_hb_stale="$(_president_heartbeat_stale_secs)"
+    IFS='|' read -r president_hb_age president_hb_ts president_hb_state president_hb_pid president_hb_phase president_hb_cycle president_hb_trigger <<< "$(_president_heartbeat_snapshot)"
+    president_hb_health="$(_president_heartbeat_health "$president_hb_age" "$president_hb_stale")"
+    printf "  %-16s %s\n" "president" "$(_status_badge "$president_alive")"
+    if [[ "$president_hb_state" == "ok" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: $president_hb_ts (${president_hb_age}s ago, ${president_hb_health}, stale>${president_hb_stale}s, phase=${president_hb_phase:-unknown}, trigger=${president_hb_trigger:-unknown})" "$(_reset)"
+    elif [[ "$president_hb_state" == "missing" ]]; then
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: missing (health unknown, stale>${president_hb_stale}s)" "$(_reset)"
+    else
+      printf "  %-16s %s%s%s\n" "" "$(_dim)" "last heartbeat: ${president_hb_ts:-invalid} (state=${president_hb_state:-invalid}, stale>${president_hb_stale}s)" "$(_reset)"
+    fi
+    IFS='|' read -r president_exit_ts president_exit_reason president_exit_code president_exit_signal president_exit_unexpected <<< "$(_president_exit_state_read)"
+    if [[ "$president_exit_ts" =~ ^[0-9]+$ ]]; then
+      president_exit_age=$(( $(date +%s) - president_exit_ts ))
+      (( president_exit_age < 0 )) && president_exit_age=0
+      printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "last exit: ${president_exit_age}s ago reason=$president_exit_reason signal=$president_exit_signal code=$president_exit_code unexpected=$president_exit_unexpected" "$(_reset)"
+    fi
   fi
 
   for rig_file in "$SGT_RIGS"/*; do
@@ -8380,7 +8599,7 @@ cmd_status() {
 
 cmd_peek() {
   local target="${1:-}"
-  [[ -n "$target" ]] || die "usage: sgt peek <polecat|mayor|mayor/<rig>|witness/<rig>|refinery/<rig>|deacon>"
+  [[ -n "$target" ]] || die "usage: sgt peek <polecat|president|mayor|mayor/<rig>|witness/<rig>|refinery/<rig>|deacon>"
   ensure_init
 
   local session=""
@@ -8388,6 +8607,7 @@ cmd_peek() {
   # Allow peeking at agents too
   case "$target" in
     deacon)       session="sgt-deacon" ;;
+    president)    session="$(_president_session_name)" ;;
     witness/*)    session="sgt-witness-${target#witness/}" ;;
     refinery/*)   session="sgt-refinery-${target#refinery/}" ;;
     mayor|mayor/*)
@@ -10818,6 +11038,233 @@ cmd_refinery_stop() {
   fi
 }
 
+_president_intervention_allowed() {
+  local rig="${1:-}" reason="${2:-}" action="${3:-}" cooldown_secs now_epoch prior_ts prior_reason prior_action
+  cooldown_secs="${SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS:-600}"
+  [[ "$cooldown_secs" =~ ^[0-9]+$ ]] || cooldown_secs=600
+  if (( cooldown_secs <= 0 )); then
+    return 0
+  fi
+  IFS='|' read -r prior_ts prior_reason prior_action <<< "$(_president_intervention_state_read "$rig")"
+  [[ "$prior_ts" =~ ^[0-9]+$ ]] || return 0
+  now_epoch="$(date +%s)"
+  if [[ "$prior_reason" == "$reason" && "$prior_action" == "$action" && $((now_epoch - prior_ts)) -lt "$cooldown_secs" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+_president_supervise_rig_mayor() {
+  local rig="${1:-}" cycle_reason="${2:-periodic}"
+  local mayor_session mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale mayor_hb_health
+  local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
+  local activity changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
+  local now_epoch action reason detail last_meaningful_age
+
+  [[ -n "$rig" ]] || return 1
+  now_epoch="$(date +%s)"
+  _mayor_scope_apply "$rig"
+  mayor_session="off"
+  tmux has-session -t "$(_mayor_scope_session_name "$rig")" 2>/dev/null && mayor_session="on"
+  mayor_hb_stale="$(_mayor_heartbeat_stale_secs)"
+  IFS='|' read -r mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger <<< "$(_mayor_heartbeat_snapshot)"
+  mayor_hb_health="$(_mayor_heartbeat_health "$mayor_hb_age" "$mayor_hb_stale")"
+  snapshot="$(_mayor_rig_activity_snapshot "$rig")"
+  IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
+  IFS='|' read -r activity snapshot_reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+
+  action=""
+  reason=""
+  detail=""
+  last_meaningful_age=""
+  if [[ "$mayor_session" != "on" ]]; then
+    action="start"
+    reason="mayor-session-missing"
+    detail="session=off"
+  elif [[ "$mayor_hb_state" != "ok" ]]; then
+    action="refresh"
+    reason="mayor-heartbeat-${mayor_hb_state:-invalid}"
+    detail="heartbeat_state=${mayor_hb_state:-unknown}"
+  elif [[ "$mayor_hb_age" =~ ^[0-9]+$ && "$mayor_hb_age" -gt "$mayor_hb_stale" ]]; then
+    action="refresh"
+    reason="mayor-heartbeat-stale"
+    detail="heartbeat_age=${mayor_hb_age}s threshold=${mayor_hb_stale}s"
+  elif [[ "$open_authorized" =~ ^[0-9]+$ && "$open_prs" =~ ^[0-9]+$ && "$active_polecats" =~ ^[0-9]+$ && "$merge_queue" =~ ^[0-9]+$ ]] \
+    && (( open_authorized > 0 )) && (( open_prs == 0 )) && (( active_polecats == 0 )) && (( merge_queue == 0 )); then
+    if [[ "$meaningful_epoch" =~ ^[0-9]+$ ]]; then
+      last_meaningful_age=$((now_epoch - meaningful_epoch))
+      (( last_meaningful_age < 0 )) && last_meaningful_age=0
+    fi
+    if [[ ! "$last_meaningful_age" =~ ^[0-9]+$ || "$last_meaningful_age" -gt "${SGT_PRESIDENT_INTERVENTION_STALE_SECS:-900}" ]]; then
+      action="refresh"
+      reason="actionable-no-forward-motion"
+      detail="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} last_meaningful_age=${last_meaningful_age:-unknown}s"
+    else
+      action="wake"
+      reason="actionable-rig-recheck"
+      detail="open_issues=${open_authorized} active_polecats=${active_polecats} merge_queue=${merge_queue}"
+    fi
+  fi
+
+  if [[ -z "$action" ]]; then
+    _mayor_scope_apply ""
+    return 1
+  fi
+
+  if ! _president_intervention_allowed "$rig" "$reason" "$action"; then
+    _mayor_scope_apply ""
+    return 1
+  fi
+
+  case "$action" in
+    start)
+      cmd_mayor_start "$rig" >/dev/null
+      ;;
+    refresh)
+      cmd_mayor_refresh "$rig" >/dev/null
+      ;;
+    wake)
+      cmd_wake_mayor "president:${rig}:${reason}" >/dev/null
+      ;;
+    *)
+      _mayor_scope_apply ""
+      return 1
+      ;;
+  esac
+  _president_intervention_state_write "$rig" "$reason" "$action"
+  log_event "PRESIDENT_INTERVENTION rig=$rig action=$action reason=$reason detail=\"$(_escape_quotes "$detail")\" cycle_trigger=\"$(_escape_quotes "$cycle_reason")\""
+  echo "[president] intervened on mayor/$rig — action=$action reason=$reason detail=$detail"
+  _mayor_scope_apply ""
+  return 0
+}
+
+_president_exit_receipt() {
+  local exit_code="${1:-0}" signal="${2:-EXIT}" reason_code unexpected
+  if [[ "$signal" == "TERM" || "$signal" == "INT" ]]; then
+    reason_code="signal-${signal,,}"
+    unexpected="false"
+  elif [[ "$exit_code" -eq 0 ]]; then
+    reason_code="clean-exit"
+    unexpected="false"
+  else
+    reason_code="nonzero-exit"
+    unexpected="true"
+  fi
+  _president_exit_state_write "$reason_code" "$exit_code" "$signal" "$unexpected"
+  log_event "PRESIDENT_STOP reason_code=$reason_code exit_code=$exit_code signal=$signal unexpected=$unexpected"
+}
+
+_wake_president() {
+  local reason="${1:-manual}"
+  local fifo
+  fifo="$(_president_fifo)"
+  [[ -p "$fifo" ]] || return 1
+  printf '%s\n' "$reason" > "$fifo"
+}
+
+_president_loop() {
+  set +e
+  local president_dir fifo cycle_count wake_reason
+  president_dir="$(_president_runtime_dir)"
+  fifo="$(_president_fifo)"
+  mkdir -p "$president_dir"
+  [[ -p "$fifo" ]] || mkfifo "$fifo"
+  trap 'rc=$?; _president_exit_receipt "$rc" "EXIT"' EXIT
+  trap '_president_exit_receipt 143 "TERM"; exit 143' TERM
+  trap '_president_exit_receipt 130 "INT"; exit 130' INT
+  exec 3<>"$fifo"
+  _president_exit_state_clear || true
+  cycle_count=0
+  _president_heartbeat_write "startup" "startup" "$cycle_count" || true
+  log_event "PRESIDENT_START"
+  echo "[president] started — supervising per-rig mayors"
+
+  while true; do
+    read -t "$SGT_PRESIDENT_INTERVAL" -u 3 wake_reason 2>/dev/null || true
+    if [[ -z "$wake_reason" ]]; then
+      wake_reason="periodic"
+      echo "[president] periodic check at $(date -Iseconds)"
+    else
+      echo "[president] woken by event: $wake_reason"
+    fi
+    cycle_count=$((cycle_count + 1))
+    _president_heartbeat_write "cycle-begin" "$wake_reason" "$cycle_count" || true
+    local interventions=0 rig
+    for rig in $(_mayor_all_rigs); do
+      if _president_supervise_rig_mayor "$rig" "$wake_reason"; then
+        interventions=$((interventions + 1))
+      fi
+    done
+    if [[ "$interventions" -eq 0 ]]; then
+      echo "[president] all rig mayors healthy"
+    else
+      echo "[president] completed ${interventions} intervention(s)"
+    fi
+    log_event "PRESIDENT_CYCLE completed (trigger: $wake_reason interventions=${interventions})"
+    _president_heartbeat_write "cycle-complete" "$wake_reason" "$cycle_count" || true
+  done
+}
+
+cmd_president_start() {
+  local session president_dir president_log sgt_exec spawn_cmd
+  ensure_init
+  _president_enabled || {
+    info "president is disabled in shared-mayor mode"
+    return 0
+  }
+  session="$(_president_session_name)"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    info "president already running"
+    return 0
+  fi
+  president_dir="$(_president_runtime_dir)"
+  president_log="$(_president_start_log_file)"
+  sgt_exec="$(_sgt_exec_path)"
+  mkdir -p "$president_dir"
+  printf -v spawn_cmd 'SGT_ROOT=%q SGT_MAYOR_ARCHITECTURE=%q exec %q _president >> %q 2>&1' \
+    "$SGT_ROOT" \
+    "$SGT_MAYOR_ARCHITECTURE" \
+    "$sgt_exec" \
+    "$president_log"
+  tmux new-session -d -s "$session" "$spawn_cmd"
+  log_event "PRESIDENT_SPAWN"
+  info "president started (session: $session)"
+}
+
+cmd_president_stop() {
+  local session fifo
+  session="$(_president_session_name)"
+  fifo="$(_president_fifo)"
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    log_event "PRESIDENT_STOP_REQUEST"
+    info "president stopped"
+  else
+    info "president not running"
+  fi
+  [[ -p "$fifo" ]] && rm -f "$fifo"
+}
+
+cmd_president_refresh() {
+  cmd_president_stop >/dev/null 2>&1 || true
+  cmd_president_start
+  _wake_president "manual-refresh" >/dev/null 2>&1 || true
+}
+
+cmd_wake_president() {
+  local reason="${1:-manual}"
+  if !_president_enabled; then
+    info "president is disabled in shared-mayor mode"
+    return 0
+  fi
+  if ! tmux has-session -t "$(_president_session_name)" 2>/dev/null; then
+    warn "president is not running — starting it"
+    cmd_president_start >/dev/null
+  fi
+  _wake_president "$reason" >/dev/null 2>&1 || true
+  info "president woken: $reason"
+}
+
 # ─── Deacon (health monitor) ──────────────────────────────────────────
 #
 # The Deacon patrols the entire sgt system:
@@ -10885,6 +11332,47 @@ _deacon_supervise_mayor() {
   echo "$restart_line"
   log_event "DEACON_RESTART_MAYOR reason=$restart_reason rig=${scope_rig:-shared} session=$mayor_session heartbeat_state=${hb_state:-unknown} heartbeat_health=${hb_health:-unknown} heartbeat_age=${hb_age:-unknown}s heartbeat_phase=${hb_phase:-unknown} heartbeat_cycle=${hb_cycle:-unknown} trigger=\"$(_escape_quotes "${hb_trigger:-unknown}")\" last_exit_reason=${exit_reason:-none} last_exit_signal=${exit_signal:-none} last_exit_code=${exit_code:-unknown} last_exit_unexpected=${exit_unexpected:-unknown} last_exit_pid=${exit_pid:-unknown} last_cycle_trigger=\"$(_escape_quotes "${exit_trigger:-unknown}")\" last_cycle_status=${exit_cycle_status:-unknown} last_cycle_at=\"$(_escape_quotes "${exit_cycle_at:-unknown}")\""
   cmd_mayor_start "$scope_rig"
+  return 0
+}
+
+_deacon_supervise_president() {
+  local president_session hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger hb_stale_secs hb_health
+  local exit_ts exit_reason exit_code exit_signal exit_unexpected
+  local restart_reason restart_line
+
+  president_session="off"
+  tmux has-session -t "$(_president_session_name)" 2>/dev/null && president_session="on"
+  hb_stale_secs="$(_president_heartbeat_stale_secs)"
+  IFS='|' read -r hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger <<< "$(_president_heartbeat_snapshot)"
+  hb_health="$(_president_heartbeat_health "$hb_age" "$hb_stale_secs")"
+  IFS='|' read -r exit_ts exit_reason exit_code exit_signal exit_unexpected <<< "$(_president_exit_state_read)"
+
+  restart_reason=""
+  restart_line=""
+  if [[ "$president_session" != "on" ]]; then
+    restart_reason="session-missing"
+    restart_line="[deacon] president is down — restarting"
+  elif [[ "$hb_state" == "missing" ]]; then
+    restart_reason="heartbeat-missing"
+    restart_line="[deacon] president heartbeat missing — restarting"
+  elif [[ "$hb_state" != "ok" ]]; then
+    restart_reason="heartbeat-invalid"
+    restart_line="[deacon] president heartbeat invalid — restarting"
+  elif [[ "$hb_age" =~ ^[0-9]+$ && "$hb_age" -gt "$hb_stale_secs" ]]; then
+    restart_reason="heartbeat-stale"
+    restart_line="[deacon] president heartbeat stale (${hb_age}s > ${hb_stale_secs}s) — restarting"
+  fi
+
+  [[ -n "$restart_reason" ]] || return 1
+  if [[ "$restart_reason" == heartbeat-* ]]; then
+    tmux kill-session -t "$(_president_session_name)" 2>/dev/null || true
+  fi
+  if [[ -n "$exit_reason" ]]; then
+    restart_line+=" (last_exit=${exit_reason:-unknown} signal=${exit_signal:-unknown} code=${exit_code:-unknown})"
+  fi
+  echo "$restart_line"
+  log_event "DEACON_RESTART_PRESIDENT reason=$restart_reason session=$president_session heartbeat_state=${hb_state:-unknown} heartbeat_health=${hb_health:-unknown} heartbeat_age=${hb_age:-unknown}s heartbeat_phase=${hb_phase:-unknown} heartbeat_cycle=${hb_cycle:-unknown} trigger=\"$(_escape_quotes "${hb_trigger:-unknown}")\" last_exit_reason=${exit_reason:-none} last_exit_signal=${exit_signal:-none} last_exit_code=${exit_code:-unknown} last_exit_unexpected=${exit_unexpected:-unknown}"
+  cmd_president_start
   return 0
 }
 
@@ -10956,7 +11444,11 @@ HEARTBEAT
       fi
     done
 
-    if _mayor_architecture_per_rig; then
+    if _president_enabled; then
+      if _deacon_supervise_president; then
+        actions=$((actions + 1))
+      fi
+    elif _mayor_architecture_per_rig; then
       for rig_file in "$SGT_RIGS"/*; do
         [[ -f "$rig_file" ]] || continue
         rig_name="$(basename "$rig_file")"
@@ -13734,7 +14226,15 @@ cmd_up() {
     cmd_refinery_start "$rig_name"
   done
 
-  # Start deacon (monitors witnesses + refineries)
+  # Start per-rig mayors before supervision when President mode is active.
+  cmd_mayor_start
+
+  # Start president in per-rig mode so Mayors are supervised above rig scope.
+  if _president_enabled; then
+    cmd_president_start
+  fi
+
+  # Start deacon (monitors witnesses + refineries and top-level supervisor)
   cmd_deacon_start
 
   # Give deacon a moment to write its first heartbeat
@@ -13742,9 +14242,6 @@ cmd_up() {
 
   # Start daemon last (monitors deacon via boot)
   cmd_daemon_start
-
-  # Start mayor (AI coordinator)
-  cmd_mayor_start
 
   log_event "SYSTEM_UP"
   info "sgt system is up"
@@ -13762,6 +14259,11 @@ cmd_down() {
     cmd_witness_stop "$rig_name" 2>/dev/null || true
     cmd_refinery_stop "$rig_name" 2>/dev/null || true
   done
+
+  # Stop president before rig-local mayors in the hierarchical control plane.
+  if _president_enabled; then
+    cmd_president_stop 2>/dev/null || true
+  fi
 
   # Stop mayor
   cmd_mayor_stop 2>/dev/null || true
@@ -14049,7 +14551,7 @@ Core Commands:
     --backend <claude|codex>      Select AI backend for this polecat (default: SGT_AI_BACKEND)
   status [--json]               Show all agents, polecats, dogs, crew
   peek <target>                 View output (polecat, witness/<rig>, refinery/<rig>,
-                                deacon, mayor, dog/<name>, crew/<name>)
+                                deacon, president, mayor, dog/<name>, crew/<name>)
   nuke <polecat>                Kill polecat and clean up
   sweep                         Clean up completed polecats
 
@@ -14058,10 +14560,12 @@ Agent Commands:
   down                          Stop all agents (polecats keep running)
   daemon start|stop|status      Control the watchdog daemon
   deacon start|stop             Control the health monitor
+  president start|stop|refresh  Control the top-level mayor supervisor
   witness start|stop <rig>      Control per-rig polecat monitor
   refinery start|stop <rig>     Control per-rig merge queue
   mayor [help|start|stop|refresh|notify|hibernate|unhibernate|rig-status|request|merge]
-                                Control the AI coordinator
+                                Control rig-local AI coordinators
+  wake-president [reason]       Wake the president on demand
   wake-mayor [reason]           Wake the mayor on demand (event-driven)
   nudge <target> <message>      Send message to agent's tmux session
 
@@ -14108,10 +14612,12 @@ Diagnostics:
 Agent Hierarchy:
   daemon     Mechanical watchdog (bash loop, every 3 min)
    └─ boot   Ephemeral triage — checks deacon health
-       └─ deacon   Health monitor — ensures witnesses + refineries alive
-           ├─ witness/<rig>    Polecat lifecycle manager (+ orphan PR scanner)
-           └─ refinery/<rig>   Merge queue processor
-  mayor      AI coordinator (shared by default; optional per-rig mode)
+       └─ deacon      Health monitor — ensures witnesses + refineries + top-level supervisor alive
+           ├─ president       Cross-rig supervisor for rig-local Mayors in per-rig mode
+           ├─ mayor/<rig>     AI coordinator for one rig (in per-rig mode)
+           ├─ witness/<rig>   Polecat lifecycle manager (+ orphan PR scanner)
+           └─ refinery/<rig>  Merge queue processor
+  mayor      Legacy shared AI coordinator fallback (shared mode only)
   dogs       Ephemeral non-coding helpers (research, analysis)
   crew       Persistent project agents (review, maintenance)
 
@@ -14119,7 +14625,9 @@ Environment:
   SGT_ROOT              Workspace root (default: ~/sgt)
   SGT_DAEMON_INTERVAL   Daemon tick interval in seconds (default: 180)
   SGT_MAYOR_INTERVAL    Mayor cycle interval in seconds (default: 600)
-  SGT_MAYOR_ARCHITECTURE  Mayor topology: shared (default) or per-rig
+  SGT_MAYOR_ARCHITECTURE  Mayor topology: shared (legacy fallback) or per-rig (President + mayor/<rig>)
+  SGT_PRESIDENT_INTERVAL  President supervision interval in seconds (default: 180)
+  SGT_PRESIDENT_INTERVENTION_STALE_SECS  Refresh a stuck rig-local mayor after N seconds without forward motion (default: 900)
   SGT_MAYOR_DISPATCH_COOLDOWN  Suppress duplicate dispatches for N seconds (default: 21600, set 0 to disable)
   SGT_MAYOR_DISPATCH_MAX_PARALLEL  Max proactive mayor in-flight budget (open sgt-authorized issues/polecats, default: 3, set 0 to disable)
   SGT_MAYOR_DISPATCH_VERIFY_TIMEOUT_SECS  Verify post-dispatch active work within N seconds before one retry (default: 120, set 0 for immediate timeout)
@@ -14175,6 +14683,7 @@ main() {
     _deacon)        _deacon_loop ;;
     _daemon)        _daemon_loop ;;
     _boot)          _boot_check ;;
+    _president)     _president_loop ;;
     _mayor)         _mayor_loop ;;
     _mayor-auto-refresh-resume) _mayor_auto_refresh_resume "$@" ;;
 
@@ -14242,6 +14751,17 @@ main() {
         *)      die "unknown deacon command: $sub (try: start, stop)" ;;
       esac
       ;;
+    president)
+      local sub="${1:-}"
+      shift 2>/dev/null || true
+      case "$sub" in
+        ""|help|--help|-h) printf 'usage: sgt president <start|stop|refresh>\n' ;;
+        start)   cmd_president_start ;;
+        stop)    cmd_president_stop ;;
+        refresh) cmd_president_refresh ;;
+        *)       die "unknown president command: $sub (try: start, stop, refresh)" ;;
+      esac
+      ;;
     witness)
       local sub="${1:-}"
       shift 2>/dev/null || true
@@ -14304,6 +14824,7 @@ main() {
       esac
       ;;
     wake-mayor) cmd_wake_mayor "$@" ;;
+    wake-president) cmd_wake_president "$@" ;;
     _wake-refinery) _wake_refinery "$@" ;;
     dog)
       local sub="${1:-}"
