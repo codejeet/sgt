@@ -122,9 +122,14 @@ if data["summary"].get("polecat_count") != 1:
 
 if not any(a.get("name") == "daemon" for a in data["agents"]):
     raise SystemExit("missing daemon agent entry")
+daemon = next((a for a in data["agents"] if a.get("name") == "daemon"), None)
+if daemon.get("role") != "daemon" or daemon.get("scope") != "global":
+    raise SystemExit(f"unexpected daemon role/scope: {daemon}")
 mayor = next((a for a in data["agents"] if a.get("name") == "mayor"), None)
 if mayor is None:
     raise SystemExit("missing mayor agent entry")
+if mayor.get("role") != "mayor" or mayor.get("scope") != "global":
+    raise SystemExit(f"unexpected mayor role/scope: {mayor}")
 budget = mayor.get("prompt_budget", {})
 if budget.get("estimated_tokens") != "160000" or budget.get("threshold") != "150000":
     raise SystemExit(f"unexpected mayor prompt budget metadata: {budget}")

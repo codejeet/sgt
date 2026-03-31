@@ -87,7 +87,7 @@ That proof path bundles:
 - **Recent alert rail** — New blocker openings, follow-up escalations, and resolutions surface as explicit alert cards instead of blending into the blocker list
 - **Optional ElevenLabs voice** — Env-gated blocker voice announcements with browser mute control plus backend dedupe and rate limiting
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
-- **Topology radar** — Force-laid live graph driven from normalized `topology` nodes/edges, using WebGL when available plus a canvas fallback with the same click/hover focus workflows
+- **Topology radar** — Force-laid live graph driven from normalized `topology` nodes/edges, using WebGL when available plus a canvas fallback with click/hover focus plus direct focus/peek actions for `president` and `mayor/<rig>` nodes
 - **Keyboard shortcuts** — `1..5` jump between shell sections, `c` toggles compact mode, `Esc` closes peek modal
 - **Dispatch** — Sling polecats and dogs without leaving the shell
 

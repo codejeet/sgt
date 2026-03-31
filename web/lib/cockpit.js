@@ -353,8 +353,18 @@ function readRecentLogLines(logPath, maxLines) {
 }
 
 function normalizeAgent(agent) {
+  const streamTarget = agent.name === 'president'
+    || agent.name === 'mayor'
+    || String(agent.name || '').startsWith('mayor/')
+    || String(agent.name || '').startsWith('witness/')
+    || String(agent.name || '').startsWith('refinery/')
+    || agent.name === 'deacon'
+    ? agent.name
+    : '';
   const normalized = {
     name: agent.name,
+    role: agent.role || '',
+    scope: agent.scope || '',
     status: agent.status,
     rig: agent.rig || '',
     heartbeat: agent.heartbeat || null,
@@ -364,6 +374,13 @@ function normalizeAgent(agent) {
   if (agent.notify_warning) normalized.notifyWarning = agent.notify_warning;
   if (agent.decision_log_warning) normalized.decisionLogWarning = agent.decision_log_warning;
   if (agent.review_watchdog) normalized.reviewWatchdog = agent.review_watchdog;
+  if (streamTarget) {
+    normalized.stream = {
+      target: streamTarget,
+      available: true,
+      freshness: 'live',
+    };
+  }
   return normalized;
 }
 
@@ -439,6 +456,7 @@ function buildTopology(snapshot) {
     state: snapshot.agents.some((agent) => agent.name === (hasPresident ? 'president' : 'mayor') && String(agent.status).startsWith('on')) ? 'active' : 'idle',
     metadata: {
       role: hasPresident ? 'president' : 'mayor',
+      streamTarget: hasPresident ? 'president' : 'mayor',
     },
   });
 
@@ -452,7 +470,10 @@ function buildTopology(snapshot) {
       state: agent.status || 'unknown',
       rig: agent.rig || '',
       metadata: {
+        role: agent.role || '',
+        scope: agent.scope || '',
         heartbeat: agent.heartbeat || null,
+        streamTarget: agent.stream && agent.stream.target ? agent.stream.target : '',
       },
     });
     if (agent.rig) {

@@ -17,7 +17,7 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
     statusJson: {
       agents: [
         { name: 'daemon', status: 'on' },
-        { name: 'mayor', status: 'on', heartbeat: { state: 'ok' } },
+        { name: 'mayor', role: 'mayor', scope: 'global', status: 'on', heartbeat: { state: 'ok' } },
       ],
       mayor_rigs: [
         {
@@ -88,6 +88,9 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
 
   assert.equal(snapshot.meta.featureFlags.tmuxStreaming, true);
   assert.equal(snapshot.meta.featureFlags.voiceAnnouncements, false);
+  assert.equal(snapshot.agents[1].role, 'mayor');
+  assert.equal(snapshot.agents[1].scope, 'global');
+  assert.equal(snapshot.agents[1].stream.target, 'mayor');
   assert.equal(snapshot.rigs.length, 1);
   assert.equal(snapshot.rigs[0].blockers, 1);
   assert.equal(snapshot.rigs[0].activeWorkers, 1);
@@ -103,6 +106,34 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'rig:sgt' && edge.type === 'runs'));
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'queue:sgt-pr264' && edge.type === 'contains'));
   assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'worker:polecat:sgt-34784812' && edge.type === 'works-on'));
+});
+
+test('buildCockpitSnapshot keeps president and rig-local mayor topology nodes directly inspectable', () => {
+  const snapshot = buildCockpitSnapshot({
+    statusJson: {
+      agents: [
+        { name: 'president', role: 'president', scope: 'global', status: 'on', heartbeat: { state: 'ok' } },
+        { name: 'mayor/alpha', role: 'mayor', scope: 'rig', rig: 'alpha', status: 'on', heartbeat: { state: 'ok' } },
+        { name: 'witness/alpha', role: 'witness', scope: 'rig', rig: 'alpha', status: 'on' },
+      ],
+      mayor_rigs: [{ rig: 'alpha', state: 'active', reason: 'open_issues=1', hibernation_mode: 'none' }],
+      polecats: [],
+      dogs: [],
+      merge_queue: [],
+    },
+    rigs: [{ name: 'alpha', repo: 'https://github.com/acme/alpha', polecats: 0, witness: 'on', refinery: 'off' }],
+    blockers: [],
+    alerts: [],
+    recentLogs: [],
+    version: 'test',
+    voice: {},
+  });
+
+  const president = snapshot.topology.nodes.find((node) => node.id === 'agent:president');
+  const alphaMayor = snapshot.topology.nodes.find((node) => node.id === 'agent:mayor/alpha');
+  assert.equal(president.metadata.streamTarget, 'president');
+  assert.equal(alphaMayor.metadata.streamTarget, 'mayor/alpha');
+  assert.ok(snapshot.topology.edges.some((edge) => edge.from === 'agent:president' && edge.to === 'agent:mayor/alpha' && edge.type === 'supervises'));
 });
 
 test('BlockerAlertTracker records blocker opens and resolutions with voice gating', () => {

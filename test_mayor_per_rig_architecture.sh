@@ -94,7 +94,8 @@ import json
 import sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     data = json.load(f)
-names = {agent.get("name") for agent in data.get("agents", [])}
+agents = data.get("agents", [])
+names = {agent.get("name") for agent in agents}
 for expected in ("mayor/alpha", "mayor/beta"):
     if expected not in names:
         raise SystemExit(f"missing {expected} in status agents: {sorted(names)}")
@@ -102,6 +103,13 @@ if "president" not in names:
     raise SystemExit(f"missing president in status agents: {sorted(names)}")
 if "mayor" in names:
     raise SystemExit("legacy shared mayor entry unexpectedly present in per-rig status output")
+president = next(agent for agent in agents if agent.get("name") == "president")
+if president.get("role") != "president" or president.get("scope") != "global":
+    raise SystemExit(f"unexpected president role/scope: {president}")
+for expected in ("alpha", "beta"):
+    mayor = next(agent for agent in agents if agent.get("name") == f"mayor/{expected}")
+    if mayor.get("role") != "mayor" or mayor.get("scope") != "rig" or mayor.get("rig") != expected:
+        raise SystemExit(f"unexpected mayor role/scope for {expected}: {mayor}")
 PY
 
 ALPHA_FIFO="$HOME_DIR/sgt/.sgt/mayors/alpha/mayor.fifo"
