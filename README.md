@@ -562,7 +562,7 @@ Optional per-rig Mayor architecture:
 - In that mode, President state/logs live under `~/.sgt/president/`, rig-local Mayor sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises `sgt-president`, and `sgt status` / `sgt status --json` expose `president` plus entries like `mayor/pmkb` or `mayor/sgt`.
 - `sgt status --json` also emits machine-readable control-plane `role` / `scope` fields so President, shared Mayor, rig-local Mayors, witness, and refinery entries stay distinguishable without relying on name parsing alone.
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
-- `sgt president start|stop|refresh` controls the cross-rig supervisor, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`.
+- `sgt president start|stop|refresh` controls the cross-rig supervisor, `sgt president refresh` archives transient President state into `~/.sgt/president/handoffs/<token>/handoff.md` before restart, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
 - President performs bounded supervision only: if a rig-local Mayor is missing, stale, or an actionable rig has no healthy forward motion, President starts, wakes, or refreshes that one Mayor instead of taking over routine repo work directly.
 

@@ -137,6 +137,43 @@ run_case_success() {
   grep -q '^OUTCOME=delivered$' "$receipt_file" || { echo "expected success receipt delivered outcome" >&2; exit 1; }
 }
 
+run_case_scoped_rig_notify() {
+  local env_meta home_dir mock_bin state_dir receipt_file attempt_dir
+  env_meta="$(setup_case_env scoped_rig_notify)"
+  IFS='|' read -r home_dir mock_bin state_dir <<< "$env_meta"
+  mkdir -p "$home_dir/sgt/.sgt/rig-config"
+  cat > "$home_dir/sgt/.sgt/rig-config/alpha.json" <<'JSON'
+{
+  "notify_agent": "rig-alpha-agent"
+}
+JSON
+
+  env -i \
+    HOME="$home_dir" \
+    PATH="$mock_bin:$home_dir/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    SGT_ROOT="$home_dir/sgt" \
+    SGT_MOCK_NOTIFY_STATE="$state_dir" \
+    SGT_MOCK_NOTIFY_CASE="success" \
+    SGT_MAYOR_ARCHITECTURE=per-rig \
+    SGT_MAYOR_SCOPE_RIG=alpha \
+    bash --noprofile --norc -c 'set -euo pipefail; sgt mayor notify "scoped notify case" >/dev/null'
+
+  grep -q -- '--agent rig-alpha-agent' "$state_dir/openclaw.calls" || {
+    echo "expected scoped notify to use rig-specific notify agent" >&2
+    exit 1
+  }
+  attempt_dir="$home_dir/sgt/.sgt/mayors/alpha/mayor-notify-attempts"
+  [[ -d "$attempt_dir" ]] || {
+    echo "expected scoped notify attempt state under rig-local mayor dir" >&2
+    exit 1
+  }
+  receipt_file="$(find "$home_dir/sgt/.sgt/mayors/alpha/mayor-notify-receipts" -type f | head -n1)"
+  [[ -f "$receipt_file" ]] || {
+    echo "expected scoped notify receipt under rig-local mayor dir" >&2
+    exit 1
+  }
+}
+
 run_case_positive_ack_variant() {
   local case_name="$1" expected_matcher="$2" notify_message="$3"
   local env_meta home_dir mock_bin state_dir receipt_dir receipt_file decision_log
@@ -370,6 +407,7 @@ run_case_fail_open_status_and_trail() {
 }
 
 run_case_success
+run_case_scoped_rig_notify
 run_case_positive_ack_variant ack_copy copy-token "copy ack variant case"
 run_case_positive_ack_variant ack_ack ack-token "ack token variant case"
 run_case_positive_ack_variant ack_received received-token "received token variant case"
