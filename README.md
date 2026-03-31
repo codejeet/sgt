@@ -562,6 +562,22 @@ Optional per-rig Mayor architecture:
 - In that mode, sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises each `sgt-mayor-<rig>` independently, and `sgt status` / `sgt status --json` expose entries like `mayor/pmkb` or `mayor/sgt`.
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
+- This is transition scaffolding toward the documented `President -> mayor/<rig>` hierarchy in [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md); it is not the final control-plane architecture by itself.
+
+President/per-rig Mayor architecture contract:
+- The target hierarchy is `President -> mayor/<rig> -> rig-local workers`.
+- The President is the cross-rig supervisor and must not take over routine repo-local Mayor work.
+- Each `mayor/<rig>` owns exactly one rig with isolated transient state and independent refresh/restart/peek semantics.
+- Operator surfaces must eventually distinguish `president` from `mayor/<rig>` explicitly in status, peek, logs, and the Web UI.
+- For the detailed role, migration, and proof contract, see [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md).
+
+Latest-main proof for this architecture contract:
+
+```bash
+./test_president_per_rig_mayor_contract_latest_main_proof.sh
+```
+
+That proof path currently verifies the in-repo contract text plus the existing per-rig Mayor runtime slice that the migration already depends on. It does not claim that the full President runtime has landed yet.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
