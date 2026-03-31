@@ -50,6 +50,7 @@ const refs = {
   blockerSummary: document.getElementById("blockerSummary"),
   alertRail: document.getElementById("alertRail"),
   blockerBoard: document.getElementById("blockerBoard"),
+  presidentActivity: document.getElementById("presidentActivity"),
   overviewHero: document.getElementById("overviewHero"),
   queueBoard: document.getElementById("queueBoard"),
   streamSummary: document.getElementById("streamSummary"),
@@ -206,6 +207,7 @@ function emptyCockpit() {
     queue: { items: [], summary: { total: 0 } },
     blockers: [],
     alerts: [],
+    president: { events: [] },
     logs: { lines: [], total: 0 },
     topology: { nodes: [], edges: [] },
   };
@@ -401,6 +403,7 @@ function renderAll() {
   renderRigs();
   renderAlerts();
   renderBlockers();
+  renderPresidentActivity();
   renderQueue();
   renderStreamDeck();
   renderLogs();
@@ -408,10 +411,13 @@ function renderAll() {
 }
 
 function renderAlerts() {
-  const alerts = appState.cockpit.alerts || [];
+  const alerts = [
+    ...(appState.cockpit.alerts || []),
+    ...priorityPresidentAlerts(),
+  ].sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')));
   updateVoiceStatus();
   if (alerts.length === 0) {
-    refs.alertRail.innerHTML = `<div class="empty-state">Recent blocker transitions and milestone alerts will appear here.</div>`;
+    refs.alertRail.innerHTML = `<div class="empty-state">Recent blocker transitions, President escalations, and milestone alerts will appear here.</div>`;
     return;
   }
 
@@ -424,7 +430,7 @@ function renderAlerts() {
       <div class="blocker-meta">
         <span>${esc(alert.rig || "unknown rig")}</span>
         <span>${esc(formatIso(alert.createdAt))}</span>
-        <span>${esc(alertVoiceLabel(alert))}</span>
+        <span>${esc(alert.voice ? alertVoiceLabel(alert) : presidentOutcomeLabel(alert))}</span>
       </div>
     </article>
   `).join("");
@@ -535,7 +541,8 @@ function renderRigs() {
 
 function renderBlockers() {
   const totalAlerts = (appState.cockpit.alerts || []).length;
-  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers · ${totalAlerts} recent alerts`;
+  const presidentEvents = (appState.cockpit.president && appState.cockpit.president.events) || [];
+  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers · ${totalAlerts} blocker alerts · ${presidentEvents.length} president events`;
   if (appState.cockpit.blockers.length === 0) {
     refs.blockerBoard.innerHTML = `<div class="empty-state">Acceptance blockers will surface here with evidence and rig ownership.</div>`;
     return;
@@ -558,6 +565,29 @@ function renderBlockers() {
   `).join("");
 }
 
+function renderPresidentActivity() {
+  const events = ((appState.cockpit.president && appState.cockpit.president.events) || []).slice(0, 8);
+  if (events.length === 0) {
+    refs.presidentActivity.innerHTML = `<div class="empty-state">Recent President interventions and operator events will appear here.</div>`;
+    return;
+  }
+
+  refs.presidentActivity.innerHTML = events.map((event) => `
+    <article class="alert-card alert-${escAttr(event.severity || "info")}">
+      <div class="queue-head">
+        <div class="blocker-title">${esc(presidentEventTitle(event))}</div>
+        <span class="severity-pill ${alertSeverityClass(event)}">${esc(event.kind || "president")}</span>
+      </div>
+      <div class="blocker-meta">
+        <span>${esc(event.rig || "cross-rig")}</span>
+        <span>${esc(formatIso(event.createdAt))}</span>
+        <span>${esc(presidentOutcomeLabel(event))}</span>
+      </div>
+      <p>${esc(snippet(event.detail || presidentEventDetail(event), 220))}</p>
+    </article>
+  `).join("");
+}
+
 function renderQueue() {
   const items = appState.cockpit.queue.items || [];
   if (items.length === 0) {
@@ -576,6 +606,43 @@ function renderQueue() {
       </div>
     </article>
   `).join("");
+}
+
+function priorityPresidentAlerts() {
+  return (((appState.cockpit.president && appState.cockpit.president.events) || [])
+    .filter((event) => event.notify || ["critical", "warning"].includes(event.severity) || event.kind === "human-question")
+    .map((event) => ({
+      id: `president:${event.ts || event.createdAt || event.rig}:${event.action}:${event.reason}`,
+      kind: event.kind || "president",
+      severity: event.severity || "info",
+      createdAt: event.createdAt || "",
+      rig: event.rig || "",
+      title: presidentEventTitle(event),
+      message: presidentEventAlertMessage(event),
+      outcome: event.outcome || "",
+    })));
+}
+
+function presidentEventTitle(event) {
+  const rig = event.rig || "unknown rig";
+  const action = event.action || "observe";
+  const reason = event.reason || event.kind || "activity";
+  return `${rig}: President ${action} (${reason})`;
+}
+
+function presidentEventDetail(event) {
+  return `${event.action || "observe"} -> ${event.outcome || "recorded"} via ${event.cycleTrigger || "unknown trigger"}`;
+}
+
+function presidentEventAlertMessage(event) {
+  const rig = event.rig || "unknown rig";
+  return `${rig}: President ${event.action || "observed"} because ${event.reason || event.kind || "activity"} (${event.outcome || "recorded"})`;
+}
+
+function presidentOutcomeLabel(event) {
+  const action = event.action || "observe";
+  const outcome = event.outcome || "recorded";
+  return `${action} · ${outcome}`;
 }
 
 function renderStreamDeck() {

@@ -1111,3 +1111,4 @@ A good finished result should make the following true:
 - Keep the implementation grounded in real operator value, not decorative UI churn.
 - If this needs phasing, make the phases explicit and safe.
 ```
+- 2026-03-31T22:12:29+02:00 — 2026-03-31 issue #320: President runtime now emits structured PRESIDENT_OPERATOR_EVENT records with stable kind/severity/notify fields plus President-local dedupe_key and cross-layer overlap_key. Current runtime mapping: mayor-session-missing and mayor-heartbeat-* => intervention notify=1; actionable-no-forward-motion => stalled-purpose notify=1; actionable-rig-recheck => intervention notify=0 with suppressed-by-cooldown logging instead of replay noise. Repo-owned contract doc: docs/president-operator-notify-contract.md; proof coverage in test_president_operator_notify_contract.sh and test_president_runtime_latest_main_proof.sh.
