@@ -759,3 +759,65 @@ Please produce and execute a repo-local SGT plan for this feature:
 
 If needed, start with design/migration scaffolding first, but the plan should clearly converge on a working hierarchical control plane rather than stopping at docs-only architecture notes.
 ```
+- 2026-03-31T07:59:44+02:00 — 2026-03-31 issue #300 defines the President -> mayor/<rig> architecture contract in docs/president-per-rig-mayor-contract.md, clarifies README that SGT_MAYOR_ARCHITECTURE=per-rig is transition scaffolding rather than final state, and adds test_president_per_rig_mayor_contract_latest_main_proof.sh to pin the contract plus existing per-rig Mayor runtime slice.
+- 2026-03-31T08:07:45+02:00 — 2026-03-31 issue #302: Mayor runtime scope now treats refresh/handoff as a full scoped transient bundle (including heartbeat/observability/auto-refresh/watchdog/receipt directories under ~/.sgt[/mayors/<rig>]/), and mayor target -> tmux session/log resolution is centralized around shared vs mayor/<rig> naming.
+- 2026-03-31T08:10:42+02:00 — Acceptance blocker sgt-acceptance-1774937442-8524a714 reported by witness: Polecat blocked by backend usage limit for issue #304
+
+### Acceptance Blocker sgt-acceptance-1774937442-8524a714
+
+- Reported at: 2026-03-31T08:10:42+02:00
+- Reported by: witness
+- Title: Polecat blocked by backend usage limit for issue #304
+
+```markdown
+Polecat blocked by backend usage limit for issue #304
+
+A polecat hit a known backend/quota limit before opening a PR.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #304
+- Issue URL: https://github.com/codejeet/sgt/issues/304
+- Issue title: Teach deacon and control commands to manage Mayor scope correctly
+- Polecat: sgt-0ed53c0b
+- Backend: codex
+- Reason code: codex_usage_limit
+- Matched first output: You've hit your usage limit
+
+Required follow-up:
+- leave this issue blocked until backend quota resets or an operator explicitly changes backend policy
+- do not auto-resling while the issue is marked backend-limited
+
+```
+- 2026-03-31T08:10:48+02:00 — Acceptance blocker sgt-acceptance-1774937448-02090b79 reported by witness: Polecat blocked by backend usage limit for issue #305
+
+### Acceptance Blocker sgt-acceptance-1774937448-02090b79
+
+- Reported at: 2026-03-31T08:10:48+02:00
+- Reported by: witness
+- Title: Polecat blocked by backend usage limit for issue #305
+
+```markdown
+Polecat blocked by backend usage limit for issue #305
+
+A polecat hit a known backend/quota limit before opening a PR.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #305
+- Issue URL: https://github.com/codejeet/sgt/issues/305
+- Issue title: Add the President runtime and supervisory intervention model
+- Polecat: sgt-4d1a7d2e
+- Backend: codex
+- Reason code: codex_usage_limit
+- Matched first output: You've hit your usage limit
+
+Required follow-up:
+- leave this issue blocked until backend quota resets or an operator explicitly changes backend policy
+- do not auto-resling while the issue is marked backend-limited
+
+```
+- 2026-03-31T08:27:53+02:00 — Acceptance blocker sgt-acceptance-1774937442-8524a714 resolved. Note: Operator confirmed recovery after transient codex usage issue; direct codex probe now returns OK. Clear stale backend-limit block and allow recovery of issue #304.
+- 2026-03-31T08:27:55+02:00 — Acceptance blocker sgt-acceptance-1774937448-02090b79 resolved. Note: Operator confirmed recovery after transient codex usage issue; direct codex probe now returns OK. Clear stale backend-limit block and allow recovery of issue #305.
+- 2026-03-31T08:37:51+02:00 — 2026-03-31 issue #304: deacon, daemon, and scoped mayor tmux spawns must propagate SGT_MAYOR_ARCHITECTURE so per-rig mode survives background restarts and deacon supervises mayor/<rig> sessions instead of silently falling back to shared-Mayor assumptions.
+- 2026-03-31T08:42:09+02:00 — 2026-03-31 issue #305: per-rig mode now runs a first-class President supervisor in ~/.sgt/president with sgt-president; deacon supervises President, President performs bounded per-rig mayor start/wake/refresh interventions for missing, stale, or no-forward-motion rigs, and the latest-main proof path is ./test_president_runtime_latest_main_proof.sh.

@@ -131,4 +131,27 @@ if [[ -s "$BETA_OUT" ]]; then
   exit 1
 fi
 
+: > "$ALPHA_OUT"
+: > "$BETA_OUT"
+timeout 3 cat "$ALPHA_FIFO" > "$ALPHA_OUT" &
+alpha_reader=$!
+timeout 1 cat "$BETA_FIFO" > "$BETA_OUT" &
+beta_reader=$!
+
+"${ENV_PREFIX[@]}" bash --noprofile --norc -c 'set -euo pipefail; sgt wake-mayor "president:alpha:actionable-rig-recheck" >/dev/null'
+
+wait "$alpha_reader"
+wait "$beta_reader" || true
+
+grep -qx 'president:alpha:actionable-rig-recheck' "$ALPHA_OUT" || {
+  echo "expected alpha mayor fifo to receive president-targeted wake" >&2
+  exit 1
+}
+
+if [[ -s "$BETA_OUT" ]]; then
+  echo "expected beta mayor fifo to stay idle for president-targeted alpha wake" >&2
+  cat "$BETA_OUT" >&2
+  exit 1
+fi
+
 echo "ALL TESTS PASSED"

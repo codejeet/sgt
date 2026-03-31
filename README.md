@@ -560,9 +560,10 @@ Default lease is `SGT_MAYOR_INTERVAL + 120` seconds.
 Optional per-rig Mayor architecture:
 - Set `SGT_MAYOR_ARCHITECTURE=per-rig` to run the hierarchical control plane: one `president` tmux session supervising one Mayor tmux session per rig instead of one shared `sgt-mayor`.
 - In that mode, President state/logs live under `~/.sgt/president/`, rig-local Mayor sessions/state/logs live under `~/.sgt/mayors/<rig>/`, deacon supervises `sgt-president`, and `sgt status` / `sgt status --json` expose `president` plus entries like `mayor/pmkb` or `mayor/sgt`.
-- `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
-- `sgt president start|stop|refresh` controls the cross-rig supervisor, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`.
+- `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor, including President-originated reasons like `president:<rig>:...`, and otherwise broadcasts to all rig Mayors.
+- `sgt president start|stop|refresh` controls the cross-rig supervisor, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`. `sgt president refresh` now mirrors Mayor refresh ergonomics by archiving scoped President transient state into a handoff and printing the handoff markdown path.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
+- Scoped Mayor notify flows inherit the active rig scope for notify-agent routing and durable notify receipt state, so per-rig Mayor alerts stay under `~/.sgt/mayors/<rig>/`.
 - President performs bounded supervision only: if a rig-local Mayor is missing, stale, or an actionable rig has no healthy forward motion, President starts, wakes, or refreshes that one Mayor instead of taking over routine repo work directly.
 
 President/per-rig Mayor architecture contract:

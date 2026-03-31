@@ -997,10 +997,20 @@ _mayor_refresh_handoffs_dir() {
   echo "$(_mayor_scope_dir)/handoffs"
 }
 
+_president_refresh_handoffs_dir() {
+  echo "$(_president_runtime_dir)/handoffs"
+}
+
 _mayor_refresh_token() {
   local now
   now="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')"
   printf 'mayor-refresh-%s-%s\n' "$now" "$$"
+}
+
+_president_refresh_token() {
+  local now
+  now="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')"
+  printf 'president-refresh-%s-%s\n' "$now" "$$"
 }
 
 _mayor_refresh_transient_entries() {
@@ -1031,6 +1041,15 @@ mayor-workspace
 EOF
 }
 
+_president_refresh_transient_entries() {
+  cat <<'EOF'
+president-exit.state
+president-heartbeat.json
+president-interventions.tsv
+president-start.log
+EOF
+}
+
 _mayor_refresh_archive_transients() {
   local handoff_dir="${1:-}"
   local scope_dir src name
@@ -1051,6 +1070,28 @@ _mayor_refresh_archive_transients() {
       fi
     fi
   done < <(_mayor_refresh_transient_entries)
+}
+
+_president_refresh_archive_transients() {
+  local handoff_dir="${1:-}"
+  local scope_dir src name
+  [[ -n "$handoff_dir" ]] || return 1
+
+  scope_dir="$(_president_runtime_dir)"
+  mkdir -p "$handoff_dir"
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    src="$scope_dir/$name"
+    if [[ -e "$src" ]]; then
+      mv "$src" "$handoff_dir/$name"
+      if [[ -d "$handoff_dir/$name" ]]; then
+        printf '%s/\n' "$name"
+      else
+        printf '%s\n' "$name"
+      fi
+    fi
+  done < <(_president_refresh_transient_entries)
 }
 
 _mayor_refresh_write_handoff() {
@@ -1132,6 +1173,70 @@ $(tail -20 "$decisions_log" 2>/dev/null)
 \`\`\`
 EOF
   fi
+}
+
+_president_refresh_write_handoff() {
+  local handoff_file="${1:-}" handoff_token="${2:-}" was_running="${3:-false}" status_snapshot="${4:-}"
+  local runtime_dir architecture generated_at event_log_path
+  local hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger
+  local exit_ts exit_reason exit_code exit_signal exit_unexpected
+
+  [[ -n "$handoff_file" ]] || return 1
+  runtime_dir="$(_president_runtime_dir)"
+  architecture="$(_mayor_architecture)"
+  generated_at="$(date -Iseconds)"
+  event_log_path="$SGT_LOG"
+
+  IFS='|' read -r hb_age hb_ts hb_state hb_pid hb_phase hb_cycle hb_trigger <<< "$(_president_heartbeat_snapshot)"
+  IFS='|' read -r exit_ts exit_reason exit_code exit_signal exit_unexpected <<< "$(_president_exit_state_read)"
+
+  cat > "$handoff_file" <<EOF
+# President Refresh Handoff
+
+- generated_at: $generated_at
+- handoff_token: $handoff_token
+- architecture: $architecture
+- runtime_dir: $runtime_dir
+- president_was_running: $was_running
+- event_log: $event_log_path
+
+## President Health Snapshot
+
+- heartbeat_age_seconds: ${hb_age:-unknown}
+- heartbeat_timestamp: ${hb_ts:-unknown}
+- heartbeat_state: ${hb_state:-unknown}
+- heartbeat_pid: ${hb_pid:-unknown}
+- heartbeat_phase: ${hb_phase:-unknown}
+- heartbeat_cycle: ${hb_cycle:-unknown}
+- heartbeat_trigger: ${hb_trigger:-unknown}
+
+## Last Exit Snapshot
+
+- exit_timestamp_epoch: ${exit_ts:-unknown}
+- exit_reason_code: ${exit_reason:-unknown}
+- exit_code: ${exit_code:-unknown}
+- exit_signal: ${exit_signal:-unknown}
+- exit_unexpected: ${exit_unexpected:-unknown}
+
+## Archived Transients
+EOF
+
+  if find "$(dirname "$handoff_file")" -mindepth 1 -maxdepth 2 ! -name 'handoff.md' | read -r _; then
+    (
+      cd "$(dirname "$handoff_file")"
+      find . -mindepth 1 -maxdepth 2 ! -name 'handoff.md' | sed 's#^\./#- #'
+    ) >> "$handoff_file"
+  else
+    echo "- none" >> "$handoff_file"
+  fi
+
+  cat >> "$handoff_file" <<EOF
+
+## Status Snapshot
+\`\`\`
+${status_snapshot:-status unavailable}
+\`\`\`
+EOF
 }
 
 _mayor_auto_refresh_resume() {
@@ -1694,6 +1799,8 @@ _mayor_wake_reason_rig() {
   elif [[ "$reason" =~ ^stalled-unreplaced:([^:]+): ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
   elif [[ "$reason" =~ ^backend-limit:([^:]+): ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$reason" =~ ^president:([^:]+): ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
   else
     printf '%s\n' ""
@@ -6901,6 +7008,9 @@ _mayor_notify_rigger() {
   local send_rc=0 delivered=0 context="mayor-notify-receipt-rigger"
 
   [[ -n "$message" ]] || return 1
+  if [[ -z "$notify_rig" && -n "${SGT_MAYOR_SCOPE_RIG:-}" ]]; then
+    notify_rig="$SGT_MAYOR_SCOPE_RIG"
+  fi
   _mayor_notify_result_set "" "" "" "" "" "" "" "0"
   if [[ "$message" == mayor\ warning:\ decision-log\ write\ failed* ]]; then
     suppress_decision_log=1
@@ -11246,9 +11356,30 @@ cmd_president_stop() {
 }
 
 cmd_president_refresh() {
+  local was_running="false" handoff_token handoff_dir handoff_file status_snapshot
+  ensure_init
+  _president_enabled || {
+    info "president is disabled in shared-mayor mode"
+    return 0
+  }
+
+  handoff_token="$(_president_refresh_token)"
+  handoff_dir="$(_president_refresh_handoffs_dir)/$handoff_token"
+  handoff_file="$handoff_dir/handoff.md"
+  mkdir -p "$handoff_dir"
+  status_snapshot="$(cmd_status 2>&1 || true)"
+
+  if tmux has-session -t "$(_president_session_name)" 2>/dev/null; then
+    was_running="true"
+  fi
+
   cmd_president_stop >/dev/null 2>&1 || true
-  cmd_president_start
-  _wake_president "manual-refresh" >/dev/null 2>&1 || true
+  _president_refresh_archive_transients "$handoff_dir" >/dev/null || true
+  _president_refresh_write_handoff "$handoff_file" "$handoff_token" "$was_running" "$status_snapshot"
+  log_event "PRESIDENT_REFRESH running_before=$was_running handoff=\"$(_escape_quotes "$handoff_file")\""
+  cmd_president_start >/dev/null
+  _wake_president "manual-refresh|handoff=$handoff_token" >/dev/null 2>&1 || true
+  echo "$handoff_file"
 }
 
 cmd_wake_president() {
