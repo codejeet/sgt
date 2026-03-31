@@ -5877,39 +5877,14 @@ _plan_cache_path() {
 
 _plan_effective_file_path() {
   local rig="${1:-}"
-  local canonical_plan_file rpath default_branch current_branch local_plan_dirty remote_plan cache_path cache_tmp
+  local canonical_plan_file
   canonical_plan_file="$(_plan_file_path "$rig")"
   [[ -f "$canonical_plan_file" ]] || return 1
-
-  rpath="$(rig_path "$rig")"
-  if [[ ! -d "$rpath" ]] || ! command -v git >/dev/null 2>&1; then
-    printf '%s\n' "$canonical_plan_file"
-    return 0
-  fi
-
-  git -C "$rpath" fetch origin >/dev/null 2>&1 || true
-  default_branch="$(git -C "$rpath" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)"
-  [[ -n "$default_branch" ]] || default_branch="main"
-  current_branch="$(git -C "$rpath" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  local_plan_dirty="$(git -C "$rpath" status --short -- SGT_PLAN.json 2>/dev/null || true)"
-
-  if [[ "$current_branch" == "$default_branch" && -z "$local_plan_dirty" ]]; then
-    printf '%s\n' "$canonical_plan_file"
-    return 0
-  fi
-
-  remote_plan="$(git -C "$rpath" show "origin/$default_branch:SGT_PLAN.json" 2>/dev/null || true)"
-  if [[ -z "$remote_plan" ]]; then
-    printf '%s\n' "$canonical_plan_file"
-    return 0
-  fi
-
-  cache_path="$(_plan_cache_path "$rig")"
-  mkdir -p "$(_plan_cache_dir)"
-  cache_tmp="${cache_path}.tmp.$$"
-  printf '%s\n' "$remote_plan" > "$cache_tmp"
-  mv -f "$cache_tmp" "$cache_path"
-  printf '%s\n' "$cache_path"
+  # The repo-local SGT_PLAN.json is the control-plane source of truth.
+  # Reopened rigs may intentionally rewrite it ahead of origin/default;
+  # falling back to cached remote plan content makes plan tick and worker
+  # context inherit stale acceptance/completion state.
+  printf '%s\n' "$canonical_plan_file"
 }
 
 _plan_request_id() {
