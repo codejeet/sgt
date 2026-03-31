@@ -144,6 +144,7 @@ Current proof for the transition:
 - `./test_hierarchy_cutover_guardrails.sh` proves per-rig startup retires stale shared-Mayor transient state without disturbing durable rig truth
 - `./test_president_runtime_supervision.sh` proves deacon supervises President and President can perform a bounded per-rig refresh intervention without taking over routine rig work
 - `./test_peek_mayor_log_fallback.sh` proves `sgt peek president` and `sgt peek mayor/<rig>` both retain scoped log fallback behavior
+- `./test_web_cockpit_control_plane_hierarchy.sh` proves the Web UI topology keeps `president` and `mayor/<rig>` separately inspectable
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
 - `./test_president_runtime_latest_main_proof.sh` bundles the runtime, surface, and contract checks as the latest-main proof for the active hierarchy
 
@@ -151,7 +152,7 @@ The latest-main proof for the active runtime now proves:
 
 - President runtime exists and is separately inspectable
 - shared-to-per-rig cutover archives stale shared Mayor transient state before it can duplicate work
-- status and peek surfaces distinguish `president` from `mayor/<rig>`
+- status, peek, and Web UI surfaces distinguish `president` from `mayor/<rig>`
 - at least two rigs can appear under independent Mayors in status
 - President supervision can perform a justified per-rig unblock or recovery action without taking over routine rig-local ownership
 

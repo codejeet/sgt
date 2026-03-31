@@ -31,10 +31,13 @@ grep -q '`sgt peek` and log surfaces let the operator inspect `president` separa
 grep -q '^## Migration Safety Rules$' "$DOC"
 grep -q 'do not manufacture duplicate work during topology changes' "$DOC"
 grep -q '^## Repo-Owned Proof Expectations$' "$DOC"
+grep -q './test_web_cockpit_control_plane_hierarchy.sh' "$DOC"
+grep -q 'status, peek, and Web UI surfaces distinguish `president` from `mayor/<rig>`' "$DOC"
 grep -q './test_president_runtime_latest_main_proof.sh' "$DOC"
 
 grep -q 'docs/president-per-rig-mayor-contract.md' "$README"
 grep -q './test_president_runtime_latest_main_proof.sh' "$README"
 grep -q 'President performs bounded supervision only' "$README"
+grep -q 'Web UI keeps `president` and `mayor/<rig>` directly inspectable' "$README"
 
 echo "ALL TESTS PASSED"
