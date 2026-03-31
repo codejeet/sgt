@@ -632,10 +632,12 @@ function renderStreamDeck() {
   refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || rootStreamTarget());
   refs.mayorMonitor.innerHTML = renderMonitorStream(rootStreamTarget(), { focusable: false });
 
+  const focusTarget = appState.focusTarget || rootStreamTarget();
   const visibleWorkers = monitorWorkers().filter(matchesStreamFilters);
-  refs.monitorWallSummary.textContent = `${visibleWorkers.length} panes visible`;
-  refs.monitorWall.innerHTML = visibleWorkers.length > 0
-    ? visibleWorkers.map((worker) => renderMonitorStream(worker.stream.target, { focusable: true })).join("")
+  const wallWorkers = visibleWorkers.filter((worker) => worker.stream && worker.stream.target !== focusTarget);
+  refs.monitorWallSummary.textContent = `${wallWorkers.length} panes visible`;
+  refs.monitorWall.innerHTML = wallWorkers.length > 0
+    ? wallWorkers.map((worker) => renderMonitorStream(worker.stream.target, { focusable: true })).join("")
     : `<div class="empty-state">No worker streams match the current monitor filters.</div>`;
 
   bindStreamActions(refs.focusStream);
@@ -669,6 +671,7 @@ function renderHeroStream(target) {
 function renderMonitorStream(target, options = {}) {
   const stream = streamFor(target);
   const details = streamDetail(target);
+  const focusLabel = appState.focusTarget === target ? "Focused" : "Focus";
   return `
     <article class="stream-card">
       <div class="stream-head">
@@ -680,7 +683,7 @@ function renderMonitorStream(target, options = {}) {
         <div class="stream-actions">
           <span class="state-pill ${streamStateClass(stream)}">${esc(stream.state)}</span>
           <button class="btn tiny ghost" data-follow-toggle="${escAttr(target)}">${stream.follow ? "Tail On" : "Tail Off"}</button>
-          ${options.focusable ? `<button class="btn tiny ghost" data-focus-target="${escAttr(target)}">Focus</button>` : ""}
+          ${options.focusable ? `<button class="btn tiny ghost" data-focus-target="${escAttr(target)}">${focusLabel}</button>` : ""}
           <button class="btn tiny ghost" data-peek-target="${escAttr(target)}">Peek</button>
         </div>
       </div>
