@@ -16,7 +16,10 @@ MOCK_PYTHONPATH="$TMP_HOME/mock-python"
 mkdir -p "$MOCK_PYTHONPATH"
 
 cat >"$MOCK_PYTHONPATH/sitecustomize.py" <<'PY'
+import io
 import json
+import os
+import urllib.error
 import urllib.request
 
 
@@ -52,6 +55,16 @@ def _mock_urlopen(req, timeout=60):
             texts = input_value
         else:
             texts = [input_value]
+        log_path = os.environ.get("MOCK_EMBED_LOG")
+        if log_path:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"{len(texts)}\n")
+        if os.environ.get("MOCK_EMBED_FORCE_ERROR") == "1":
+            body = b'{"error":{"message":"mock embeddings failed"}}'
+            raise urllib.error.HTTPError(url, 400, "Bad Request", hdrs=None, fp=io.BytesIO(body))
+        if len(texts) > 2048:
+            body = b'{"error":{"message":"Invalid input: array length must be 2048 or less."}}'
+            raise urllib.error.HTTPError(url, 400, "Bad Request", hdrs=None, fp=io.BytesIO(body))
         body = {
             "data": [{"embedding": _embed_text(text or "")} for text in texts],
         }
@@ -94,6 +107,28 @@ run_cmd_mock_embeddings() {
     TERM="${TERM:-xterm}" \
     OPENAI_API_KEY="test-key" \
     PYTHONPATH="$MOCK_PYTHONPATH" \
+    bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
+  rc=$?
+  set -e
+  echo "$rc" >"$rc_file"
+}
+
+run_cmd_mock_embeddings_env() {
+  local extra_env="$1"
+  local command="$2"
+  local out_file="$3"
+  local err_file="$4"
+  local rc_file="$5"
+  local rc
+
+  set +e
+  env -i \
+    HOME="$TMP_HOME" \
+    PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    TERM="${TERM:-xterm}" \
+    OPENAI_API_KEY="test-key" \
+    PYTHONPATH="$MOCK_PYTHONPATH" \
+    $extra_env \
     bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
   rc=$?
   set -e
@@ -149,8 +184,18 @@ SEARCH_RC="$(mktemp)"
 RECOVER_OUT="$(mktemp)"
 RECOVER_ERR="$(mktemp)"
 RECOVER_RC="$(mktemp)"
+BATCH_OUT="$(mktemp)"
+BATCH_ERR="$(mktemp)"
+BATCH_RC="$(mktemp)"
+BATCH_LOG="$(mktemp)"
+HTTPFAIL_OUT="$(mktemp)"
+HTTPFAIL_ERR="$(mktemp)"
+HTTPFAIL_RC="$(mktemp)"
+ADDWARN_OUT="$(mktemp)"
+ADDWARN_ERR="$(mktemp)"
+ADDWARN_RC="$(mktemp)"
 
-trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC"' EXIT
+trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC" "$BATCH_OUT" "$BATCH_ERR" "$BATCH_RC" "$BATCH_LOG" "$HTTPFAIL_OUT" "$HTTPFAIL_ERR" "$HTTPFAIL_RC" "$ADDWARN_OUT" "$ADDWARN_ERR" "$ADDWARN_RC"' EXIT
 
 run_cmd "sgt context" "$BASE_OUT" "$BASE_ERR" "$BASE_RC"
 run_cmd "sgt context --help" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC"
@@ -210,6 +255,23 @@ run_cmd_mock_embeddings "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\
 check_file_contains "context search recovers from malformed index exits 0" "$RECOVER_RC" '^0$'
 check_file_contains "context search recovery warns explicitly" "$RECOVER_ERR" "^⚠ context index for rig 'demo' was malformed; rebuilding$"
 check_file_contains "context search recovery returns the matching entry" "$RECOVER_OUT" 'watchdog cooldown'
+
+run_cmd_mock_embeddings_env "MOCK_EMBED_LOG=$BATCH_LOG" "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && python3 -c \"from pathlib import Path; ctx = Path.home() / 'sgt' / 'rigs' / 'demo' / 'SGT_CONTEXT.md'; ctx.parent.mkdir(parents=True, exist_ok=True); fh = ctx.open('w', encoding='utf-8'); fh.write('# SGT Project Context — demo\\n\\n## Notes\\n\\n## 2026-03-31\\n'); [fh.write(f'- 2026-03-31T00:00:{i % 60:02d}Z — note {i:04d}\\n') for i in range(2051)]; fh.close()\" && sgt context index demo >/dev/null && python3 -c \"import json; from pathlib import Path; index_path = Path.home() / 'sgt' / '.sgt' / 'context' / 'demo' / 'index.json'; doc = json.load(index_path.open('r', encoding='utf-8')); entries = doc.get('entries') or []; assert len(entries) == 2051, len(entries); assert entries[0]['text'].endswith('note 0000'), entries[0]['text']; assert entries[2048]['text'].endswith('note 2048'), entries[2048]['text']; assert entries[-1]['text'].endswith('note 2050'), entries[-1]['text']; print('verified-order')\"" "$BATCH_OUT" "$BATCH_ERR" "$BATCH_RC"
+
+check_file_contains "context index batches oversized corpora exits 0" "$BATCH_RC" '^0$'
+check_file_contains "context index batching preserves entry order" "$BATCH_OUT" 'verified-order'
+check_file_contains "context index batching uses a 512-sized chunk" "$BATCH_LOG" '^512$'
+check_file_contains "context index batching uses a final small chunk" "$BATCH_LOG" '^3$'
+
+run_cmd_mock_embeddings_env "MOCK_EMBED_FORCE_ERROR=1" "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown' >/dev/null && sgt context index demo" "$HTTPFAIL_OUT" "$HTTPFAIL_ERR" "$HTTPFAIL_RC"
+
+check_file_contains "context index HTTP failure exits 1" "$HTTPFAIL_RC" '^1$'
+check_file_contains "context index HTTP failure prints response body" "$HTTPFAIL_ERR" 'mock embeddings failed'
+
+run_cmd_mock_embeddings_env "MOCK_EMBED_FORCE_ERROR=1" "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown'" "$ADDWARN_OUT" "$ADDWARN_ERR" "$ADDWARN_RC"
+
+check_file_contains "context add still exits 0 when opportunistic reindex fails" "$ADDWARN_RC" '^0$'
+check_file_contains "context add surfaces opportunistic reindex warning" "$ADDWARN_ERR" "opportunistic context reindex failed for rig 'demo'"
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1

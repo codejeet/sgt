@@ -5028,9 +5028,27 @@ import math
 import os
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 
 rig, context_path, index_path, model, api_key = sys.argv[1:6]
+BATCH_SIZE = 512
+
+def _http_error_message(exc):
+    body = ""
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if raw:
+        try:
+            body = raw.decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = repr(raw)
+    base = f"embeddings request failed with HTTP {exc.code}"
+    if body:
+        return f"{base}: {body}"
+    return base
 
 def embed(texts):
     payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
@@ -5043,8 +5061,11 @@ def embed(texts):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(_http_error_message(exc))
     data = body.get("data")
     if not isinstance(data, list) or len(data) != len(texts):
         raise SystemExit("unexpected embeddings response shape")
@@ -5073,7 +5094,9 @@ with open(context_path, "r", encoding="utf-8") as fh:
         )
 
 texts = [entry["text"] for entry in entries]
-embeddings = embed(texts) if texts else []
+embeddings = []
+for start in range(0, len(texts), BATCH_SIZE):
+    embeddings.extend(embed(texts[start:start + BATCH_SIZE]))
 for entry, embedding in zip(entries, embeddings):
     entry["embedding"] = embedding
 
@@ -5132,9 +5155,26 @@ _context_search_run() {
 import json
 import math
 import sys
+import urllib.error
 import urllib.request
 
 rig, index_path, model, api_key, query = sys.argv[1:6]
+
+def _http_error_message(exc):
+    body = ""
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if raw:
+        try:
+            body = raw.decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = repr(raw)
+    base = f"embeddings request failed with HTTP {exc.code}"
+    if body:
+        return f"{base}: {body}"
+    return base
 
 try:
     with open(index_path, "r", encoding="utf-8") as fh:
@@ -5158,8 +5198,11 @@ req = urllib.request.Request(
     },
     method="POST",
 )
-with urllib.request.urlopen(req, timeout=60) as resp:
-    body = json.loads(resp.read().decode("utf-8"))
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as exc:
+    raise SystemExit(_http_error_message(exc))
 query_embedding = (body.get("data") or [{}])[0].get("embedding")
 if not query_embedding:
     raise SystemExit("unexpected embeddings response shape")
@@ -5244,7 +5287,9 @@ EOF
       ensure_rig "$rig"
       _context_write_note "$rig" "$note" >/dev/null
       if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
-        _context_index_build "$rig" >/dev/null 2>&1 || true
+        if ! _context_index_build "$rig" >/dev/null; then
+          warn "opportunistic context reindex failed for rig '$rig'; run 'sgt context index $rig' to refresh embeddings"
+        fi
       fi
       info "added shared context note to $(_context_file_path "$rig")"
       ;;
