@@ -11004,7 +11004,7 @@ cmd_deacon_start() {
   fi
 
   tmux new-session -d -s "$session" \
-    "SGT_ROOT='$SGT_ROOT' sgt _deacon"
+    "SGT_ROOT='$SGT_ROOT' SGT_MAYOR_ARCHITECTURE='$SGT_MAYOR_ARCHITECTURE' sgt _deacon"
 
   log_event "DEACON_SPAWN"
   info "deacon started (session: $session)"
@@ -11115,7 +11115,7 @@ cmd_daemon_start() {
 
   # Start in background tmux session
   tmux new-session -d -s "sgt-daemon" \
-    "SGT_ROOT='$SGT_ROOT' SGT_DAEMON_INTERVAL='$SGT_DAEMON_INTERVAL' sgt _daemon"
+    "SGT_ROOT='$SGT_ROOT' SGT_MAYOR_ARCHITECTURE='$SGT_MAYOR_ARCHITECTURE' SGT_DAEMON_INTERVAL='$SGT_DAEMON_INTERVAL' sgt _daemon"
 
   info "daemon started in tmux session sgt-daemon"
 }
@@ -12868,8 +12868,9 @@ _cmd_mayor_start_one() {
       "$SGT_ROOT"
   } >> "$mayor_log"
 
-  printf -v spawn_cmd 'SGT_ROOT=%q SGT_MAYOR_INTERVAL=%q SGT_MAYOR_START_TOKEN=%q SGT_MAYOR_SCOPE_RIG=%q exec %q _mayor >> %q 2>&1' \
+  printf -v spawn_cmd 'SGT_ROOT=%q SGT_MAYOR_ARCHITECTURE=%q SGT_MAYOR_INTERVAL=%q SGT_MAYOR_START_TOKEN=%q SGT_MAYOR_SCOPE_RIG=%q exec %q _mayor >> %q 2>&1' \
     "$SGT_ROOT" \
+    "$SGT_MAYOR_ARCHITECTURE" \
     "$SGT_MAYOR_INTERVAL" \
     "$attempt_token" \
     "$scope_rig" \
