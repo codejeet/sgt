@@ -9,6 +9,7 @@ const { execFile } = require('child_process');
 const {
   BlockerAlertTracker,
   TmuxStreamManager,
+  buildCockpitAlerts,
   buildCockpitSnapshot,
   captureStreamTarget,
   listStateEntries,
@@ -32,6 +33,7 @@ const WS_INTERVAL = 3000;
 const WS_PING_INTERVAL = 15000;
 const WS_PONG_GRACE = 35000;
 const LOG_TAIL_LINES = 120;
+const ALERT_LOG_TAIL_LINES = 600;
 const ELEVENLABS_API_KEY = process.env.SGT_WEB_ELEVENLABS_API_KEY || '';
 const ELEVENLABS_VOICE_ID = process.env.SGT_WEB_ELEVENLABS_VOICE_ID || '';
 const ELEVENLABS_MODEL_ID = process.env.SGT_WEB_ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
@@ -133,14 +135,19 @@ async function readRigs() {
 async function buildSnapshot() {
   const [{ statusRaw, statusJson }, rigs] = await Promise.all([readStatusBundle(), readRigs()]);
   const blockers = readAcceptanceBlockers(SGT_CONFIG);
-  const alerts = blockerAlertTracker.observe(blockers);
+  const recentLogs = readRecentLogLines(SGT_LOG, LOG_TAIL_LINES);
+  const alertLogs = readRecentLogLines(SGT_LOG, ALERT_LOG_TAIL_LINES);
+  const alerts = buildCockpitAlerts({
+    blockerAlerts: blockerAlertTracker.observe(blockers),
+    recentLogs: alertLogs,
+  });
   return buildCockpitSnapshot({
     statusJson,
     statusRaw,
     rigs,
     blockers,
     alerts,
-    recentLogs: readRecentLogLines(SGT_LOG, LOG_TAIL_LINES),
+    recentLogs,
     version: COCKPIT_VERSION,
     voice: voiceState(),
   });
