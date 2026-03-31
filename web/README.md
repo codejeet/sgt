@@ -84,7 +84,7 @@ That proof path bundles:
 - **Dense cockpit shell** — Single-page JARVIS-style HUD with command pulse, alert center, worker roster, rig matrix, topology radar, and dispatch console
 - **Live tmux monitoring** — Mayor gets a dedicated live monitor, while all active polecats can stay open simultaneously in a filtered multi-pane wall with per-pane tail/focus/peek controls
 - **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
-- **Recent alert rail** — Important President incidents plus blocker openings, follow-up escalations, and resolutions surface as explicit alert cards instead of blending into the blocker list
+- **Recent alert rail** — Defaults to recent and actionable President incidents plus unresolved blocker openings/follow-ups, while trimming stale resolved noise and long-title clutter
 - **Optional ElevenLabs voice** — Env-gated blocker voice announcements with browser mute control plus backend dedupe and rate limiting
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
 - **Topology radar** — Force-laid live graph driven from normalized `topology` nodes/edges, using WebGL when available plus a canvas fallback with click/hover focus plus direct focus/peek actions for `president` and `mayor/<rig>` nodes

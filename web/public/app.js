@@ -421,7 +421,7 @@ function renderAlerts() {
   refs.alertRail.innerHTML = alerts.slice(0, 6).map((alert) => `
     <article class="alert-card alert-${escAttr(alert.severity || "info")}">
       <div class="queue-head">
-        <div class="blocker-title">${esc(alert.message || alert.title)}</div>
+        <div class="blocker-title">${esc(snippet(alert.message || alert.title, 108))}</div>
         <span class="severity-pill ${alertSeverityClass(alert)}">${esc(alert.kind || "event")}</span>
       </div>
       <div class="blocker-meta">
@@ -430,7 +430,7 @@ function renderAlerts() {
         <span>${esc(alert.source === "president" ? "President" : "Blocker")}</span>
         <span>${esc(alertVoiceLabel(alert))}</span>
       </div>
-      ${alert.detail ? `<p>${esc(snippet(alert.detail, 180))}</p>` : ""}
+      ${(alert.detail || alert.evidence) ? `<p>${esc(snippet(alert.detail || alert.evidence, 140))}</p>` : ""}
     </article>
   `).join("");
 }
