@@ -48,6 +48,7 @@ The President must:
 - perform bounded interventions such as wake, refresh, restart, or escalation for one affected Mayor when justified
 - coordinate system-level or cross-rig policy decisions that do not belong inside one rig
 - emit operator-visible evidence for why it intervened, deferred, or declared a rig healthy
+- follow the repo-owned operator event and dedupe contract in [`docs/president-operator-notify-contract.md`](docs/president-operator-notify-contract.md) when surfacing President-class incidents
 
 The President must not:
 
@@ -146,6 +147,7 @@ Current proof for the transition:
 - `./test_peek_mayor_log_fallback.sh` proves `sgt peek president` and `sgt peek mayor/<rig>` both retain scoped log fallback behavior
 - `./test_web_cockpit_control_plane_hierarchy.sh` proves the Web UI topology keeps `president` and `mayor/<rig>` separately inspectable
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
+- `./test_president_operator_notify_contract.sh` proves the President operator-notify event model and dedupe rules remain documented in-repo
 - `./test_president_runtime_latest_main_proof.sh` bundles the runtime, surface, and contract checks as the latest-main proof for the active hierarchy
 
 The latest-main proof for the active runtime now proves:

@@ -11324,6 +11324,111 @@ _president_intervention_allowed() {
   return 0
 }
 
+_president_operator_event_kind() {
+  local reason="${1:-}" action="${2:-}"
+  case "$reason" in
+    drift*|*drift*)
+      echo "drift"
+      ;;
+    actionable-no-forward-motion|stalled-purpose*|*stalled-purpose*)
+      echo "stalled-purpose"
+      ;;
+    contradiction*|*contradict*)
+      echo "contradiction"
+      ;;
+    escalation*|*escalat*)
+      echo "escalation"
+      ;;
+    human-question*|needs-human-input*|need-human-input*|question-for-human*)
+      echo "human-question"
+      ;;
+    mayor-session-missing|mayor-heartbeat-*|actionable-rig-recheck)
+      echo "intervention"
+      ;;
+    *)
+      if [[ "$action" == "start" || "$action" == "refresh" || "$action" == "wake" ]]; then
+        echo "intervention"
+      else
+        echo "unknown"
+      fi
+      ;;
+  esac
+}
+
+_president_operator_event_severity() {
+  local kind="${1:-}" reason="${2:-}"
+  case "$kind" in
+    escalation)
+      echo "critical"
+      ;;
+    contradiction|drift|stalled-purpose|human-question)
+      echo "warning"
+      ;;
+    intervention)
+      if [[ "$reason" == "actionable-rig-recheck" ]]; then
+        echo "info"
+      else
+        echo "warning"
+      fi
+      ;;
+    *)
+      echo "info"
+      ;;
+  esac
+}
+
+_president_operator_notify_enabled() {
+  local kind="${1:-}" reason="${2:-}"
+  case "$kind" in
+    drift|stalled-purpose|contradiction|escalation|human-question)
+      return 0
+      ;;
+    intervention)
+      [[ "$reason" != "actionable-rig-recheck" ]]
+      return $?
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_president_operator_dedupe_key() {
+  local rig="${1:-}" kind="${2:-unknown}" reason="${3:-unknown}" action="${4:-unknown}"
+  printf 'president:%s:%s:%s:%s\n' "${rig:-unknown}" "${kind:-unknown}" "${reason:-unknown}" "${action:-unknown}"
+}
+
+_president_operator_overlap_key() {
+  local rig="${1:-}" kind="${2:-unknown}" reason="${3:-unknown}"
+  case "$reason" in
+    actionable-no-forward-motion|actionable-rig-recheck)
+      printf 'rig-incident:%s:actionable-no-forward-motion\n' "${rig:-unknown}"
+      ;;
+    mayor-session-missing|mayor-heartbeat-*)
+      printf 'mayor-health:%s:%s\n' "${rig:-unknown}" "${reason:-unknown}"
+      ;;
+    *)
+      printf 'president-incident:%s:%s:%s\n' "${rig:-unknown}" "${kind:-unknown}" "${reason:-unknown}"
+      ;;
+  esac
+}
+
+_president_operator_log_event() {
+  local rig="${1:-}" action="${2:-}" reason="${3:-}" outcome="${4:-}" detail="${5:-}" cycle_reason="${6:-periodic}"
+  local kind severity notify dedupe_key overlap_key notify_flag
+
+  kind="$(_president_operator_event_kind "$reason" "$action")"
+  severity="$(_president_operator_event_severity "$kind" "$reason")"
+  notify_flag=0
+  if _president_operator_notify_enabled "$kind" "$reason"; then
+    notify_flag=1
+  fi
+  dedupe_key="$(_president_operator_dedupe_key "$rig" "$kind" "$reason" "$action")"
+  overlap_key="$(_president_operator_overlap_key "$rig" "$kind" "$reason")"
+
+  log_event "PRESIDENT_OPERATOR_EVENT rig=$rig kind=$kind severity=$severity notify=$notify_flag dedupe_key=$dedupe_key overlap_key=$overlap_key action=$action reason=$reason outcome=$outcome cycle_trigger=\"$(_escape_quotes "$cycle_reason")\" detail=\"$(_escape_quotes "$detail")\""
+}
+
 _president_supervise_rig_mayor() {
   local rig="${1:-}" cycle_reason="${2:-periodic}"
   local mayor_session mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale mayor_hb_health
@@ -11382,6 +11487,7 @@ _president_supervise_rig_mayor() {
   fi
 
   if ! _president_intervention_allowed "$rig" "$reason" "$action"; then
+    _president_operator_log_event "$rig" "$action" "$reason" "suppressed-by-cooldown" "$detail" "$cycle_reason"
     _mayor_scope_apply ""
     return 1
   fi
@@ -11402,6 +11508,7 @@ _president_supervise_rig_mayor() {
       ;;
   esac
   _president_intervention_state_write "$rig" "$reason" "$action"
+  _president_operator_log_event "$rig" "$action" "$reason" "intervened" "$detail" "$cycle_reason"
   log_event "PRESIDENT_INTERVENTION rig=$rig action=$action reason=$reason detail=\"$(_escape_quotes "$detail")\" cycle_trigger=\"$(_escape_quotes "$cycle_reason")\""
   echo "[president] intervened on mayor/$rig — action=$action reason=$reason detail=$detail"
   _mayor_scope_apply ""

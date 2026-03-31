@@ -32,6 +32,12 @@ eval "$(extract_fn _president_intervention_state_file)"
 eval "$(extract_fn _president_intervention_state_read)"
 eval "$(extract_fn _president_intervention_state_write)"
 eval "$(extract_fn _president_intervention_allowed)"
+eval "$(extract_fn _president_operator_event_kind)"
+eval "$(extract_fn _president_operator_event_severity)"
+eval "$(extract_fn _president_operator_notify_enabled)"
+eval "$(extract_fn _president_operator_dedupe_key)"
+eval "$(extract_fn _president_operator_overlap_key)"
+eval "$(extract_fn _president_operator_log_event)"
 eval "$(extract_fn _deacon_supervise_president)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
@@ -155,8 +161,37 @@ if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=refresh reason=actionable-n
   echo "expected durable president intervention event for stuck rig" >&2
   exit 1
 fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=stalled-purpose severity=warning notify=1 dedupe_key=president:demo:stalled-purpose:actionable-no-forward-motion:refresh overlap_key=rig-incident:demo:actionable-no-forward-motion action=refresh reason=actionable-no-forward-motion outcome=intervened' "$EVENT_LOG"; then
+  echo "expected structured President operator event for stalled-purpose intervention" >&2
+  exit 1
+fi
 if [[ -s "$WAKE_LOG" ]]; then
   echo "expected refresh intervention instead of plain wake for stale rig" >&2
+  exit 1
+fi
+
+_mayor_rig_activity_state_read() {
+  local now recent wake_recent
+  now="$(date +%s)"
+  recent=$((now - 60))
+  wake_recent=$((now - 30))
+  printf 'active|open_issues=1|2026-03-31T00:00:00Z|1774915200|none|recent|%s|recent-progress|wake-recent|%s|manual\n' "$recent" "$wake_recent"
+}
+
+_president_supervise_rig_mayor demo manual > "$TMP_ROOT/president-wake.out"
+
+grep -qx 'president:demo:actionable-rig-recheck' "$WAKE_LOG" || {
+  echo "expected President to use a quiet wake for recent actionable rig activity" >&2
+  exit 1
+}
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info notify=0 dedupe_key=president:demo:intervention:actionable-rig-recheck:wake overlap_key=rig-incident:demo:actionable-no-forward-motion action=wake reason=actionable-rig-recheck outcome=intervened' "$EVENT_LOG"; then
+  echo "expected quiet President operator event for actionable rig recheck" >&2
+  exit 1
+fi
+
+_president_supervise_rig_mayor demo manual >/dev/null || true
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info notify=0 dedupe_key=president:demo:intervention:actionable-rig-recheck:wake overlap_key=rig-incident:demo:actionable-no-forward-motion action=wake reason=actionable-rig-recheck outcome=suppressed-by-cooldown' "$EVENT_LOG"; then
+  echo "expected President operator event to record cooldown suppression instead of replaying the same wake" >&2
   exit 1
 fi
 BASH
