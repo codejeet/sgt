@@ -148,21 +148,33 @@ test('computeStreamDelta emits append-only chunks when possible and reset on div
 });
 
 test('resolveMayorLogPath maps shared and per-rig mayor targets to scoped log files', () => {
+  assert.equal(resolveMayorLogPath('president', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/president/president-start.log');
   assert.equal(resolveMayorLogPath('mayor', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/mayor-start.log');
   assert.equal(resolveMayorLogPath('mayor/alpha', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/mayors/alpha/mayor-start.log');
   assert.equal(resolveMayorLogPath('witness/alpha', { configDir: '/tmp/.sgt' }), '');
 });
 
 test('resolveMayorSessionName and resolveMayorRuntimeDir keep mayor scope explicit', () => {
+  assert.equal(resolveMayorSessionName('president'), 'sgt-president');
   assert.equal(resolveMayorSessionName('mayor'), 'sgt-mayor');
   assert.equal(resolveMayorSessionName('mayor/alpha'), 'sgt-mayor-alpha');
   assert.equal(resolveMayorSessionName('witness/alpha'), '');
+  assert.equal(resolveMayorRuntimeDir('president', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/president');
   assert.equal(resolveMayorRuntimeDir('mayor', { configDir: '/tmp/.sgt' }), '/tmp/.sgt');
   assert.equal(resolveMayorRuntimeDir('mayor/alpha', { configDir: '/tmp/.sgt' }), '/tmp/.sgt/mayors/alpha');
   assert.equal(resolveMayorRuntimeDir('witness/alpha', { configDir: '/tmp/.sgt' }), '');
 });
 
 test('captureStreamTarget falls back to mayor-start.log when the mayor pane is blank or unavailable', async () => {
+  const president = await captureStreamTarget('president', {
+    configDir: '/tmp/.sgt',
+    capturePane: async () => '\n',
+    readMayorLog: async (logPath) => `tail:${logPath}`,
+  });
+  assert.equal(president.available, true);
+  assert.equal(president.source, 'mayor-log');
+  assert.equal(president.content, 'tail:/tmp/.sgt/president/president-start.log');
+
   const shared = await captureStreamTarget('mayor', {
     configDir: '/tmp/.sgt',
     capturePane: async () => '\n',

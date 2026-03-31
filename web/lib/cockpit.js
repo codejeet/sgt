@@ -430,18 +430,20 @@ function buildTopology(snapshot) {
     });
   }
 
+  const hasPresident = snapshot.agents.some((agent) => agent.name === 'president');
+  const rootId = hasPresident ? 'agent:president' : 'agent:mayor';
   addNode({
-    id: 'agent:mayor',
+    id: rootId,
     type: 'agent',
-    label: 'Mayor',
-    state: snapshot.agents.some((agent) => agent.name === 'mayor' && String(agent.status).startsWith('on')) ? 'active' : 'idle',
+    label: hasPresident ? 'President' : 'Mayor',
+    state: snapshot.agents.some((agent) => agent.name === (hasPresident ? 'president' : 'mayor') && String(agent.status).startsWith('on')) ? 'active' : 'idle',
     metadata: {
-      role: 'mayor',
+      role: hasPresident ? 'president' : 'mayor',
     },
   });
 
   for (const agent of snapshot.agents || []) {
-    if (!agent || !agent.name || agent.name === 'mayor') continue;
+    if (!agent || !agent.name || agent.name === 'mayor' || agent.name === 'president') continue;
     const agentId = `agent:${agent.name}`;
     addNode({
       id: agentId,
@@ -454,7 +456,12 @@ function buildTopology(snapshot) {
       },
     });
     if (agent.rig) {
-      addEdge({ from: 'agent:mayor', to: `rig:${agent.rig}`, type: 'oversees' });
+      if (agent.name.startsWith('mayor/')) {
+        addEdge({ from: rootId, to: agentId, type: 'supervises' });
+        addEdge({ from: agentId, to: `rig:${agent.rig}`, type: 'owns' });
+      } else {
+        addEdge({ from: rootId, to: `rig:${agent.rig}`, type: 'oversees' });
+      }
       addEdge({ from: `rig:${agent.rig}`, to: agentId, type: 'supports' });
     }
   }
@@ -476,7 +483,9 @@ function buildTopology(snapshot) {
         reason: rig.reason || '',
       },
     });
-    addEdge({ from: 'agent:mayor', to: rigId, type: 'oversees' });
+    if (!snapshot.agents.some((agent) => agent.name === `mayor/${rig.name}`)) {
+      addEdge({ from: rootId, to: rigId, type: 'oversees' });
+    }
   }
 
   for (const worker of snapshot.workers || []) {
@@ -808,16 +817,18 @@ function resolveStreamSession(target, { configDir }) {
 }
 
 function isMayorTarget(target) {
-  return target === 'mayor' || target.startsWith('mayor/');
+  return target === 'president' || target === 'mayor' || target.startsWith('mayor/');
 }
 
 function resolveMayorSessionName(target) {
+  if (target === 'president') return 'sgt-president';
   if (target === 'mayor') return 'sgt-mayor';
   if (target && target.startsWith('mayor/')) return `sgt-mayor-${target.slice('mayor/'.length)}`;
   return '';
 }
 
 function resolveMayorRuntimeDir(target, { configDir }) {
+  if (target === 'president') return path.join(configDir, 'president');
   if (target === 'mayor') return configDir;
   if (target && target.startsWith('mayor/')) {
     return path.join(configDir, 'mayors', target.slice('mayor/'.length));
@@ -827,7 +838,8 @@ function resolveMayorRuntimeDir(target, { configDir }) {
 
 function resolveMayorLogPath(target, { configDir }) {
   const runtimeDir = resolveMayorRuntimeDir(target, { configDir });
-  return runtimeDir ? path.join(runtimeDir, 'mayor-start.log') : '';
+  if (!runtimeDir) return '';
+  return path.join(runtimeDir, target === 'president' ? 'president-start.log' : 'mayor-start.log');
 }
 
 function hasVisibleContent(content) {

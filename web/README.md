@@ -188,7 +188,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 Client-to-server:
 
 - `{"type":"snapshot/request"}` — request an immediate normalized snapshot
-- `{"type":"stream/subscribe","target":"mayor"}` — start a live tmux stream for `mayor`, `mayor/<rig>`, `witness/<rig>`, `refinery/<rig>`, `crew/<name>`, `dog/<name>`, or a polecat name
+- `{"type":"stream/subscribe","target":"president"}` — start a live tmux stream for `president`, `mayor`, `mayor/<rig>`, `witness/<rig>`, `refinery/<rig>`, `crew/<name>`, `dog/<name>`, or a polecat name
 - `{"type":"stream/unsubscribe","target":"mayor"}` — stop a live tmux stream
 
 The stream section defaults to a polecat-focused monitor wall:
