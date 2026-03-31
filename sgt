@@ -6347,8 +6347,16 @@ if not isinstance(acceptance, dict):
 allowed_completion_status = {"pending", "completed", "verified", "blocked", "waived"}
 plan_completion_status = str(acceptance.get("status") or "").strip().lower()
 state_completion_status = str(completion_state.get("status") or "").strip().lower()
-if plan_completion_status in allowed_completion_status:
-    completion_status = plan_completion_status
+normalized_plan_completion_status = {
+    "planned": "pending",
+    "open": "pending",
+    "in_progress": "pending",
+    "in-progress": "pending",
+    "active": "pending",
+    "unverified": "pending",
+}.get(plan_completion_status, plan_completion_status)
+if normalized_plan_completion_status in allowed_completion_status:
+    completion_status = normalized_plan_completion_status
 elif state_completion_status in allowed_completion_status:
     completion_status = state_completion_status
 elif completion_condition or acceptance:
