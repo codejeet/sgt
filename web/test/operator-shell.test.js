@@ -24,6 +24,9 @@ test("operator shell html includes cockpit sections and assets", () => {
   assert.match(html, /id="streamRoleFilter"/);
   assert.match(html, /id="mayorMonitor"/);
   assert.match(html, /id="monitorWall"/);
+  assert.match(html, /monitor-column-focus/);
+  assert.match(html, /monitor-column-support/);
+  assert.match(html, /monitor-column-wall/);
   assert.match(html, /id="alertRail"/);
   assert.match(html, /id="blockerBoard"/);
   assert.match(html, /id="voiceMuteBtn"/);
@@ -60,19 +63,23 @@ test("operator shell script consumes snapshot and tmux stream events", () => {
   assert.match(script, /bindTopologyActions/);
   assert.match(script, /topologyNodeStreamTarget/);
   assert.match(script, /renderStreamDeck/);
+  assert.match(script, /wallWorkers = visibleWorkers\.filter/);
+  assert.match(script, /worker\.stream && worker\.stream\.target !== focusTarget/);
 });
 
-test("operator shell styles reflect the research-backed humanization pass", () => {
+test("operator shell styles reflect the blue-on-black operator theme and vertical pane wall", () => {
   const styles = fs.readFileSync(path.join(__dirname, "..", "public", "styles.css"), "utf8");
 
-  assert.match(styles, /--radius:\s*3px/);
-  assert.match(styles, /--blue:\s*#63aafc/i);
-  assert.match(styles, /--amber:\s*#d9a441/i);
-  assert.match(styles, /--plum:\s*#ad7cff/i);
+  assert.match(styles, /--radius:\s*2px/);
+  assert.match(styles, /--blue:\s*#67b7ff/i);
+  assert.match(styles, /--bg:\s*#03070d/i);
   assert.match(styles, /\.section-streams\s*\{/);
   assert.match(styles, /\.section-overview\s*\{/);
   assert.match(styles, /\.section-topology\s*\{/);
-  assert.match(styles, /border-top:\s*2px solid rgba\(99, 170, 252, 0\.6\)/);
+  assert.match(styles, /grid-template-areas:\s*"focus support"/);
+  assert.match(styles, /grid-template-columns:\s*repeat\(auto-fit, minmax\(220px, 1fr\)\)/);
+  assert.match(styles, /grid-auto-rows:\s*minmax\(var\(--stream-height\), auto\)/);
+  assert.match(styles, /border-top:\s*2px solid rgba\(103, 183, 255, 0\.7\)/);
   assert.match(styles, /border-radius:\s*2px/);
   assert.doesNotMatch(styles, /Orbitron/);
   assert.doesNotMatch(styles, /backdrop-filter/);

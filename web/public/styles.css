@@ -1,23 +1,23 @@
 :root {
-  --bg: #0a1118;
-  --bg-2: #101924;
-  --panel: #111a24;
-  --panel-strong: #0c131b;
-  --panel-soft: #151f2a;
-  --line: rgba(139, 166, 194, 0.22);
-  --line-strong: rgba(139, 166, 194, 0.38);
-  --text: #dde7f2;
-  --muted: #8f9fb1;
-  --blue: #63aafc;
-  --blue-soft: rgba(99, 170, 252, 0.14);
-  --amber: #d9a441;
-  --amber-soft: rgba(217, 164, 65, 0.14);
-  --plum: #ad7cff;
-  --plum-soft: rgba(173, 124, 255, 0.14);
-  --lime: #79c66d;
-  --red: #e27070;
-  --shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
-  --radius: 3px;
+  --bg: #03070d;
+  --bg-2: #09111d;
+  --panel: #07101b;
+  --panel-strong: #040913;
+  --panel-soft: #0c1624;
+  --line: rgba(116, 170, 230, 0.2);
+  --line-strong: rgba(116, 170, 230, 0.42);
+  --text: #eef6ff;
+  --muted: #86a0bc;
+  --blue: #67b7ff;
+  --blue-soft: rgba(103, 183, 255, 0.14);
+  --amber: #f2b661;
+  --amber-soft: rgba(242, 182, 97, 0.14);
+  --plum: #82a7ff;
+  --plum-soft: rgba(130, 167, 255, 0.12);
+  --lime: #83d6a2;
+  --red: #ff7a7a;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+  --radius: 2px;
   --radius-lg: 4px;
   --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
   --sans: "IBM Plex Sans", "Segoe UI", sans-serif;
@@ -25,7 +25,7 @@
   --page-pad: 20px;
   --panel-pad: 18px;
   --gap: 18px;
-  --stream-height: 220px;
+  --stream-height: 340px;
 }
 
 body.compact {
@@ -49,11 +49,11 @@ body {
   color: var(--text);
   font-family: var(--sans);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 16%),
-    linear-gradient(90deg, rgba(99, 170, 252, 0.04) 0, rgba(99, 170, 252, 0.04) 1px, transparent 1px),
-    linear-gradient(rgba(255, 255, 255, 0.025) 0, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(180deg, #0a1118 0%, #0c141e 56%, #0a1118 100%);
-  background-size: auto, 48px 48px, 48px 48px, auto;
+    radial-gradient(circle at top left, rgba(103, 183, 255, 0.1), transparent 28%),
+    linear-gradient(90deg, rgba(103, 183, 255, 0.045) 0, rgba(103, 183, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(rgba(238, 246, 255, 0.02) 0, rgba(238, 246, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(180deg, #02050a 0%, #040914 52%, #02050a 100%);
+  background-size: auto, 56px 56px, 56px 56px, auto;
 }
 
 button,
@@ -86,49 +86,49 @@ a {
 
 .panel {
   border: 1px solid var(--line);
-  background: rgba(17, 26, 36, 0.96);
+  background: rgba(7, 16, 27, 0.96);
   box-shadow: var(--shadow);
   border-radius: var(--radius);
 }
 
 .panel-shell {
   background:
-    linear-gradient(90deg, rgba(99, 170, 252, 0.05), transparent 28%),
-    rgba(12, 19, 27, 0.98);
+    linear-gradient(90deg, rgba(103, 183, 255, 0.08), transparent 32%),
+    rgba(4, 9, 19, 0.98);
 }
 
 .panel-nav {
-  background: rgba(13, 21, 30, 0.96);
+  background: rgba(5, 11, 19, 0.97);
 }
 
 .panel-sidebar {
-  background: rgba(16, 24, 33, 0.96);
+  background: rgba(6, 13, 22, 0.97);
 }
 
 .section-streams {
   background:
-    linear-gradient(180deg, rgba(99, 170, 252, 0.045), transparent 64px),
-    rgba(12, 19, 27, 0.98);
-  border-top: 2px solid rgba(99, 170, 252, 0.6);
+    linear-gradient(180deg, rgba(103, 183, 255, 0.06), transparent 72px),
+    rgba(4, 10, 18, 0.99);
+  border-top: 2px solid rgba(103, 183, 255, 0.7);
 }
 
 .section-overview {
   background:
-    linear-gradient(180deg, rgba(217, 164, 65, 0.045), transparent 64px),
-    rgba(16, 24, 33, 0.96);
-  border-top: 2px solid rgba(217, 164, 65, 0.42);
+    linear-gradient(180deg, rgba(103, 183, 255, 0.04), transparent 72px),
+    rgba(5, 12, 21, 0.98);
+  border-top: 2px solid rgba(103, 183, 255, 0.44);
 }
 
 .section-topology {
   background:
-    linear-gradient(180deg, rgba(173, 124, 255, 0.05), transparent 64px),
-    rgba(15, 23, 33, 0.96);
-  border-top: 2px solid rgba(173, 124, 255, 0.44);
+    linear-gradient(180deg, rgba(130, 167, 255, 0.06), transparent 72px),
+    rgba(5, 12, 22, 0.98);
+  border-top: 2px solid rgba(130, 167, 255, 0.46);
 }
 
 .section-dispatch,
 .section-logs {
-  background: rgba(14, 21, 30, 0.97);
+  background: rgba(5, 11, 19, 0.98);
 }
 
 .topbar {
@@ -160,7 +160,7 @@ a {
 .lead {
   max-width: 760px;
   margin: 0;
-  color: #b5c3d3;
+  color: #b8cee5;
   line-height: 1.45;
 }
 
@@ -193,7 +193,7 @@ a {
   gap: 10px;
   padding: 9px 11px;
   border-radius: var(--radius);
-  background: rgba(17, 26, 36, 0.94);
+  background: rgba(5, 11, 19, 0.96);
 }
 
 .status-chip strong {
@@ -237,8 +237,8 @@ a {
 .nav-btn.active,
 .nav-btn:hover {
   color: var(--text);
-  background: rgba(21, 32, 45, 0.96);
-  border-color: rgba(99, 170, 252, 0.45);
+  background: rgba(10, 19, 31, 0.98);
+  border-color: rgba(103, 183, 255, 0.45);
 }
 
 .sidebar {
@@ -287,19 +287,19 @@ a {
 .metric-card {
   padding: 12px;
   border-radius: var(--radius);
-  background: rgba(13, 21, 30, 0.92);
+  background: rgba(5, 11, 19, 0.95);
 }
 
 .panel-status .metric-card {
-  border-left: 2px solid rgba(99, 170, 252, 0.52);
+  border-left: 2px solid rgba(103, 183, 255, 0.56);
 }
 
 .panel-workers .roster-item {
-  border-left: 2px solid rgba(173, 124, 255, 0.42);
+  border-left: 2px solid rgba(103, 183, 255, 0.42);
 }
 
 .panel-rigs .rig-item {
-  border-left: 2px solid rgba(217, 164, 65, 0.42);
+  border-left: 2px solid rgba(130, 167, 255, 0.42);
 }
 
 .metric-card strong {
@@ -329,7 +329,7 @@ a {
 .roster-item,
 .rig-item {
   padding: 12px;
-  background: rgba(13, 21, 30, 0.94);
+  background: rgba(5, 11, 19, 0.95);
 }
 
 .roster-item {
@@ -419,8 +419,8 @@ a {
 }
 
 .btn {
-  border: 1px solid rgba(99, 170, 252, 0.36);
-  background: rgba(99, 170, 252, 0.08);
+  border: 1px solid rgba(103, 183, 255, 0.4);
+  background: rgba(103, 183, 255, 0.08);
   color: var(--text);
   padding: 10px 14px;
   border-radius: 2px;
@@ -430,8 +430,8 @@ a {
 }
 
 .btn:hover {
-  border-color: rgba(99, 170, 252, 0.6);
-  background: rgba(99, 170, 252, 0.12);
+  border-color: rgba(103, 183, 255, 0.62);
+  background: rgba(103, 183, 255, 0.14);
 }
 
 .btn.ghost {
@@ -492,13 +492,13 @@ a {
 
 .alert-card {
   padding: 14px;
-  background: rgba(14, 22, 31, 0.96);
+  background: rgba(6, 13, 22, 0.97);
   border-left: 2px solid var(--line-strong);
 }
 
 .alert-card.alert-critical {
   border-left-color: rgba(226, 112, 112, 0.95);
-  background: rgba(37, 20, 22, 0.94);
+  background: rgba(34, 10, 14, 0.95);
 }
 
 .alert-card.alert-good {
@@ -507,20 +507,20 @@ a {
 }
 
 .alert-card.alert-warning {
-  border-left-color: rgba(217, 164, 65, 0.95);
-  background: rgba(38, 29, 18, 0.94);
+  border-left-color: rgba(242, 182, 97, 0.95);
+  background: rgba(38, 25, 10, 0.95);
 }
 
 .blocker-card {
   padding: 14px;
-  border-left: 2px solid rgba(226, 112, 112, 0.72);
-  background: rgba(33, 18, 21, 0.94);
+  border-left: 2px solid rgba(255, 122, 122, 0.72);
+  background: rgba(24, 8, 12, 0.95);
 }
 
 .queue-item {
   padding: 12px;
-  border-left: 2px solid rgba(217, 164, 65, 0.64);
-  background: rgba(23, 22, 18, 0.94);
+  border-left: 2px solid rgba(103, 183, 255, 0.52);
+  background: rgba(5, 12, 20, 0.95);
 }
 
 .blocker-card p,
@@ -563,7 +563,7 @@ a {
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 2px;
-  background: rgba(9, 15, 22, 0.98);
+  background: rgba(2, 7, 13, 0.98);
 }
 
 .stream-filter-wide input {
@@ -572,36 +572,54 @@ a {
 
 .monitor-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.05fr);
+  grid-template-columns: minmax(340px, 1.2fr) minmax(280px, 0.72fr);
+  grid-template-areas:
+    "focus support"
+    "wall wall";
   gap: var(--gap);
 }
 
-.monitor-column,
-.monitor-column-wide {
+.monitor-column {
   min-width: 0;
+}
+
+.monitor-column-focus {
+  grid-area: focus;
+}
+
+.monitor-column-support {
+  grid-area: support;
+}
+
+.monitor-column-wall {
+  grid-area: wall;
 }
 
 .hero-card,
 .stream-card {
+  display: flex;
+  flex-direction: column;
   padding: 14px;
   overflow: hidden;
 }
 
 .hero-card {
-  min-height: 320px;
-  background: rgba(13, 21, 30, 0.96);
-  border-top: 2px solid rgba(99, 170, 252, 0.44);
+  min-height: 360px;
+  background: rgba(5, 11, 19, 0.97);
+  border-top: 2px solid rgba(103, 183, 255, 0.56);
 }
 
 .stream-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-auto-rows: minmax(var(--stream-height), auto);
   gap: 12px;
 }
 
 .stream-card {
   min-height: var(--stream-height);
-  background: rgba(13, 21, 30, 0.96);
+  background: rgba(5, 11, 19, 0.97);
+  border-top: 2px solid rgba(103, 183, 255, 0.3);
 }
 
 .stream-head {
@@ -630,8 +648,8 @@ a {
 
 .stream-body,
 .log-viewer {
-  border: 1px solid rgba(143, 159, 177, 0.18);
-  background: rgba(6, 11, 16, 0.98);
+  border: 1px solid rgba(116, 170, 230, 0.18);
+  background: rgba(1, 4, 9, 0.98);
   border-radius: 2px;
   font-family: var(--mono);
   font-size: 12px;
@@ -639,7 +657,8 @@ a {
 }
 
 .stream-body {
-  height: 230px;
+  flex: 1 1 auto;
+  min-height: 260px;
   overflow: auto;
   padding: 14px;
   white-space: pre-wrap;
@@ -647,16 +666,16 @@ a {
 }
 
 .hero-card .stream-body {
-  height: 370px;
+  min-height: 420px;
 }
 
 #mayorMonitor .stream-card {
-  min-height: 260px;
-  border-top-color: rgba(173, 124, 255, 0.48);
+  min-height: 360px;
+  border-top-color: rgba(130, 167, 255, 0.44);
 }
 
 #mayorMonitor .stream-body {
-  height: 280px;
+  min-height: 300px;
 }
 
 .stream-empty,
@@ -683,8 +702,8 @@ a {
   border-radius: var(--radius);
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(173, 124, 255, 0.04), transparent 80px),
-    rgba(8, 13, 19, 0.98);
+    linear-gradient(180deg, rgba(130, 167, 255, 0.04), transparent 80px),
+    rgba(2, 6, 12, 0.98);
 }
 
 #topologyCanvas,
@@ -705,7 +724,7 @@ a {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: rgba(13, 21, 30, 0.94);
+  background: rgba(5, 11, 19, 0.95);
 }
 
 .topology-focus-title {
@@ -736,14 +755,14 @@ a {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 2px;
-  background: rgba(13, 21, 30, 0.92);
+  background: rgba(5, 11, 19, 0.94);
   color: #c2ced9;
   font-size: 12px;
 }
 
 .topology-item.active {
-  border-color: rgba(173, 124, 255, 0.44);
-  background: rgba(28, 20, 38, 0.92);
+  border-color: rgba(130, 167, 255, 0.44);
+  background: rgba(9, 18, 32, 0.94);
 }
 
 .dispatch-grid {
@@ -772,7 +791,7 @@ a {
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 2px;
-  background: rgba(9, 15, 22, 0.98);
+  background: rgba(2, 7, 13, 0.98);
 }
 
 .dispatch-form textarea {
@@ -793,7 +812,7 @@ a {
 .dispatch-note {
   padding: 12px;
   border-radius: var(--radius);
-  background: rgba(13, 21, 30, 0.94);
+  background: rgba(5, 11, 19, 0.95);
 }
 
 .log-toolbar {
@@ -840,7 +859,7 @@ a {
   overflow: hidden;
   border-radius: var(--radius);
   border: 1px solid var(--line-strong);
-  background: rgba(8, 13, 19, 0.99);
+  background: rgba(2, 7, 13, 0.99);
   box-shadow: var(--shadow);
 }
 
@@ -890,7 +909,7 @@ a {
   min-width: 240px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: rgba(13, 21, 30, 0.98);
+  background: rgba(5, 11, 19, 0.98);
   box-shadow: var(--shadow);
 }
 
