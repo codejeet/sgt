@@ -16,7 +16,10 @@ test('web docs cover deploy path, config, and latest-main proof entrypoint', () 
   assert.match(readme, /SGT_WEB_VOICE_RATE_LIMIT_SECS/);
   assert.match(readme, /WebGL/);
   assert.match(readme, /test_web_cockpit_latest_main_proof\.sh/);
+  assert.match(readme, /test_president_operator_surface_latest_main_proof\.sh/);
   assert.match(readme, /npm --prefix web ci && npm --prefix web test/);
+  assert.match(readme, /president-operator-surface-contract\.md/);
+  assert.match(readme, /President Activity/);
   assert.match(readme, /human-dashboard-redesign-rules\.md/);
   assert.match(packageLock, /"name": "sgt-web"/);
   assert.match(packageLock, /"lockfileVersion": 3/);

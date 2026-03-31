@@ -4,6 +4,7 @@ SGT Web UI is a small, dependency-light **real-time operator shell** for SGT (Si
 
 For the locked follow-on cockpit architecture and deployment path, see [`web/docs/live-cockpit-architecture.md`](docs/live-cockpit-architecture.md).
 For the research-first redesign constraints that govern the next visual refinement pass, see [`web/docs/human-dashboard-redesign-rules.md`](docs/human-dashboard-redesign-rules.md).
+For the cross-surface President visibility contract that ties status, peek, and the Web UI together, see [`docs/president-operator-surface-contract.md`](../docs/president-operator-surface-contract.md).
 
 ## Quick start
 
@@ -78,6 +79,14 @@ That proof path bundles:
 
 - `npm --prefix web ci && npm --prefix web test` for a fresh-checkout dependency install plus the cockpit snapshot/topology/blocker alert contracts, operator-shell UI, and docs/deploy-helper assertions
 - `web/scripts/sync-live-copy.sh --dry-run <tempdir>` so the canonical repo `web/` to live-copy sync path is exercised without touching `/root/sgt/web`
+
+If you want the full President operator-surface proof instead of the web-only proof, run:
+
+```bash
+./test_president_operator_surface_latest_main_proof.sh
+```
+
+That broader proof also checks `sgt status --json` President event history plus the runtime hierarchy/status/peek contracts that feed the cockpit's alert rail and `President Activity` panel.
 
 ## Features
 

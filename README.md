@@ -573,7 +573,8 @@ President/per-rig Mayor architecture contract:
 - The President is the cross-rig supervisor and must not take over routine repo-local Mayor work.
 - Each `mayor/<rig>` owns exactly one rig with isolated transient state and independent refresh/restart/peek semantics.
 - Operator surfaces distinguish `president` from `mayor/<rig>` explicitly in status, peek, logs, and the Web UI.
-- For the detailed role, migration, and proof contract, see [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md).
+- The Web UI also keeps a dedicated `President Activity` view and a recent/actionable alert rail so operators can see rig, reason, action, and outcome without raw-log archaeology.
+- For the detailed role, migration, and proof contract, see [`docs/president-per-rig-mayor-contract.md`](docs/president-per-rig-mayor-contract.md), [`docs/president-operator-notify-contract.md`](docs/president-operator-notify-contract.md), and [`docs/president-operator-surface-contract.md`](docs/president-operator-surface-contract.md).
 
 Latest-main proof for this hierarchy:
 
@@ -584,6 +585,14 @@ Latest-main proof for this hierarchy:
 That proof path verifies the documented contract, shared-to-per-rig cutover guardrails, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
 It also proves the Web UI keeps `president` and `mayor/<rig>` directly inspectable as separate control-plane nodes.
 It also covers the repo-owned President operator-notify model and dedupe contract.
+
+Latest-main proof for the full President operator-surface pass:
+
+```bash
+./test_president_operator_surface_latest_main_proof.sh
+```
+
+That proof path bundles the hierarchy/runtime proof with `sgt status --json` President event-history coverage and the Web cockpit rendering contract for the alert rail plus `President Activity` panel.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
