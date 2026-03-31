@@ -597,3 +597,165 @@ This is intentionally a **phase-2 refinement plan** after the already-verified c
 
 ## 2026-03-31
 - 2026-03-31T07:28:54+02:00 — 2026-03-31 bug report: 'sgt context search pmkb "test"' fails with HTTP 400 because _context_index_build sends all SGT_CONTEXT entries in one OpenAI embeddings request. PMKB context has 2473 entries and OpenAI rejects arrays longer than 2048 with 'Invalid input: array length must be 2048 or less.' Direct single-query embeddings work; chunking the same corpus into 2048 + 425 succeeds. Also, 'sgt context add' currently swallows background reindex failures via '>/dev/null 2>&1 || true', which hides stale-index rebuild breakage.
+- 2026-03-31T07:32:17+02:00 — 2026-03-31: context indexing now batches embeddings requests in 512-entry chunks to stay below OpenAI's 2048-input cap, preserves entry order in ~/.sgt/context/<rig>/index.json, and warns when opportunistic reindex during 'sgt context add' fails instead of silently swallowing it.
+- 2026-03-31T07:50:56+02:00 — Plan request sgt-1774936256-9272fefe submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1774936256-9272fefe
+
+- Requested at: 2026-03-31T07:50:56+02:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# SGT plan request: per-rig Mayors + President supervisor
+
+## Request
+
+Replace the current shared-Mayor control plane with **one Mayor per rig**, and add a new higher-level agent called the **President** that supervises the Mayors across rigs, tracks their progress, and unblocks or reconciles them when needed.
+
+Target repo/rig: `sgt`
+Requester: operator via Gastown
+Date: 2026-03-31
+
+## Why this change
+
+The current shared-Mayor setup mixes cross-rig coordination into one control-plane brain. That creates pressure around context size, cross-rig reasoning bleed, stale board reconciliation, and recoverability when one rig gets weird. We want to move to a more scalable hierarchy:
+
+- **Mayor = rig-local executive**
+  - owns one rig only
+  - reasons only about that rig's issues/PRs/plan/blockers/state
+  - has isolated transient workspace, logs, heartbeats, locks, and refresh lifecycle
+- **President = top-level supervisor**
+  - watches all Mayors
+  - tracks health and progress across rigs
+  - notices stalls / drifts / contradictory states
+  - nudges, wakes, refreshes, or otherwise unblocks a Mayor when justified
+  - handles cross-rig coordination and control-plane oversight, but does **not** replace rig-local Mayor ownership
+
+## Desired end state
+
+### 1) Per-rig Mayor architecture
+
+Each active rig should have its own Mayor runtime/process/session/state instead of sharing one global Mayor.
+
+At minimum, each rig-local Mayor should have isolated equivalents of today's Mayor runtime assets, such as:
+
+- briefing/workspace/context
+- heartbeat state
+- lock/lease
+- cycle state / observability state
+- logs / peek target
+- refresh/handoff flow
+- notify path
+
+Per-rig Mayors should preserve existing rig-local responsibilities:
+
+- evaluate repo-local truth
+- own plan decomposition/execution flow for that rig
+- dispatch/re-dispatch work for that rig
+- reconcile blockers / compact stale work for that rig
+- respect rig hibernation state
+
+### 2) New President layer
+
+Add a control-plane layer above the Mayors named **President**.
+
+The President should:
+
+- monitor all rig-local Mayors and their health/progress
+- detect stuck or contradictory situations
+- detect rigs with actionable work but no healthy forward motion
+- wake or refresh a specific Mayor when needed
+- issue bounded supervisory steering/unblock actions
+- coordinate global/system-level decisions that don't belong inside a single rig Mayor
+- maintain separation: the President should supervise the Mayors, not directly take over routine rig-local repo work
+
+Examples of President-worthy behavior:
+
+- a rig is actionable but its Mayor is stale, wedged, or repeatedly failing to make progress
+- duplicate/stale work keeps resurfacing and needs higher-level compaction/recovery supervision
+- one Mayor's local reasoning conflicts with broader control-plane truth
+- cross-rig resource / policy / rollout decisions need orchestration
+
+### 3) Backward-compatible operator ergonomics
+
+The migration should not make SGT harder to operate.
+
+Please design/update CLI and operational flows so they remain coherent. Likely examples:
+
+- `sgt up` / `sgt down` should manage President + all needed Mayors cleanly
+- `sgt status` should clearly expose President state plus per-rig Mayor state
+- `sgt peek` / logs / WebUI should make it obvious whether the user is looking at President or a specific rig Mayor
+- refresh/restart commands should work at the correct scope (single-rig Mayor vs President vs all)
+- existing useful Mayor ergonomics such as refresh/handoff should survive in the new model
+
+If command names need to evolve, preserve sensible compatibility or offer a clear migration path.
+
+### 4) Observability / debugging
+
+This architecture change should improve, not reduce, debuggability.
+
+Need clear visibility for:
+
+- President health
+- per-rig Mayor health
+- last cycle / last wake / last meaningful action per Mayor
+- why President intervened or did not intervene
+- whether a rig is blocked because of repo truth, hibernation, missing work, or a control-plane problem
+
+### 5) Safe migration
+
+The migration path matters.
+
+Need a plan that safely moves from today's shared-Mayor setup to per-rig Mayors + President without trashing durable board state.
+
+Important constraints:
+
+- do **not** bypass repo-local plan ownership rules
+- preserve durable board/issue/PR/blocker truth
+- avoid creating fake duplicate work during migration
+- existing rigs (`sgt`, `pmkb`, `sstb`, etc.) should remain recoverable
+- operator should be able to roll forward incrementally and verify behavior
+
+## Acceptance expectations
+
+Mayor should decompose this into a real implementation plan, not a single vague task.
+
+A good finished result should include at least:
+
+1. architecture/design lane(s)
+2. runtime/process model changes
+3. CLI/control-plane updates
+4. observability/WebUI/peek/log support updates
+5. migration/safety path
+6. docs/proof/tests
+7. latest-main proof that demonstrates the hierarchy actually works
+
+## Concrete acceptance criteria
+
+The delivered system should make the following true:
+
+- SGT no longer depends on one shared cross-rig Mayor as the sole executive brain
+- each active rig has a dedicated Mayor with isolated transient state
+- a President process/layer exists and supervises Mayors across rigs
+- President can detect and act on justified unblock/recovery cases for a single rig Mayor
+- `sgt status` and operator-facing observability clearly show President + rig-local Mayor state
+- operator can inspect/peek President separately from any rig Mayor
+- refresh/restart semantics are well-defined at the correct scope
+- docs explain the hierarchy and operator workflow
+- proof demonstrates at least two rigs under separate Mayors, with the President supervising them correctly
+
+## Notes / guardrails
+
+- Keep Witness / Refinery / existing rig-local repo workflows intact unless a change is truly required.
+- Prefer explicit process/state boundaries over hidden multiplexing.
+- Preserve the spirit of earlier Mayor lifecycle work (refresh/handoff, hibernation awareness, observability) but adapt it to the new hierarchy.
+- If this should land in phases, make the phases explicit and safe.
+
+## Requested outcome from Mayor
+
+Please produce and execute a repo-local SGT plan for this feature:
+
+**Per-rig Mayors with a President supervisor above them.**
+
+If needed, start with design/migration scaffolding first, but the plan should clearly converge on a working hierarchical control plane rather than stopping at docs-only architecture notes.
+```
