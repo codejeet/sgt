@@ -322,6 +322,19 @@ app.get('/api/peek/:target', async (req, res) => {
   }
 });
 
+app.post('/api/nudge', async (req, res) => {
+  const { target, message } = req.body;
+  if (!target || !message) {
+    res.status(400).json({ error: 'target and message are required' });
+    return;
+  }
+  try {
+    res.json({ output: await runSgt(['nudge', target, message]) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/sling', async (req, res) => {
   const { rig, task, labels, convoy } = req.body;
   if (!rig || !task) {

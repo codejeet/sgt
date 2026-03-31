@@ -52,6 +52,9 @@ test("operator shell script consumes snapshot and tmux stream events", () => {
   assert.match(script, /streamFilters/);
   assert.match(script, /Tail All: On/);
   assert.match(script, /renderMonitorStream/);
+  assert.match(script, /renderStreamNudge/);
+  assert.match(script, /handlePaneNudgeSubmit/);
+  assert.match(script, /fetch\("\/api\/nudge"/);
   assert.match(script, /matchesStreamFilters/);
   assert.match(script, /maybePlayVoiceAnnouncement/);
   assert.match(script, /renderAlerts/);
@@ -80,6 +83,8 @@ test("operator shell styles reflect the blue-on-black operator theme and vertica
   assert.match(styles, /grid-template-columns:\s*repeat\(auto-fit, minmax\(220px, 1fr\)\)/);
   assert.match(styles, /grid-auto-rows:\s*minmax\(var\(--stream-height\), auto\)/);
   assert.match(styles, /border-top:\s*2px solid rgba\(103, 183, 255, 0\.7\)/);
+  assert.match(styles, /\.stream-nudge\s*\{/);
+  assert.match(styles, /grid-template-columns:\s*minmax\(0, 1fr\) auto/);
   assert.match(styles, /border-radius:\s*2px/);
   assert.doesNotMatch(styles, /Orbitron/);
   assert.doesNotMatch(styles, /backdrop-filter/);

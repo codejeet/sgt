@@ -19,6 +19,8 @@ const appState = {
   alertIdsSeen: new Set(),
   alertsBootstrapped: false,
   activeAnnouncement: null,
+  nudgeDrafts: new Map(),
+  nudgePending: new Set(),
   topology: {
     mode: "pending",
     renderer: null,
@@ -625,28 +627,30 @@ function presidentOutcomeLabel(event) {
 }
 
 function renderStreamDeck() {
+  const nudgeFocus = activeNudgeInputState();
   renderStreamFilters();
   const orderedTargets = Array.from(appState.desiredTargets);
   refs.streamSummary.textContent = `${orderedTargets.length} subscriptions`;
-  refs.overviewHero.innerHTML = renderHeroStream(rootStreamTarget());
-  refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || rootStreamTarget());
-  refs.mayorMonitor.innerHTML = renderMonitorStream(rootStreamTarget(), { focusable: false });
+  refs.overviewHero.innerHTML = renderHeroStream(rootStreamTarget(), "overview");
+  refs.focusStream.innerHTML = renderHeroStream(appState.focusTarget || rootStreamTarget(), "focus");
+  refs.mayorMonitor.innerHTML = renderMonitorStream(rootStreamTarget(), { focusable: false, paneKey: "leadership" });
 
   const focusTarget = appState.focusTarget || rootStreamTarget();
   const visibleWorkers = monitorWorkers().filter(matchesStreamFilters);
   const wallWorkers = visibleWorkers.filter((worker) => worker.stream && worker.stream.target !== focusTarget);
   refs.monitorWallSummary.textContent = `${wallWorkers.length} panes visible`;
   refs.monitorWall.innerHTML = wallWorkers.length > 0
-    ? wallWorkers.map((worker) => renderMonitorStream(worker.stream.target, { focusable: true })).join("")
+    ? wallWorkers.map((worker) => renderMonitorStream(worker.stream.target, { focusable: true, paneKey: `wall:${worker.stream.target}` })).join("")
     : `<div class="empty-state">No worker streams match the current monitor filters.</div>`;
 
   bindStreamActions(refs.focusStream);
   bindStreamActions(refs.overviewHero);
   bindStreamActions(refs.mayorMonitor);
   bindStreamActions(refs.monitorWall);
+  restoreNudgeInputState(nudgeFocus);
 }
 
-function renderHeroStream(target) {
+function renderHeroStream(target, paneKey) {
   const stream = streamFor(target);
   const details = streamDetail(target);
   return `
@@ -664,6 +668,7 @@ function renderHeroStream(target) {
         </div>
       </div>
       <div class="stream-body" data-stream-target="${escAttr(target)}">${esc(stream.content || "Waiting for tmux stream data...")}</div>
+      ${renderStreamNudge(target, paneKey)}
     </article>
   `;
 }
@@ -688,6 +693,7 @@ function renderMonitorStream(target, options = {}) {
         </div>
       </div>
       <div class="stream-body" data-stream-target="${escAttr(target)}">${esc(stream.content || "Waiting for tmux stream data...")}</div>
+      ${renderStreamNudge(target, options.paneKey || target)}
     </article>
   `;
 }
@@ -710,6 +716,14 @@ function bindStreamActions(root) {
       appState.streams.set(stream.target, stream);
       renderStreamDeck();
     });
+  });
+  root.querySelectorAll("[data-nudge-input]").forEach((input) => {
+    input.addEventListener("input", () => {
+      appState.nudgeDrafts.set(input.dataset.nudgeInput, input.value);
+    });
+  });
+  root.querySelectorAll("[data-nudge-form]").forEach((form) => {
+    form.addEventListener("submit", handlePaneNudgeSubmit);
   });
   root.querySelectorAll("[data-stream-target]").forEach((el) => {
     const stream = appState.streams.get(el.dataset.streamTarget);
@@ -734,6 +748,89 @@ function streamFor(target) {
     lastEventAt: 0,
     session: "",
   };
+}
+
+function renderStreamNudge(target, paneKey) {
+  if (!canNudgeTarget(target)) return "";
+  const draft = nudgeDraft(target);
+  const pending = isNudgePending(target);
+  return `
+    <form class="stream-nudge" data-nudge-form="${escAttr(target)}" data-nudge-pane="${escAttr(paneKey)}">
+      <label class="stream-nudge-label">Nudge this pane</label>
+      <div class="stream-nudge-controls">
+        <input
+          type="text"
+          data-nudge-input="${escAttr(target)}"
+          data-nudge-pane="${escAttr(paneKey)}"
+          value="${escAttr(draft)}"
+          placeholder="Send a scoped nudge to ${escAttr(target)}"
+          aria-label="Nudge ${escAttr(target)}"
+          autocomplete="off"
+          ${pending ? "disabled" : ""}
+        >
+        <button class="btn tiny" type="submit" ${pending || !draft.trim() ? "disabled" : ""}>${pending ? "Sending..." : "Nudge"}</button>
+      </div>
+    </form>
+  `;
+}
+
+function canNudgeTarget(target) {
+  return Boolean(target && hasTarget(target));
+}
+
+function nudgeDraft(target) {
+  return appState.nudgeDrafts.get(target) || "";
+}
+
+function isNudgePending(target) {
+  return appState.nudgePending.has(target);
+}
+
+async function handlePaneNudgeSubmit(event) {
+  event.preventDefault();
+  const target = event.currentTarget.dataset.nudgeForm;
+  const message = nudgeDraft(target).trim();
+  if (!target || !message || isNudgePending(target)) return;
+
+  appState.nudgePending.add(target);
+  renderStreamDeck();
+  try {
+    const response = await fetch("/api/nudge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, message }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Nudge failed");
+    appState.nudgeDrafts.delete(target);
+    toast(`Nudged ${target}.`, "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    appState.nudgePending.delete(target);
+    renderStreamDeck();
+  }
+}
+
+function activeNudgeInputState() {
+  const active = document.activeElement;
+  if (!active || !active.dataset || !active.dataset.nudgeInput || !active.dataset.nudgePane) return null;
+  return {
+    target: active.dataset.nudgeInput,
+    paneKey: active.dataset.nudgePane,
+    start: typeof active.selectionStart === "number" ? active.selectionStart : null,
+    end: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+  };
+}
+
+function restoreNudgeInputState(state) {
+  if (!state || isNudgePending(state.target)) return;
+  const input = document.querySelector(`[data-nudge-pane="${cssEscape(state.paneKey)}"]`);
+  if (!input) return;
+  input.focus();
+  if (typeof state.start === "number" && typeof state.end === "number") {
+    input.setSelectionRange(state.start, state.end);
+  }
 }
 
 function handleStreamFilterChange() {
@@ -1565,4 +1662,11 @@ function esc(value) {
 
 function escAttr(value) {
   return esc(value).replace(/"/g, "&quot;");
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }

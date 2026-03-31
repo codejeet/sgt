@@ -9473,8 +9473,13 @@ cmd_nudge() {
   local session=""
   case "$target" in
     deacon)        session="sgt-deacon" ;;
+    president)     session="sgt-president" ;;
+    mayor)         session="sgt-mayor" ;;
+    mayor/*)       session="sgt-mayor-${target#mayor/}" ;;
     witness/*)     session="sgt-witness-${target#witness/}" ;;
     refinery/*)    session="sgt-refinery-${target#refinery/}" ;;
+    crew/*)        session="sgt-crew-${target#crew/}" ;;
+    dog/*)         session="sgt-${target#dog/}" ;;
     *)             session="sgt-${target}" ;;
   esac
 
