@@ -411,7 +411,7 @@ function renderAlerts() {
   const alerts = appState.cockpit.alerts || [];
   updateVoiceStatus();
   if (alerts.length === 0) {
-    refs.alertRail.innerHTML = `<div class="empty-state">Recent blocker transitions and milestone alerts will appear here.</div>`;
+    refs.alertRail.innerHTML = `<div class="empty-state">Recent President incidents, blocker transitions, and milestone alerts will appear here.</div>`;
     return;
   }
 
@@ -424,8 +424,10 @@ function renderAlerts() {
       <div class="blocker-meta">
         <span>${esc(alert.rig || "unknown rig")}</span>
         <span>${esc(formatIso(alert.createdAt))}</span>
+        <span>${esc(alert.source === "president" ? "President" : "Blocker")}</span>
         <span>${esc(alertVoiceLabel(alert))}</span>
       </div>
+      ${alert.detail ? `<p>${esc(snippet(alert.detail, 180))}</p>` : ""}
     </article>
   `).join("");
 }

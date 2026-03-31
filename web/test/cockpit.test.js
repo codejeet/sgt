@@ -4,9 +4,11 @@ const assert = require('node:assert/strict');
 const {
   BlockerAlertTracker,
   TmuxStreamManager,
+  buildCockpitAlerts,
   buildCockpitSnapshot,
   captureStreamTarget,
   computeStreamDelta,
+  parsePresidentOperatorEvents,
   resolveMayorLogPath,
   resolveMayorRuntimeDir,
   resolveMayorSessionName,
@@ -169,6 +171,46 @@ test('BlockerAlertTracker records blocker opens and resolutions with voice gatin
   assert.equal(eventsAfterResolve[0].rig, 'sgt');
   assert.equal(eventsAfterResolve[0].voice.eligible, true);
   assert.match(eventsAfterResolve[0].voice.text, /No open blockers remain on this rig|All acceptance blockers are clear/);
+});
+
+test('parsePresidentOperatorEvents keeps only the latest actionable President incident per overlap key', () => {
+  const alerts = parsePresidentOperatorEvents([
+    '[2026-03-31T22:00:00Z] PRESIDENT_OPERATOR_EVENT rig=sgt kind=stalled-purpose severity=warning notify=1 dedupe_key=president:sgt:stalled-purpose:actionable-no-forward-motion:refresh overlap_key=rig-incident:sgt:actionable-no-forward-motion action=refresh reason=actionable-no-forward-motion outcome=intervened detail="old issue"',
+    '[2026-03-31T22:01:00Z] PRESIDENT_OPERATOR_EVENT rig=sgt kind=intervention severity=info notify=0 dedupe_key=president:sgt:intervention:actionable-rig-recheck:wake overlap_key=rig-incident:sgt:actionable-no-forward-motion action=wake reason=actionable-rig-recheck outcome=intervened detail="quiet recheck"',
+    '[2026-03-31T22:02:00Z] PRESIDENT_INTERVENTION rig=pmkb action=start reason=mayor-session-missing detail="session=off" cycle_trigger="periodic"',
+    '[2026-03-31T22:03:00Z] PRESIDENT_OPERATOR_EVENT rig=pmkb kind=intervention severity=warning notify=1 dedupe_key=president:pmkb:intervention:mayor-session-missing:start overlap_key=mayor-health:pmkb:mayor-session-missing action=start reason=mayor-session-missing outcome=suppressed-by-cooldown detail="same incident"',
+  ]);
+
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].rig, 'pmkb');
+  assert.equal(alerts[0].kind, 'intervention');
+  assert.equal(alerts[0].message, 'President start mayor/pmkb: mayor session missing');
+  assert.equal(alerts[1].rig, 'sgt');
+  assert.equal(alerts[1].kind, 'stalled-purpose');
+});
+
+test('buildCockpitAlerts merges President alerts with blocker transitions in recency order', () => {
+  const alerts = buildCockpitAlerts({
+    blockerAlerts: [
+      {
+        id: 'alert:blocker',
+        kind: 'blocker-opened',
+        severity: 'critical',
+        createdAt: '2026-03-31T22:01:00Z',
+        rig: 'sgt',
+        message: 'sgt blocker opened: Acceptance still red',
+        voice: { enabled: false, eligible: false, reason: 'not-configured' },
+      },
+    ],
+    recentLogs: [
+      '[2026-03-31T22:03:00Z] PRESIDENT_OPERATOR_EVENT rig=pmkb kind=escalation severity=critical notify=1 dedupe_key=president:pmkb:escalation:manual-review-needed:refresh overlap_key=president-incident:pmkb:escalation:manual-review-needed action=refresh reason=manual-review-needed outcome=intervened detail="need a human"',
+    ],
+  });
+
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].source, 'president');
+  assert.equal(alerts[0].kind, 'escalation');
+  assert.equal(alerts[1].id, 'alert:blocker');
 });
 
 test('computeStreamDelta emits append-only chunks when possible and reset on divergence', () => {

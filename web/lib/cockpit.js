@@ -33,6 +33,22 @@ function tryReadJson(filePath) {
   }
 }
 
+function parseLogfmt(text = '') {
+  const fields = {};
+  const pattern = /([A-Za-z0-9_]+)=("(?:[^"\\]|\\.)*"|[^\s]+)/g;
+  let match;
+  while ((match = pattern.exec(String(text || '')))) {
+    let value = match[2] || '';
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1)
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+    }
+    fields[match[1]] = value;
+  }
+  return fields;
+}
+
 function parseStatus(raw) {
   const result = { agents: [], polecats: [], dogs: [], crew: [], mergeQueue: [] };
   let section = null;
@@ -210,6 +226,129 @@ function blockerAlertMessage(kind, blocker, context = {}) {
     return `${rig} blocker resolved: ${blocker.title}`;
   }
   return `${rig} blocker updated: ${blocker.title}`;
+}
+
+function presidentReasonLabel(reason = '') {
+  const raw = String(reason || '').trim();
+  if (!raw) return 'operator attention';
+  return raw.replace(/[-_]+/g, ' ');
+}
+
+function presidentOperatorEventKind(reason = '', action = '') {
+  const normalizedReason = String(reason || '');
+  if (/drift/i.test(normalizedReason)) return 'drift';
+  if (normalizedReason === 'actionable-no-forward-motion' || /stalled-purpose/i.test(normalizedReason)) return 'stalled-purpose';
+  if (/contradict/i.test(normalizedReason)) return 'contradiction';
+  if (/escalat/i.test(normalizedReason)) return 'escalation';
+  if (/^(human-question|needs-human-input|need-human-input|question-for-human)/.test(normalizedReason)) return 'human-question';
+  if (normalizedReason === 'mayor-session-missing' || normalizedReason.startsWith('mayor-heartbeat-') || normalizedReason === 'actionable-rig-recheck') {
+    return 'intervention';
+  }
+  if (action === 'start' || action === 'refresh' || action === 'wake') return 'intervention';
+  return 'unknown';
+}
+
+function presidentOperatorSeverity(kind = '', reason = '') {
+  if (kind === 'escalation') return 'critical';
+  if (['contradiction', 'drift', 'stalled-purpose', 'human-question'].includes(kind)) return 'warning';
+  if (kind === 'intervention') return reason === 'actionable-rig-recheck' ? 'info' : 'warning';
+  return 'info';
+}
+
+function presidentOperatorNotifyEnabled(kind = '', reason = '') {
+  if (['drift', 'stalled-purpose', 'contradiction', 'escalation', 'human-question'].includes(kind)) return true;
+  if (kind === 'intervention') return reason !== 'actionable-rig-recheck';
+  return false;
+}
+
+function presidentOperatorDedupeKey(rig = '', kind = '', reason = '', action = '') {
+  return `president:${rig || 'unknown'}:${kind || 'unknown'}:${reason || 'unknown'}:${action || 'unknown'}`;
+}
+
+function presidentOperatorOverlapKey(rig = '', kind = '', reason = '') {
+  if (reason === 'actionable-no-forward-motion' || reason === 'actionable-rig-recheck') {
+    return `rig-incident:${rig || 'unknown'}:actionable-no-forward-motion`;
+  }
+  if (reason === 'mayor-session-missing' || String(reason || '').startsWith('mayor-heartbeat-')) {
+    return `mayor-health:${rig || 'unknown'}:${reason || 'unknown'}`;
+  }
+  return `president-incident:${rig || 'unknown'}:${kind || 'unknown'}:${reason || 'unknown'}`;
+}
+
+function presidentAlertMessage(event) {
+  const rig = event.rig || 'unknown rig';
+  const reasonLabel = presidentReasonLabel(event.reason);
+  if (event.kind === 'stalled-purpose') return `President flagged ${rig}: ${reasonLabel}`;
+  if (event.kind === 'drift') return `President flagged ${rig} drift: ${reasonLabel}`;
+  if (event.kind === 'contradiction') return `President flagged ${rig} contradiction: ${reasonLabel}`;
+  if (event.kind === 'escalation') return `President escalated ${rig}: ${reasonLabel}`;
+  if (event.kind === 'human-question') return `President needs input on ${rig}: ${reasonLabel}`;
+  if (event.kind === 'intervention') return `President ${event.action || 'acted on'} mayor/${rig}: ${reasonLabel}`;
+  return `President flagged ${rig}: ${reasonLabel}`;
+}
+
+function parsePresidentOperatorEvents(lines = [], { historyLimit = 12 } = {}) {
+  const events = [];
+  const seenIncidentKeys = new Set();
+
+  for (const line of [...lines].reverse()) {
+    const match = String(line || '').match(/^\[([^\]]+)\]\s+(PRESIDENT_OPERATOR_EVENT|PRESIDENT_INTERVENTION)\s+(.*)$/);
+    if (!match) continue;
+
+    const createdAt = match[1];
+    const eventType = match[2];
+    const fields = parseLogfmt(match[3]);
+    const rig = fields.rig || '';
+    const action = fields.action || '';
+    const reason = fields.reason || '';
+    const kind = eventType === 'PRESIDENT_OPERATOR_EVENT'
+      ? (fields.kind || presidentOperatorEventKind(reason, action))
+      : presidentOperatorEventKind(reason, action);
+    const severity = eventType === 'PRESIDENT_OPERATOR_EVENT'
+      ? (fields.severity || presidentOperatorSeverity(kind, reason))
+      : presidentOperatorSeverity(kind, reason);
+    const notify = eventType === 'PRESIDENT_OPERATOR_EVENT'
+      ? String(fields.notify || '') === '1'
+      : presidentOperatorNotifyEnabled(kind, reason);
+    const outcome = fields.outcome || 'intervened';
+
+    if (!notify || outcome === 'suppressed-by-cooldown') continue;
+
+    const dedupeKey = fields.dedupe_key || presidentOperatorDedupeKey(rig, kind, reason, action);
+    const overlapKey = fields.overlap_key || presidentOperatorOverlapKey(rig, kind, reason);
+    const incidentKey = overlapKey || dedupeKey;
+    if (seenIncidentKeys.has(incidentKey)) continue;
+    seenIncidentKeys.add(incidentKey);
+
+    events.push({
+      id: `alert:president:${createdAt}:${dedupeKey}`,
+      source: 'president',
+      kind,
+      severity,
+      createdAt,
+      rig,
+      action,
+      reason,
+      outcome,
+      detail: fields.detail || '',
+      cycleTrigger: fields.cycle_trigger || '',
+      dedupeKey,
+      overlapKey,
+      message: presidentAlertMessage({ rig, kind, action, reason }),
+      voice: { enabled: false, eligible: false, reason: 'not-configured', text: '' },
+    });
+
+    if (events.length >= historyLimit) break;
+  }
+
+  return events;
+}
+
+function buildCockpitAlerts({ blockerAlerts = [], recentLogs = [], presidentHistoryLimit = 12, alertLimit = 24 } = {}) {
+  const presidentAlerts = parsePresidentOperatorEvents(recentLogs, { historyLimit: presidentHistoryLimit });
+  return [...presidentAlerts, ...blockerAlerts]
+    .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+    .slice(0, alertLimit);
 }
 
 class BlockerAlertTracker {
@@ -1040,10 +1179,12 @@ module.exports = {
   BlockerAlertTracker,
   TmuxStreamManager,
   buildCockpitSnapshot,
+  buildCockpitAlerts,
   captureStreamTarget,
   computeStreamDelta,
   listStateEntries,
   parseStatus,
+  parsePresidentOperatorEvents,
   readAcceptanceBlockers,
   readDir,
   readRecentLogLines,
