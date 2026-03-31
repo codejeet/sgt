@@ -235,6 +235,59 @@ test('buildCockpitAlerts merges President alerts with blocker transitions in rec
   assert.equal(alerts[1].id, 'alert:blocker');
 });
 
+test('buildCockpitAlerts defaults to recent and actionable items instead of stale overflow', () => {
+  const alerts = buildCockpitAlerts({
+    now: '2026-03-31T22:10:00Z',
+    blockerAlerts: [
+      {
+        id: 'alert:blocker:stale-resolved',
+        blockerId: 'b-old',
+        kind: 'blocker-resolved',
+        severity: 'good',
+        createdAt: '2026-03-30T10:00:00Z',
+        rig: 'sgt',
+        title: 'Very old resolved blocker',
+        status: 'open',
+        message: 'sgt blocker resolved: old noise',
+        voice: { enabled: false, eligible: false, reason: 'not-configured' },
+      },
+      {
+        id: 'alert:blocker:open-old',
+        blockerId: 'b-open',
+        kind: 'blocker-opened',
+        severity: 'critical',
+        createdAt: '2026-03-29T23:00:00Z',
+        rig: 'pmkb',
+        title: 'Open blocker still needs operator attention',
+        status: 'open',
+        message: 'pmkb blocker opened: Open blocker still needs operator attention',
+        voice: { enabled: false, eligible: false, reason: 'not-configured' },
+      },
+      {
+        id: 'alert:blocker:followup-newer',
+        blockerId: 'b-open',
+        kind: 'blocker-followup',
+        severity: 'warning',
+        createdAt: '2026-03-31T22:06:00Z',
+        rig: 'pmkb',
+        title: 'Open blocker still needs operator attention',
+        status: 'needs-followup',
+        message: 'pmkb blocker needs follow-up: Open blocker still needs operator attention',
+        voice: { enabled: false, eligible: false, reason: 'not-configured' },
+      },
+    ],
+    recentLogs: [
+      '[2026-03-31T22:08:00Z] PRESIDENT_OPERATOR_EVENT rig=sgt kind=human-question severity=warning notify=1 dedupe_key=president:sgt:human-question:needs-human-input:refresh overlap_key=president-incident:sgt:human-question:needs-human-input action=refresh reason=needs-human-input outcome=intervened detail="need operator judgment"',
+      '[2026-03-30T05:00:00Z] PRESIDENT_OPERATOR_EVENT rig=sgt kind=intervention severity=info notify=1 dedupe_key=president:sgt:intervention:mayor-session-missing:start overlap_key=mayor-health:sgt:mayor-session-missing action=start reason=mayor-session-missing outcome=intervened detail="stale old intervention"',
+    ],
+  });
+
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].kind, 'human-question');
+  assert.equal(alerts[1].kind, 'blocker-followup');
+  assert.equal(alerts[1].blockerId, 'b-open');
+});
+
 test('computeStreamDelta emits append-only chunks when possible and reset on divergence', () => {
   assert.deepEqual(computeStreamDelta('', 'abc'), { changed: true, reset: true, chunk: 'abc' });
   assert.deepEqual(computeStreamDelta('abc', 'abcdef'), { changed: true, reset: false, chunk: 'def' });

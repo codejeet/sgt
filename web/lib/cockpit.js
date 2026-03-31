@@ -344,10 +344,76 @@ function parsePresidentOperatorEvents(lines = [], { historyLimit = 12 } = {}) {
   return events;
 }
 
-function buildCockpitAlerts({ blockerAlerts = [], recentLogs = [], presidentHistoryLimit = 12, alertLimit = 24 } = {}) {
+function parseTimestampMs(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isUnresolvedBlockerAlert(alert = {}) {
+  return (alert.kind === 'blocker-opened' || alert.kind === 'blocker-followup')
+    && (alert.status === 'open' || alert.status === 'needs-followup');
+}
+
+function alertActionabilityScore(alert = {}) {
+  if (isUnresolvedBlockerAlert(alert)) {
+    return alert.kind === 'blocker-followup' ? 6 : 5;
+  }
+  if (alert.source === 'president') {
+    if (alert.kind === 'human-question' || alert.kind === 'escalation') return 6;
+    if (alert.kind === 'drift' || alert.kind === 'contradiction' || alert.kind === 'stalled-purpose') return 5;
+    if (alert.kind === 'intervention') return alert.severity === 'warning' ? 4 : 2;
+  }
+  if (alert.kind === 'blocker-resolved') return 1;
+  if (alert.severity === 'critical') return 4;
+  if (alert.severity === 'warning') return 3;
+  return 2;
+}
+
+function alertRecencyWindowMs(alert = {}) {
+  if (alert.kind === 'blocker-resolved' || alert.severity === 'good') return 6 * 60 * 60 * 1000;
+  if (alert.kind === 'intervention' && alert.severity === 'info') return 6 * 60 * 60 * 1000;
+  if (alertActionabilityScore(alert) >= 5) return 72 * 60 * 60 * 1000;
+  return 24 * 60 * 60 * 1000;
+}
+
+function keepAlertByDefault(alert = {}, nowMs) {
+  const createdAtMs = parseTimestampMs(alert.createdAt);
+  if (!createdAtMs) return false;
+  const ageMs = Math.max(0, nowMs - createdAtMs);
+  return ageMs <= alertRecencyWindowMs(alert);
+}
+
+function dedupeBlockerAlerts(alerts = []) {
+  const latestByBlocker = new Map();
+  const passthrough = [];
+  for (const alert of alerts) {
+    if (!alert) continue;
+    if (!alert.blockerId) {
+      passthrough.push(alert);
+      continue;
+    }
+    const existing = latestByBlocker.get(alert.blockerId);
+    if (!existing || String(alert.createdAt || '').localeCompare(String(existing.createdAt || '')) > 0) {
+      latestByBlocker.set(alert.blockerId, alert);
+    }
+  }
+  return [...passthrough, ...Array.from(latestByBlocker.values())];
+}
+
+function compareCockpitAlerts(left, right) {
+  const scoreDelta = alertActionabilityScore(right) - alertActionabilityScore(left);
+  if (scoreDelta !== 0) return scoreDelta;
+  return String(right.createdAt || '').localeCompare(String(left.createdAt || ''));
+}
+
+function buildCockpitAlerts({ blockerAlerts = [], recentLogs = [], presidentHistoryLimit = 12, alertLimit = 24, now = Date.now() } = {}) {
   const presidentAlerts = parsePresidentOperatorEvents(recentLogs, { historyLimit: presidentHistoryLimit });
-  return [...presidentAlerts, ...blockerAlerts]
-    .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')))
+  const nowMs = typeof now === 'number' ? now : parseTimestampMs(now);
+  const dedupedBlockerAlerts = dedupeBlockerAlerts(blockerAlerts);
+
+  return [...presidentAlerts, ...dedupedBlockerAlerts]
+    .filter((alert) => keepAlertByDefault(alert, nowMs))
+    .sort(compareCockpitAlerts)
     .slice(0, alertLimit);
 }
 
