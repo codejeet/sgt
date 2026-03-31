@@ -5243,6 +5243,8 @@ _refinery_merge_error_class() {
     echo "http-5xx"
   elif [[ "$lc" =~ connection[[:space:]]+reset|connection[[:space:]]+refused|network[[:space:]]+is[[:space:]]+unreachable|temporary[[:space:]]+failure|no[[:space:]]+such[[:space:]]+host|tls|eof|i/o[[:space:]]+timeout|context[[:space:]]+canceled ]]; then
     echo "network"
+  elif [[ "$lc" =~ merge[[:space:]-]*already[[:space:]-]*in[[:space:]-]*progress|mergepullrequest ]]; then
+    echo "merge-in-progress"
   elif [[ "$lc" =~ merge[[:space:]-]*conflict|not[[:space:]]+mergeable|conflicting[[:space:]]+files|cannot[[:space:]]+be[[:space:]]+merged ]]; then
     echo "merge-conflict"
   else
@@ -5259,7 +5261,7 @@ _refinery_merge_error_is_conflict() {
 _refinery_merge_error_is_transient() {
   local klass="${1:-}"
   case "$klass" in
-    timeout|network|http-5xx|secondary-rate-limit) return 0 ;;
+    timeout|network|http-5xx|secondary-rate-limit|merge-in-progress) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -11158,6 +11160,7 @@ _refinery_loop() {
           _notify_openclaw "[SGT Refinery] merge failed rig=$rig repo=$mq_owner_repo pr=#$mq_pr issue=#$mq_issue attempts=$merge_attempt/$max_attempts error_class=$merge_error_class transient=$merge_error_transient pr_url=$mq_pr_url issue_url=$mq_issue_url" "$rig"
           gh pr comment "$mq_pr" --repo "$mq_repo" \
             --body "[sgt-refinery] Auto-merge failed after ${merge_attempt}/${max_attempts} attempt(s) (class=${merge_error_class}, transient=${merge_error_transient}): \`$merge_result\`" 2>/dev/null || true
+          _refinery_merge_attempt_release "$claimed_attempt_file"
         fi
       elif [[ "$review_rc" -eq 2 ]]; then
         local unclear_since unclear_age now_epoch unclear_reason unclear_class
