@@ -11,5 +11,6 @@ bash "$REPO_ROOT/test_president_runtime_supervision.sh"
 bash "$REPO_ROOT/test_peek_mayor_log_fallback.sh"
 bash "$REPO_ROOT/test_web_cockpit_control_plane_hierarchy.sh"
 bash "$REPO_ROOT/test_president_per_rig_mayor_contract.sh"
+bash "$REPO_ROOT/test_president_operator_notify_contract.sh"
 
 echo "ALL TESTS PASSED"

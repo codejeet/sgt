@@ -566,6 +566,7 @@ Optional per-rig Mayor architecture:
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
 - Entering per-rig mode safely retires any leftover shared `sgt-mayor` session and archives only shared Mayor transient files under `~/.sgt/president/cutovers/<token>/`, leaving durable blocker, plan-state, polecat, and scoped mayor truth in place.
 - President performs bounded supervision only: if a rig-local Mayor is missing, stale, or an actionable rig has no healthy forward motion, President starts, wakes, or refreshes that one Mayor instead of taking over routine repo work directly.
+- President also emits structured `PRESIDENT_OPERATOR_EVENT` records that normalize important cross-rig incidents into stable kinds (`drift`, `stalled-purpose`, `contradiction`, `intervention`, `escalation`, `human-question`) with both a President replay `dedupe_key` and a cross-layer `overlap_key`; low-signal rechecks stay log-only. See [`docs/president-operator-notify-contract.md`](docs/president-operator-notify-contract.md).
 
 President/per-rig Mayor architecture contract:
 - The runtime hierarchy in per-rig mode is `President -> mayor/<rig> -> rig-local workers`.
@@ -582,6 +583,7 @@ Latest-main proof for this hierarchy:
 
 That proof path verifies the documented contract, shared-to-per-rig cutover guardrails, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
 It also proves the Web UI keeps `president` and `mayor/<rig>` directly inspectable as separate control-plane nodes.
+It also covers the repo-owned President operator-notify model and dedupe contract.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
