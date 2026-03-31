@@ -21,6 +21,23 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
         { name: 'daemon', status: 'on' },
         { name: 'mayor', role: 'mayor', scope: 'global', status: 'on', heartbeat: { state: 'ok' } },
       ],
+      president_events: [
+        {
+          ts: '1775000000',
+          created_at: '2026-03-31T22:04:00Z',
+          rig: 'sgt',
+          kind: 'intervention',
+          severity: 'warning',
+          notify: true,
+          dedupe_key: 'president:sgt:intervention:mayor-heartbeat-stale:refresh',
+          overlap_key: 'mayor-health:sgt:mayor-heartbeat-stale',
+          action: 'refresh',
+          reason: 'mayor-heartbeat-stale',
+          outcome: 'intervened',
+          cycle_trigger: 'periodic',
+          detail: 'heartbeat_age=1200s threshold=720s',
+        },
+      ],
       mayor_rigs: [
         {
           rig: 'sgt',
@@ -102,6 +119,11 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.queue.summary.total, 1);
   assert.equal(snapshot.blockers[0].title, 'Acceptance still red');
   assert.equal(snapshot.alerts[0].kind, 'blocker-opened');
+  assert.equal(snapshot.president.events.length, 1);
+  assert.equal(snapshot.president.events[0].notify, true);
+  assert.equal(snapshot.president.events[0].action, 'refresh');
+  assert.equal(snapshot.president.events[0].reason, 'mayor-heartbeat-stale');
+  assert.equal(snapshot.president.events[0].outcome, 'intervened');
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'rig:sgt'));
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'issue:sgt:264'));
   assert.ok(snapshot.topology.nodes.some((node) => node.id === 'queue:sgt-pr264'));

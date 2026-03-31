@@ -195,6 +195,10 @@ _president_intervention_state_file() {
   printf '%s/president-interventions.tsv\n' "$(_president_runtime_dir)"
 }
 
+_president_operator_events_file() {
+  printf '%s/president-operator-events.tsv\n' "$(_president_runtime_dir)"
+}
+
 _president_refresh_handoffs_dir() {
   printf '%s/handoffs\n' "$(_president_runtime_dir)"
 }
@@ -220,6 +224,7 @@ _president_refresh_transient_entries() {
 president-exit.state
 president-heartbeat.json
 president-interventions.tsv
+president-operator-events.tsv
 president-start.log
 EOF
 }
@@ -1050,6 +1055,74 @@ _president_intervention_state_write() {
       "$(_escape_wake_value "$action")"
   } > "$state_tmp"
   mv "$state_tmp" "$state_file"
+}
+
+_president_operator_event_state_append() {
+  local rig="${1:-}" kind="${2:-unknown}" severity="${3:-info}" notify_flag="${4:-0}" dedupe_key="${5:-}" overlap_key="${6:-}"
+  local action="${7:-unknown}" reason="${8:-unknown}" outcome="${9:-unknown}" cycle_reason="${10:-periodic}" detail="${11:-}"
+  local state_file state_tmp keep_limit existing_limit now_epoch now_iso
+  state_file="$(_president_operator_events_file)"
+  state_tmp="${state_file}.tmp.$$"
+  keep_limit="${SGT_PRESIDENT_OPERATOR_EVENT_HISTORY_LIMIT:-200}"
+  [[ "$keep_limit" =~ ^[0-9]+$ ]] || keep_limit=200
+  (( keep_limit < 1 )) && keep_limit=1
+  existing_limit=$((keep_limit - 1))
+  now_epoch="$(date +%s)"
+  now_iso="$(date -Iseconds)"
+  mkdir -p "$(dirname "$state_file")"
+  {
+    if [[ -f "$state_file" && "$existing_limit" -gt 0 ]]; then
+      tail -n "$existing_limit" "$state_file" 2>/dev/null || true
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$now_epoch" \
+      "$(_escape_wake_value "$now_iso")" \
+      "$(_escape_wake_value "$rig")" \
+      "$(_escape_wake_value "$kind")" \
+      "$(_escape_wake_value "$severity")" \
+      "$(_escape_wake_value "$notify_flag")" \
+      "$(_escape_wake_value "$dedupe_key")" \
+      "$(_escape_wake_value "$overlap_key")" \
+      "$(_escape_wake_value "$action")" \
+      "$(_escape_wake_value "$reason")" \
+      "$(_escape_wake_value "$outcome")" \
+      "$(_escape_wake_value "$cycle_reason")" \
+      "$(_escape_wake_value "$detail")"
+  } > "$state_tmp"
+  mv "$state_tmp" "$state_file"
+}
+
+_president_operator_event_rows() {
+  local limit="${1:-5}" state_file
+  [[ "$limit" =~ ^[0-9]+$ ]] || limit=5
+  (( limit > 0 )) || return 0
+  state_file="$(_president_operator_events_file)"
+  [[ -f "$state_file" ]] || return 0
+  tail -n "$limit" "$state_file" 2>/dev/null | tac
+}
+
+_president_operator_events_json() {
+  local limit="${1:-10}" events=()
+  local ts iso rig kind severity notify_flag dedupe_key overlap_key action reason outcome cycle_trigger detail notify_json
+  while IFS=$'\t' read -r ts iso rig kind severity notify_flag dedupe_key overlap_key action reason outcome cycle_trigger detail; do
+    [[ -n "$ts" ]] || continue
+    notify_json="false"
+    [[ "$notify_flag" == "1" ]] && notify_json="true"
+    events+=("{\"ts\":$(_json_quote "$ts"),\"created_at\":$(_json_quote "$iso"),\"rig\":$(_json_quote "$rig"),\"kind\":$(_json_quote "$kind"),\"severity\":$(_json_quote "$severity"),\"notify\":$notify_json,\"dedupe_key\":$(_json_quote "$dedupe_key"),\"overlap_key\":$(_json_quote "$overlap_key"),\"action\":$(_json_quote "$action"),\"reason\":$(_json_quote "$reason"),\"outcome\":$(_json_quote "$outcome"),\"cycle_trigger\":$(_json_quote "$cycle_trigger"),\"detail\":$(_json_quote "$detail")}")
+  done < <(_president_operator_event_rows "$limit")
+  _json_print_array "${events[@]}"
+}
+
+_president_operator_events_human() {
+  local limit="${1:-3}"
+  local ts iso rig kind severity notify_flag dedupe_key overlap_key action reason outcome cycle_trigger detail
+  while IFS=$'\t' read -r ts iso rig kind severity notify_flag dedupe_key overlap_key action reason outcome cycle_trigger detail; do
+    [[ -n "$ts" ]] || continue
+    printf '  %-16s %s%s%s\n' "" "$(_dim)" "president event: ${iso:-unknown} rig=${rig:-unknown} kind=${kind:-unknown} action=${action:-unknown} reason=${reason:-unknown} outcome=${outcome:-unknown} notify=${notify_flag:-0}" "$(_reset)"
+    if [[ -n "$detail" ]]; then
+      printf '  %-16s %s%s%s\n' "" "$(_dim)" "detail: $detail" "$(_reset)"
+    fi
+  done < <(_president_operator_event_rows "$limit")
 }
 
 _mayor_last_cycle_state_file() {
@@ -8366,6 +8439,9 @@ cmd_status_json() {
   printf '  "mayor_rigs": '
   _json_print_array "${mayor_rigs[@]}"
   printf ',\n'
+  printf '  "president_events": '
+  _president_operator_events_json 12
+  printf ',\n'
   printf '  "polecats": '
   _json_print_array "${polecats[@]}"
   printf ',\n'
@@ -8434,6 +8510,7 @@ _cmd_status_human() {
       (( president_exit_age < 0 )) && president_exit_age=0
       printf "  %-16s %s%s%s\n" "" "$(_fg_yellow)" "last exit: ${president_exit_age}s ago reason=$president_exit_reason signal=$president_exit_signal code=$president_exit_code unexpected=$president_exit_unexpected" "$(_reset)"
     fi
+    _president_operator_events_human 3
   fi
 
   for rig_file in "$SGT_RIGS"/*; do
@@ -11426,6 +11503,7 @@ _president_operator_log_event() {
   dedupe_key="$(_president_operator_dedupe_key "$rig" "$kind" "$reason" "$action")"
   overlap_key="$(_president_operator_overlap_key "$rig" "$kind" "$reason")"
 
+  _president_operator_event_state_append "$rig" "$kind" "$severity" "$notify_flag" "$dedupe_key" "$overlap_key" "$action" "$reason" "$outcome" "$cycle_reason" "$detail"
   log_event "PRESIDENT_OPERATOR_EVENT rig=$rig kind=$kind severity=$severity notify=$notify_flag dedupe_key=$dedupe_key overlap_key=$overlap_key action=$action reason=$reason outcome=$outcome cycle_trigger=\"$(_escape_quotes "$cycle_reason")\" detail=\"$(_escape_quotes "$detail")\""
 }
 
