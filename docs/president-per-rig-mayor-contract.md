@@ -127,6 +127,7 @@ Required invariants:
 
 - do not manufacture duplicate work during topology changes
 - preserve durable board, blocker, plan-state, and in-flight work truth
+- retire any leftover shared `sgt-mayor` session when per-rig mode becomes active, and archive only shared Mayor transient state under `~/.sgt/president/cutovers/`
 - keep hibernation semantics authoritative at rig scope
 - keep common operator actions coherent while shared-mode compatibility still exists
 - allow incremental rollout and rollback without orphaning recoverable rigs
@@ -140,6 +141,7 @@ This contract is only useful if the repo keeps proving it.
 Current proof for the transition:
 
 - `./test_mayor_per_rig_architecture.sh` proves the existing per-rig Mayor runtime contract: separate Mayor sessions, scoped status entries, and targeted wake routing
+- `./test_hierarchy_cutover_guardrails.sh` proves per-rig startup retires stale shared-Mayor transient state without disturbing durable rig truth
 - `./test_president_runtime_supervision.sh` proves deacon supervises President and President can perform a bounded per-rig refresh intervention without taking over routine rig work
 - `./test_peek_mayor_log_fallback.sh` proves `sgt peek president` and `sgt peek mayor/<rig>` both retain scoped log fallback behavior
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
@@ -148,6 +150,7 @@ Current proof for the transition:
 The latest-main proof for the active runtime now proves:
 
 - President runtime exists and is separately inspectable
+- shared-to-per-rig cutover archives stale shared Mayor transient state before it can duplicate work
 - status and peek surfaces distinguish `president` from `mayor/<rig>`
 - at least two rigs can appear under independent Mayors in status
 - President supervision can perform a justified per-rig unblock or recovery action without taking over routine rig-local ownership
