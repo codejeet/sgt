@@ -131,6 +131,10 @@ Required invariants:
 - keep common operator actions coherent while shared-mode compatibility still exists
 - allow incremental rollout and rollback without orphaning recoverable rigs
 
+Current cutover guardrail:
+
+- entering per-rig mode must retire any leftover legacy shared `sgt-mayor` session and archive shared Mayor transient assets separately from rig-local Mayor state, so stale shared snapshots/watchdogs cannot keep dispatching or compaction decisions alive after the hierarchy cutover
+
 The optional per-rig Mayor runtime already in the repo is the approved staging step for this migration, not the endpoint.
 
 ## Repo-Owned Proof Expectations
@@ -141,6 +145,7 @@ Current proof for the transition:
 
 - `./test_mayor_per_rig_architecture.sh` proves the existing per-rig Mayor runtime contract: separate Mayor sessions, scoped status entries, and targeted wake routing
 - `./test_president_runtime_supervision.sh` proves deacon supervises President and President can perform a bounded per-rig refresh intervention without taking over routine rig work
+- `./test_president_cutover_migration_guard.sh` proves the hierarchy cutover retires the legacy shared Mayor, archives only shared Mayor transient state, and preserves durable rig truth
 - `./test_peek_mayor_log_fallback.sh` proves `sgt peek president` and `sgt peek mayor/<rig>` both retain scoped log fallback behavior
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
 - `./test_president_runtime_latest_main_proof.sh` bundles the runtime, surface, and contract checks as the latest-main proof for the active hierarchy
