@@ -148,7 +148,9 @@ Current proof for the transition:
 - `./test_web_cockpit_control_plane_hierarchy.sh` proves the Web UI topology keeps `president` and `mayor/<rig>` separately inspectable
 - `./test_president_per_rig_mayor_contract.sh` proves the architecture contract remains documented in-repo
 - `./test_president_operator_notify_contract.sh` proves the President operator-notify event model and dedupe rules remain documented in-repo
+- `./test_president_operator_surface_contract.sh` proves the operator-facing status, peek, and Web UI surface contract remains documented in-repo
 - `./test_president_runtime_latest_main_proof.sh` bundles the runtime, surface, and contract checks as the latest-main proof for the active hierarchy
+- `./test_president_operator_surface_latest_main_proof.sh` bundles the hierarchy proof with `status --json` President event history and the cockpit rendering contract for the full operator-surface pass
 
 The latest-main proof for the active runtime now proves:
 
