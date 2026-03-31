@@ -31,6 +31,9 @@ eval "$(extract_fn _president_exit_state_write)"
 eval "$(extract_fn _president_intervention_state_file)"
 eval "$(extract_fn _president_intervention_state_read)"
 eval "$(extract_fn _president_intervention_state_write)"
+eval "$(extract_fn _president_operator_events_file)"
+eval "$(extract_fn _president_operator_event_state_append)"
+eval "$(extract_fn _president_operator_event_rows)"
 eval "$(extract_fn _president_intervention_allowed)"
 eval "$(extract_fn _president_operator_event_kind)"
 eval "$(extract_fn _president_operator_event_severity)"
@@ -47,10 +50,11 @@ SGT_ROOT="$TMP_ROOT/root"
 SGT_CONFIG="$SGT_ROOT/.sgt"
 mkdir -p "$SGT_CONFIG/president" "$SGT_CONFIG/mayors/demo"
 EVENT_LOG="$TMP_ROOT/events.log"
+EVENT_STATE="$SGT_CONFIG/president/president-operator-events.tsv"
 START_LOG="$TMP_ROOT/start.log"
 REFRESH_LOG="$TMP_ROOT/refresh.log"
 WAKE_LOG="$TMP_ROOT/wake.log"
-export SGT_ROOT SGT_CONFIG EVENT_LOG START_LOG REFRESH_LOG WAKE_LOG
+export SGT_ROOT SGT_CONFIG EVENT_LOG EVENT_STATE START_LOG REFRESH_LOG WAKE_LOG
 export SGT_PRESIDENT_INTERVAL=60
 export SGT_PRESIDENT_INTERVENTION_STALE_SECS=900
 export SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS=600
@@ -165,6 +169,10 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=stalled-purpose severity=wa
   echo "expected structured President operator event for stalled-purpose intervention" >&2
   exit 1
 fi
+if ! grep -q $'\tdemo\tstalled-purpose\twarning\t1\t' "$EVENT_STATE"; then
+  echo "expected structured president operator event history state for stalled-purpose intervention" >&2
+  exit 1
+fi
 if [[ -s "$WAKE_LOG" ]]; then
   echo "expected refresh intervention instead of plain wake for stale rig" >&2
   exit 1
@@ -192,6 +200,10 @@ fi
 _president_supervise_rig_mayor demo manual >/dev/null || true
 if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info notify=0 dedupe_key=president:demo:intervention:actionable-rig-recheck:wake overlap_key=rig-incident:demo:actionable-no-forward-motion action=wake reason=actionable-rig-recheck outcome=suppressed-by-cooldown' "$EVENT_LOG"; then
   echo "expected President operator event to record cooldown suppression instead of replaying the same wake" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$EVENT_STATE")" -lt 3 ]]; then
+  echo "expected president operator event history to retain intervened and suppressed entries" >&2
   exit 1
 fi
 BASH

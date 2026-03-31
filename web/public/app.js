@@ -50,6 +50,7 @@ const refs = {
   blockerSummary: document.getElementById("blockerSummary"),
   alertRail: document.getElementById("alertRail"),
   blockerBoard: document.getElementById("blockerBoard"),
+  presidentActivity: document.getElementById("presidentActivity"),
   overviewHero: document.getElementById("overviewHero"),
   queueBoard: document.getElementById("queueBoard"),
   streamSummary: document.getElementById("streamSummary"),
@@ -206,6 +207,7 @@ function emptyCockpit() {
     queue: { items: [], summary: { total: 0 } },
     blockers: [],
     alerts: [],
+    president: { events: [] },
     logs: { lines: [], total: 0 },
     topology: { nodes: [], edges: [] },
   };
@@ -401,6 +403,7 @@ function renderAll() {
   renderRigs();
   renderAlerts();
   renderBlockers();
+  renderPresidentActivity();
   renderQueue();
   renderStreamDeck();
   renderLogs();
@@ -537,7 +540,8 @@ function renderRigs() {
 
 function renderBlockers() {
   const totalAlerts = (appState.cockpit.alerts || []).length;
-  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers · ${totalAlerts} recent alerts`;
+  const presidentEvents = (appState.cockpit.president && appState.cockpit.president.events) || [];
+  refs.blockerSummary.textContent = `${appState.cockpit.blockers.length} open blockers · ${totalAlerts} blocker alerts · ${presidentEvents.length} president events`;
   if (appState.cockpit.blockers.length === 0) {
     refs.blockerBoard.innerHTML = `<div class="empty-state">Acceptance blockers will surface here with evidence and rig ownership.</div>`;
     return;
@@ -560,6 +564,29 @@ function renderBlockers() {
   `).join("");
 }
 
+function renderPresidentActivity() {
+  const events = ((appState.cockpit.president && appState.cockpit.president.events) || []).slice(0, 8);
+  if (events.length === 0) {
+    refs.presidentActivity.innerHTML = `<div class="empty-state">Recent President interventions and operator events will appear here.</div>`;
+    return;
+  }
+
+  refs.presidentActivity.innerHTML = events.map((event) => `
+    <article class="alert-card alert-${escAttr(event.severity || "info")}">
+      <div class="queue-head">
+        <div class="blocker-title">${esc(presidentEventTitle(event))}</div>
+        <span class="severity-pill ${alertSeverityClass(event)}">${esc(event.kind || "president")}</span>
+      </div>
+      <div class="blocker-meta">
+        <span>${esc(event.rig || "cross-rig")}</span>
+        <span>${esc(formatIso(event.createdAt))}</span>
+        <span>${esc(presidentOutcomeLabel(event))}</span>
+      </div>
+      <p>${esc(snippet(event.detail || presidentEventDetail(event), 220))}</p>
+    </article>
+  `).join("");
+}
+
 function renderQueue() {
   const items = appState.cockpit.queue.items || [];
   if (items.length === 0) {
@@ -578,6 +605,23 @@ function renderQueue() {
       </div>
     </article>
   `).join("");
+}
+
+function presidentEventTitle(event) {
+  const rig = event.rig || "unknown rig";
+  const action = event.action || "acted on";
+  const reason = humanizeKebab(event.reason || "unknown reason");
+  return `President ${action} mayor/${rig}: ${reason}`;
+}
+
+function presidentEventDetail(event) {
+  return `${humanizeKebab(event.kind || "incident")} · ${humanizeKebab(event.reason || "unknown reason")}`;
+}
+
+function presidentOutcomeLabel(event) {
+  if (event.outcome === "suppressed-by-cooldown") return "Suppressed";
+  if (event.notify) return "Operator alert";
+  return humanizeKebab(event.outcome || "recorded");
 }
 
 function renderStreamDeck() {

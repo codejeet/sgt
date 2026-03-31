@@ -523,6 +523,24 @@ function normalizeAgent(agent) {
   return normalized;
 }
 
+function normalizePresidentEvent(event) {
+  return {
+    ts: event.ts || '',
+    createdAt: event.created_at || event.createdAt || '',
+    rig: event.rig || '',
+    kind: event.kind || '',
+    severity: event.severity || 'info',
+    notify: Boolean(event.notify),
+    dedupeKey: event.dedupe_key || event.dedupeKey || '',
+    overlapKey: event.overlap_key || event.overlapKey || '',
+    action: event.action || '',
+    reason: event.reason || '',
+    outcome: event.outcome || '',
+    cycleTrigger: event.cycle_trigger || event.cycleTrigger || '',
+    detail: event.detail || '',
+  };
+}
+
 function normalizeWorker(worker, role) {
   const session = worker.session || '';
   const target = role === 'polecat' ? worker.name : `${role}/${worker.name}`;
@@ -907,6 +925,9 @@ function buildCockpitSnapshot({
   const dogs = Array.isArray(statusData.dogs) ? statusData.dogs.map((worker) => normalizeWorker(worker, 'dog')) : [];
   const workers = [...polecats, ...dogs];
   const mergeQueue = Array.isArray(statusData.merge_queue) ? statusData.merge_queue : fallbackParsed.mergeQueue || [];
+  const presidentEvents = Array.isArray(statusData.president_events)
+    ? statusData.president_events.map(normalizePresidentEvent)
+    : [];
   const rigsView = buildRigMap({
     rigs,
     mayorRigs: Array.isArray(statusData.mayor_rigs) ? statusData.mayor_rigs : [],
@@ -944,6 +965,9 @@ function buildCockpitSnapshot({
     },
     blockers,
     alerts,
+    president: {
+      events: presidentEvents,
+    },
     logs: {
       lines: recentLogs,
       total: recentLogs.length,

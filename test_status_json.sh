@@ -90,6 +90,11 @@ STATE
 cat > "$SGT_ROOT/.sgt/mayor-auto-refresh.state" <<STATE
 1774828860|2026-03-30T00:01:00Z|budget-exceeded|160000|640000|150000|$SGT_ROOT/.sgt/handoffs/auto-token/handoff.md|auto-token|completed
 STATE
+mkdir -p "$SGT_ROOT/.sgt/president"
+cat > "$SGT_ROOT/.sgt/president/president-operator-events.tsv" <<STATE
+1775000001	2026-03-31T22:22:29+02:00	test	intervention	warning	1	president:test:intervention:mayor-heartbeat-stale:refresh	mayor-health:test:mayor-heartbeat-stale	refresh	mayor-heartbeat-stale	intervened	periodic	heartbeat_age=1200s threshold=720s
+1775000002	2026-03-31T22:23:29+02:00	test	intervention	info	0	president:test:intervention:actionable-rig-recheck:wake	rig-incident:test:actionable-no-forward-motion	wake	actionable-rig-recheck	suppressed-by-cooldown	manual	open_issues=1 active_polecats=0 merge_queue=0
+STATE
 '
 
 JSON_OUT="$TMP_ROOT/status.json"
@@ -113,7 +118,7 @@ p = sys.argv[1]
 with open(p, "r", encoding="utf-8") as f:
     data = json.load(f)
 
-for key in ["agents", "dogs", "crew", "merge_queue", "polecats", "summary"]:
+for key in ["agents", "dogs", "crew", "merge_queue", "polecats", "president_events", "summary"]:
     if key not in data:
         raise SystemExit(f"missing top-level key: {key}")
 
@@ -136,6 +141,13 @@ if budget.get("estimated_tokens") != "160000" or budget.get("threshold") != "150
 auto_refresh = mayor.get("auto_refresh", {})
 if auto_refresh.get("trigger") != "budget-exceeded" or auto_refresh.get("status") != "completed":
     raise SystemExit(f"unexpected mayor auto_refresh metadata: {auto_refresh}")
+president_events = data["president_events"]
+if len(president_events) != 2:
+    raise SystemExit(f"expected two president events, got {len(president_events)}")
+if president_events[0].get("reason") != "actionable-rig-recheck" or president_events[0].get("outcome") != "suppressed-by-cooldown":
+    raise SystemExit(f"expected most recent president event first, got {president_events[0]}")
+if president_events[1].get("notify") is not True or president_events[1].get("action") != "refresh":
+    raise SystemExit(f"unexpected president event payload: {president_events[1]}")
 
 polecats = data["polecats"]
 if len(polecats) != 1:
