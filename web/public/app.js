@@ -1117,7 +1117,9 @@ function renderTopologySidebar(topology) {
     <div class="topology-focus-title">${esc(active.label || active.id)}</div>
     <div class="topology-focus-meta">${esc([active.type, active.rig, active.state].filter(Boolean).join(" • "))}</div>
     <div class="topology-focus-detail">${esc(topologyNodeDetail(active, relatedEdges.length))}</div>
+    ${renderTopologyNodeActions(active)}
   `;
+  bindTopologyActions(refs.topologyFocus);
 
   refs.topologyList.innerHTML = relatedEdges.slice(0, 18).map((edge) => {
     const otherId = edge.from === active.id ? edge.to : edge.from;
@@ -1129,12 +1131,43 @@ function renderTopologySidebar(topology) {
 
 function topologyNodeDetail(node, edgeCount) {
   const details = [];
+  if (node.metadata && node.metadata.role) details.push(node.metadata.role);
   if (node.metadata && node.metadata.title) details.push(node.metadata.title);
   if (node.metadata && node.metadata.detail) details.push(node.metadata.detail);
   if (node.metadata && node.metadata.evidence) details.push(snippet(node.metadata.evidence, 140));
   if (node.metadata && node.metadata.reason) details.push(node.metadata.reason);
   details.push(`${edgeCount} live link${edgeCount === 1 ? "" : "s"}`);
   return details.filter(Boolean).join(" · ");
+}
+
+function renderTopologyNodeActions(node) {
+  const target = topologyNodeStreamTarget(node);
+  if (!target) return "";
+  const focusLabel = appState.focusTarget === target ? "Focused" : "Focus";
+  return `
+    <div class="topology-focus-actions">
+      <button class="btn tiny ghost" data-focus-target="${escAttr(target)}">${focusLabel}</button>
+      <button class="btn tiny ghost" data-peek-target="${escAttr(target)}">Peek</button>
+    </div>
+  `;
+}
+
+function bindTopologyActions(root) {
+  root.querySelectorAll("[data-focus-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      appState.focusTarget = button.dataset.focusTarget;
+      syncStreamTargets();
+      renderStreamDeck();
+      activateSection("streams");
+    });
+  });
+  root.querySelectorAll("[data-peek-target]").forEach((button) => {
+    button.addEventListener("click", () => peek(button.dataset.peekTarget));
+  });
+}
+
+function topologyNodeStreamTarget(node) {
+  return node && node.metadata && node.metadata.streamTarget ? node.metadata.streamTarget : "";
 }
 
 function topologyActiveNodeId() {

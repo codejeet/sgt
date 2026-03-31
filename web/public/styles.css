@@ -726,6 +726,12 @@ a {
   line-height: 1.5;
 }
 
+.topology-focus-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .topology-item {
   padding: 10px 12px;
   border: 1px solid var(--line);

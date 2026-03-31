@@ -56,6 +56,9 @@ test("operator shell script consumes snapshot and tmux stream events", () => {
   assert.match(script, /initializeTopologyRenderer/);
   assert.match(script, /drawWebGlTopology/);
   assert.match(script, /handleTopologyPointerClick/);
+  assert.match(script, /topology-focus-actions/);
+  assert.match(script, /bindTopologyActions/);
+  assert.match(script, /topologyNodeStreamTarget/);
   assert.match(script, /renderStreamDeck/);
 });
 
