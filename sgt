@@ -199,10 +199,20 @@ _president_refresh_handoffs_dir() {
   printf '%s/handoffs\n' "$(_president_runtime_dir)"
 }
 
+_president_cutovers_dir() {
+  printf '%s/cutovers\n' "$(_president_runtime_dir)"
+}
+
 _president_refresh_token() {
   local now
   now="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')"
   printf 'president-refresh-%s-%s\n' "$now" "$$"
+}
+
+_hierarchy_cutover_token() {
+  local now
+  now="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || date '+%Y%m%dT%H%M%S')"
+  printf 'shared-mayor-cutover-%s-%s\n' "$now" "$$"
 }
 
 _president_refresh_transient_entries() {
@@ -232,6 +242,104 @@ _president_refresh_archive_transients() {
       fi
     fi
   done < <(_president_refresh_transient_entries)
+}
+
+_shared_mayor_cutover_transient_entries() {
+  cat <<'EOF'
+mayor-action-receipts
+mayor-agent-heartbeat-watchdog.state
+mayor-ai-cycle.state
+mayor-ai-observability.state
+mayor-auto-refresh.state
+mayor-briefing.md
+mayor-ci-check-watchdog.state
+mayor-critical-alert.state
+mayor-decision-log-alert.state
+mayor-dispatch-attempts
+mayor-dispatch-snapshot.tsv
+mayor-dispatch-triggers
+mayor-exit.state
+mayor-heartbeat.state
+mayor-last-cycle.state
+mayor-notify-alert.state
+mayor-notify-attempts
+mayor-notify-receipts
+mayor-prompt-budget.state
+mayor-review-watchdog.state
+mayor-start-failure.state
+mayor-start.log
+mayor-start.receipt
+mayor-stale-polecat-fence
+mayor-workspace
+mayor.fifo
+mayor.lock
+EOF
+}
+
+_hierarchy_cutover_retire_shared_mayor() {
+  local shared_session retired_session archived_count cutover_token cutover_dir cutover_file
+  local name src archived_entries
+  _mayor_architecture_per_rig || return 0
+
+  shared_session="false"
+  tmux has-session -t "sgt-mayor" 2>/dev/null && shared_session="true"
+  archived_count=0
+  archived_entries=""
+
+  if [[ "$shared_session" != "true" ]]; then
+    while IFS= read -r name; do
+      [[ -n "$name" ]] || continue
+      if [[ -e "$SGT_CONFIG/$name" ]]; then
+        archived_count=1
+        break
+      fi
+    done < <(_shared_mayor_cutover_transient_entries)
+    if [[ "$archived_count" -eq 0 ]]; then
+      return 0
+    fi
+    archived_count=0
+  fi
+
+  cutover_token="$(_hierarchy_cutover_token)"
+  cutover_dir="$(_president_cutovers_dir)/$cutover_token"
+  cutover_file="$cutover_dir/cutover.md"
+  mkdir -p "$cutover_dir"
+
+  retired_session="false"
+  if [[ "$shared_session" == "true" ]]; then
+    tmux kill-session -t "sgt-mayor" 2>/dev/null || true
+    retired_session="true"
+  fi
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    src="$SGT_CONFIG/$name"
+    if [[ -e "$src" ]]; then
+      mv "$src" "$cutover_dir/$name"
+      archived_count=$((archived_count + 1))
+      archived_entries+="- $name"
+      if [[ -d "$cutover_dir/$name" ]]; then
+        archived_entries+="/"
+      fi
+      archived_entries+=$'\n'
+    fi
+  done < <(_shared_mayor_cutover_transient_entries)
+
+  cat > "$cutover_file" <<EOF
+# Shared Mayor Cutover Archive
+
+- generated_at: $(date -Iseconds)
+- architecture: $(_mayor_architecture)
+- retired_shared_session: $retired_session
+- archived_entry_count: $archived_count
+- preserved_durable_truth: GitHub board state, acceptance blockers, plan-state, polecat metadata, and scoped mayor state remain live in place
+
+## Archived Shared Mayor Transients
+${archived_entries:-- none}
+EOF
+
+  log_event "HIERARCHY_CUTOVER_SHARED_MAYOR retired_session=$retired_session archived_entries=$archived_count archive_path=\"$(_escape_quotes "$cutover_dir")\""
+  info "retired shared mayor compatibility state into $cutover_dir"
 }
 
 _president_refresh_write_handoff() {
@@ -11324,6 +11432,7 @@ cmd_president_start() {
     info "president is disabled in shared-mayor mode"
     return 0
   }
+  _hierarchy_cutover_retire_shared_mayor || true
   session="$(_president_session_name)"
   if tmux has-session -t "$session" 2>/dev/null; then
     info "president already running"
@@ -13543,6 +13652,7 @@ _cmd_mayor_start_one() {
 cmd_mayor_start() {
   local scope_rig="${1:-}"
   if _mayor_architecture_per_rig; then
+    _hierarchy_cutover_retire_shared_mayor || true
     if [[ -n "$scope_rig" ]]; then
       _cmd_mayor_start_one "$scope_rig"
       return $?

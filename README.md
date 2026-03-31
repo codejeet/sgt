@@ -564,6 +564,7 @@ Optional per-rig Mayor architecture:
 - `sgt mayor start|stop` without a rig acts on all rig Mayors in per-rig mode; `sgt wake-mayor` routes rig-targeted wake reasons to the matching Mayor and otherwise broadcasts to all rig Mayors.
 - `sgt president start|stop|refresh` controls the cross-rig supervisor, `sgt president refresh` archives transient President state into `~/.sgt/president/handoffs/<token>/handoff.md` before restart, and `sgt peek president` / the Web UI can inspect it separately from any `mayor/<rig>`.
 - `sgt mayor refresh [rig]` captures a timestamped handoff under the scoped mayor directory, archives transient Mayor context there, restarts the Mayor, and prints the handoff markdown path after re-waking it.
+- Entering per-rig mode safely retires any leftover shared `sgt-mayor` session and archives only shared Mayor transient files under `~/.sgt/president/cutovers/<token>/`, leaving durable blocker, plan-state, polecat, and scoped mayor truth in place.
 - President performs bounded supervision only: if a rig-local Mayor is missing, stale, or an actionable rig has no healthy forward motion, President starts, wakes, or refreshes that one Mayor instead of taking over routine repo work directly.
 
 President/per-rig Mayor architecture contract:
@@ -579,7 +580,7 @@ Latest-main proof for this hierarchy:
 ./test_president_runtime_latest_main_proof.sh
 ```
 
-That proof path verifies the documented contract, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
+That proof path verifies the documented contract, shared-to-per-rig cutover guardrails, status exposure for `president` plus `mayor/<rig>`, log/peek fallback for President and scoped Mayors, and President-side bounded intervention for a stuck rig-local Mayor.
 
 Mayor and boot both guard against stale deacon heartbeats:
 - Default stale threshold is `300` seconds (`5` minutes), configurable with:
