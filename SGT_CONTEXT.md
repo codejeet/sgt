@@ -825,3 +825,147 @@ Required follow-up:
 - 2026-03-31T09:12:48+02:00 — 2026-03-31 issue #309: President-originated wake reasons now preserve rig targeting via 'president:<rig>:...' parsing, scoped mayor notify inherits SGT_MAYOR_SCOPE_RIG for rig-specific notify-agent/receipt state, and 'sgt president refresh' now archives ~/.sgt/president transient state into a handoff path before restart.
 - 2026-03-31T09:19:26+02:00 — 2026-03-31 issue #309: per-rig wake routing now treats President-originated reasons like president:<rig>:... as rig-targeted, scoped mayor notify uses SGT_MAYOR_SCOPE_RIG for rig-specific notify_agent overrides plus rig-local notify receipt state, and sgt president refresh archives ~/.sgt/president transient state into a handoff before restart.
 - 2026-03-31T09:21:20+02:00 — 2026-03-31 issue #312: per-rig hierarchy cutover now retires any leftover shared sgt-mayor session and archives only shared Mayor transient assets under ~/.sgt/president/cutovers/<token>/; durable board, blocker, plan-state, polecat, and scoped mayor state stay in place so stale shared snapshots/watchdogs cannot duplicate work after cutover.
+- 2026-03-31T10:07:10+02:00 — 2026-03-31 issue #312: latest-main President runtime proof now includes test_hierarchy_cutover_guardrails.sh so hierarchy acceptance covers retiring leftover shared-Mayor transient state without disturbing durable blocker, plan-state, polecat, or scoped mayor truth.
+- 2026-03-31T10:22:46+02:00 — 2026-03-31 issue #316: test_president_runtime_latest_main_proof.sh now includes a lightweight Web UI hierarchy proof via test_web_cockpit_control_plane_hierarchy.sh, so the latest-main hierarchy bundle covers president vs mayor/<rig> distinction in status, peek, and cockpit surfaces.
+- 2026-03-31T11:11:07+02:00 — Plan request sgt-1774948267-47b89672 submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1774948267-47b89672
+
+- Requested at: 2026-03-31T11:11:07+02:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# SGT follow-on plan request: President notifications + WebUI operator usability pass
+
+## Request
+
+Create a follow-on SGT implementation plan on rig `sgt` for the newly deployed **President + per-rig Mayor** system.
+
+This request has five linked goals:
+
+1. **President notifications for important things to check / operator escalations**
+2. **President log visibility in the Web UI**
+3. **Pane/layout improvements in the tmux cockpit UI**
+4. **Notification panel cleanup so it only shows recent/actionable items**
+5. **Text input at the bottom of each pane for fast nudging**
+
+Requester: operator via Gastown
+Date: 2026-03-31
+Rig: `sgt`
+
+## Why this exists
+
+The President/per-rig Mayor runtime is now live, but the operator surfaces still lag behind the new topology and the real operator workflow.
+
+We need the UI and notify layer to match the architecture that now exists in production:
+- President should be able to raise meaningful operator attention for drift / stuck-purpose situations / escalations
+- The Web UI should expose President activity directly instead of burying it in log archaeology
+- The cockpit layout should be easier to read, steer, and operate during live work
+- The notification area should show **what matters now**, not stale long-title clutter
+
+## Work requested
+
+### 1) President notifications for important, actionable events
+
+Wire President into operator-facing notifications for important things worth checking, such as:
+
+- a rig has drifted from its intended purpose
+- a rig is technically active but not actually making forward progress on its real goal
+- a rig's local behavior contradicts the larger program intent / acceptance path
+- President had to intervene because a rig-local Mayor was stale / wedged / misleadingly idle
+- President wants operator attention / escalation
+- President questions that need human input
+
+Guidance:
+- Prefer **important, actionable** notifications rather than noisy chatter
+- Focus on "check this" / "this rig is drifting" / "this needs operator judgment" events
+- Preserve existing preference that voice/attention emphasis should lean toward **resolved blockers / major milestones / meaningful escalations**, not every tiny event
+- If President and Mayor notifications overlap, dedupe or present them coherently rather than spamming both layers independently
+
+### 2) President log / status visibility in the Web UI
+
+Expose President in the Web UI as a first-class operator surface, including things like:
+
+- President cycle status
+- recent President interventions
+- President reasoning/action log or event feed
+- which rig was touched, why, and what President did
+- whether an intervention was wake / refresh / restart / no-op / suppressed-by-cooldown
+
+The operator should not need to grep server logs to understand what President is doing.
+
+### 3) Pane/layout improvements for the tmux cockpit
+
+Requested UI behavior:
+
+- tmux windows should display as **vertical rectangles** in an automatic grid layout
+- focused panes should **move the real pane into the focused spot**, not duplicate the pane in a second location/view
+- pane view should use a **cool blue, slightly transparent-looking font on a black background**
+
+Design constraints / prior operator guidance worth preserving:
+- livestream first / operator-centric cockpit feel
+- less gradient-heavy / less AI-looking CSS
+- mostly square corners or very slight rounding only
+- darker high-contrast theme that still keeps the blue
+
+### 4) Notification panel cleanup
+
+Current problem:
+- notifications overflow with stale old data
+- long titles make the section hard to use
+
+Requested behavior:
+- show only recent and/or actionable items by default
+- prioritize items like:
+  - President questions
+  - current escalations
+  - unresolved meaningful blockers
+  - things the operator should actually act on now
+- reduce useless long-title clutter
+- prefer summaries that are compact, legible, and operationally useful
+
+### 5) Text input at the bottom of each pane for easy nudging
+
+Add a text input / quick command affordance at the bottom of each rectangle pane so the operator can easily nudge the corresponding session/agent.
+
+Goal:
+- make steering from the cockpit much faster
+- reduce friction for nudging a specific pane/session
+- keep the interaction scoped to the pane the operator is looking at
+
+This should work cleanly for the relevant pane/session types exposed by the cockpit.
+
+## Acceptance expectations
+
+Please decompose this into a real repo-local plan rather than a single vague issue.
+
+A good plan should likely cover at least:
+
+1. President notify architecture / event model / dedupe rules
+2. President activity/log exposure in status + Web UI
+3. pane layout / focus behavior changes
+4. notification panel recency/actionability filtering
+5. per-pane input/nudge interaction
+6. docs / proof / latest-main verification
+
+## Concrete acceptance criteria
+
+A good finished result should make the following true:
+
+- President can generate meaningful operator-facing notifications for important drift/escalation situations
+- President activity is visible in the Web UI without log-grep archaeology
+- cockpit panes render as auto-laid-out vertical rectangles
+- focus behavior moves the pane to the focus slot instead of duplicating views
+- pane styling reflects the requested cool-blue-on-black operator look
+- notification panel defaults to recent/actionable information instead of stale overflow
+- President questions / actionable escalations are clearly surfaced
+- each pane has an easy text-input affordance for nudging that pane's session/agent
+- docs/proof demonstrate the new behavior on latest main
+
+## Notes
+
+- This is a follow-on usability / operator-surface layer on top of the newly deployed President system.
+- Keep the implementation grounded in real operator value, not decorative UI churn.
+- If this needs phasing, make the phases explicit and safe.
+```
+- 2026-03-31T13:01:46+02:00 — 2026-03-31 incident: PMKB final acceptance closeout exposed a coupled SGT bug cluster in live President/per-rig mode. PR #1019 hit HTTP 5xx then GraphQL merge-in-progress; refinery marked it non-transient, then witness/refinery looped on orphan-PR + duplicate-merge-attempt-key for over an hour even though the PR stayed CLEAN/mergeable. After manual merge, GitHub truth became correct but PMKB repo-local acceptance stayed stale: PKL2-11 completed, yet SGT_PLAN.json and .sgt/plan-state/pmkb.json still showed acceptance planned / tasks-exhausted-awaiting-acceptance. Recovery attempts via sgt mayor refresh pmkb and explicit wake did not reconcile; refresh also appeared to act like shared/global refresh in per-rig mode and President kept restarting mayors because pmkb/sgt mayors exited cleanly immediately. See workspace incident note `notes/sgt-incident-pmkb-acceptance-reconciliation-2026-03-31.md` for full timeline and fix guidance.

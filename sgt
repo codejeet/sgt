@@ -5863,6 +5863,53 @@ _plan_file_path() {
   echo "$(rig_path "$rig")/SGT_PLAN.json"
 }
 
+_plan_cache_dir() {
+  echo "$SGT_CONFIG/plan-cache"
+}
+
+_plan_cache_path() {
+  local rig="${1:-}"
+  [[ -n "$rig" ]] || return 1
+  echo "$(_plan_cache_dir)/${rig}.json"
+}
+
+_plan_effective_file_path() {
+  local rig="${1:-}"
+  local canonical_plan_file rpath default_branch current_branch local_plan_dirty remote_plan cache_path cache_tmp
+  canonical_plan_file="$(_plan_file_path "$rig")"
+  [[ -f "$canonical_plan_file" ]] || return 1
+
+  rpath="$(rig_path "$rig")"
+  if [[ ! -d "$rpath" ]] || ! command -v git >/dev/null 2>&1; then
+    printf '%s\n' "$canonical_plan_file"
+    return 0
+  fi
+
+  git -C "$rpath" fetch origin >/dev/null 2>&1 || true
+  default_branch="$(git -C "$rpath" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)"
+  [[ -n "$default_branch" ]] || default_branch="main"
+  current_branch="$(git -C "$rpath" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  local_plan_dirty="$(git -C "$rpath" status --short -- SGT_PLAN.json 2>/dev/null || true)"
+
+  if [[ "$current_branch" == "$default_branch" && -z "$local_plan_dirty" ]]; then
+    printf '%s\n' "$canonical_plan_file"
+    return 0
+  fi
+
+  remote_plan="$(git -C "$rpath" show "origin/$default_branch:SGT_PLAN.json" 2>/dev/null || true)"
+  if [[ -z "$remote_plan" ]]; then
+    printf '%s\n' "$canonical_plan_file"
+    return 0
+  fi
+
+  cache_path="$(_plan_cache_path "$rig")"
+  mkdir -p "$(_plan_cache_dir)"
+  cache_tmp="${cache_path}.tmp.$$"
+  printf '%s\n' "$remote_plan" > "$cache_tmp"
+  mv -f "$cache_tmp" "$cache_path"
+  printf '%s\n' "$cache_path"
+}
+
 _plan_request_id() {
   local rig="${1:-}"
   echo "${rig}-$(date +%s)-$(head -c4 /dev/urandom | xxd -p)"
@@ -6242,16 +6289,17 @@ _mayor_acceptance_blocker_scan() {
 }
 
 _plan_state_snapshot() {
-  local rig="${1:-}" plan_file="${2:-}" state_file
+  local rig="${1:-}" plan_file="${2:-}" plan_display_file="${3:-}" state_file
+  [[ -n "$plan_display_file" ]] || plan_display_file="$plan_file"
   state_file="$(_plan_state_path "$rig")"
   mkdir -p "$(dirname "$state_file")"
-  python3 - "$rig" "$plan_file" "$state_file" <<'PY'
+  python3 - "$rig" "$plan_file" "$state_file" "$plan_display_file" <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timezone
 
-rig, plan_file, state_file = sys.argv[1:4]
+rig, plan_file, state_file, plan_display_file = sys.argv[1:5]
 DELIM = "\x1f"
 with open(plan_file, "r", encoding="utf-8") as fh:
     plan = json.load(fh)
@@ -6325,7 +6373,7 @@ for task in tasks:
 doc = {
     "version": 1,
     "rig": rig,
-    "plan_file": plan_file,
+    "plan_file": plan_display_file,
     "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "policy": {"max_in_flight": max_in_flight},
     "tasks": normalized,
@@ -6529,7 +6577,7 @@ _plan_sync_state_and_labels() {
         done
         ;;
     esac
-  done < <(_plan_state_snapshot "$rig" "$plan_file")
+  done < <(_plan_state_snapshot "$rig" "$plan_file" "$(_plan_file_path "$rig")")
   _ensure_labels_exist "$repo" "${labels[@]}"
 }
 
@@ -6584,9 +6632,11 @@ PY
 
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
-  local plan_file repo snapshot_line
-  plan_file="$(_plan_file_path "$rig")"
-  [[ -f "$plan_file" ]] || die "plan file not found for rig '$rig': $plan_file"
+  local canonical_plan_file plan_file repo snapshot_line
+  canonical_plan_file="$(_plan_file_path "$rig")"
+  [[ -f "$canonical_plan_file" ]] || die "plan file not found for rig '$rig': $canonical_plan_file"
+  plan_file="$(_plan_effective_file_path "$rig")"
+  [[ -f "$plan_file" ]] || die "effective plan file not found for rig '$rig': $plan_file"
   repo="$(rig_repo "$rig")"
 
   local max_in_flight=1
@@ -6617,7 +6667,7 @@ _plan_tick_run() {
         task_backend["$c1"]="$c9"
         ;;
     esac
-  done < <(_plan_state_snapshot "$rig" "$plan_file")
+  done < <(_plan_state_snapshot "$rig" "$plan_file" "$canonical_plan_file")
 
   if ! _plan_sync_state_and_labels "$rig" "$plan_file" "$repo"; then
     local sync_reason sync_blocker_id
@@ -14626,7 +14676,7 @@ _worker_plan_completion_context_md() {
   local rig="${1:-}" plan_file="${2:-}" status="not_declared" rollup="not_declared" condition="" acceptance_json="{}" details="" blocked_reason=""
   [[ -n "$rig" ]] || return 0
   if [[ -z "$plan_file" ]]; then
-    plan_file="$(_plan_file_path "$rig")"
+    plan_file="$(_plan_effective_file_path "$rig")"
   fi
   [[ -f "$plan_file" ]] || return 0
 
@@ -14642,7 +14692,7 @@ _worker_plan_completion_context_md() {
         blocked_reason="${c7:-}"
         ;;
     esac
-  done < <(_plan_state_snapshot "$rig" "$plan_file" 2>/dev/null || true)
+  done < <(_plan_state_snapshot "$rig" "$plan_file" "$(_plan_file_path "$rig")" 2>/dev/null || true)
 
   if [[ "$status" == "not_declared" && -z "$condition" && "${acceptance_json:-{}}" == "{}" ]]; then
     return 0
