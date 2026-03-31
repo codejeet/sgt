@@ -133,6 +133,32 @@ chmod +x "$SHARED_HOME/.local/bin/sgt"
 printf 'sgt-mayor\n' > "$SHARED_SESSIONS"
 make_mock_bin "$TMP_ROOT/mockbin" "$SHARED_SESSIONS"
 
+shared_transient_entries=(
+  mayor-action-receipts
+  mayor-agent-heartbeat-watchdog.state
+  mayor-ai-cycle.state
+  mayor-ai-observability.state
+  mayor-auto-refresh.state
+  mayor-briefing.md
+  mayor-ci-check-watchdog.state
+  mayor-critical-alert.state
+  mayor-dispatch-attempts
+  mayor-dispatch-snapshot.tsv
+  mayor-dispatch-triggers
+  mayor-exit.state
+  mayor-heartbeat.state
+  mayor-last-cycle.state
+  mayor-notify-alert.state
+  mayor-notify-attempts
+  mayor-notify-receipts
+  mayor-prompt-budget.state
+  mayor-review-watchdog.state
+  mayor-start-failure.state
+  mayor-start.log
+  mayor-start.receipt
+  mayor-workspace
+)
+
 run_env "$SHARED_HOME" "$SHARED_SESSIONS" bash --noprofile --norc -c '
 set -euo pipefail
 sgt init >/dev/null
@@ -140,27 +166,56 @@ mkdir -p "$SGT_ROOT/.sgt/mayor-workspace"
 printf "briefing\n" > "$SGT_ROOT/.sgt/mayor-briefing.md"
 printf "snapshot\n" > "$SGT_ROOT/.sgt/mayor-dispatch-snapshot.tsv"
 printf "status=running\n" > "$SGT_ROOT/.sgt/mayor-ai-cycle.state"
+printf "observability\n" > "$SGT_ROOT/.sgt/mayor-ai-observability.state"
+printf "1|2026-03-30T00:00:00Z|100|400|150000|false|prompt\n" > "$SGT_ROOT/.sgt/mayor-prompt-budget.state"
+printf "1|2026-03-30T00:00:00Z|manual|100|400|150000|handoff|token|scheduled\n" > "$SGT_ROOT/.sgt/mayor-auto-refresh.state"
+printf "1|2026-03-30T00:00:00Z|123|running|7|manual\n" > "$SGT_ROOT/.sgt/mayor-heartbeat.state"
+printf "1|2026-03-30T00:00:00Z|manual|completed\n" > "$SGT_ROOT/.sgt/mayor-last-cycle.state"
+printf "1|clean-exit|0|EXIT|false|123|manual|2026-03-30T00:00:00Z|completed\n" > "$SGT_ROOT/.sgt/mayor-exit.state"
+printf "1|critical|reason\n" > "$SGT_ROOT/.sgt/mayor-critical-alert.state"
+printf "1|context|workspace|error\n" > "$SGT_ROOT/.sgt/mayor-decision-log-alert.state"
+printf "1|channel|target|key|1|failed|reason|matcher|true\n" > "$SGT_ROOT/.sgt/mayor-notify-alert.state"
+printf "1|2|900\n" > "$SGT_ROOT/.sgt/mayor-review-watchdog.state"
+printf "1|ci-key|900\n" > "$SGT_ROOT/.sgt/mayor-ci-check-watchdog.state"
+printf "1|witness|sgt|900\n" > "$SGT_ROOT/.sgt/mayor-agent-heartbeat-watchdog.state"
 printf "ATTEMPT=abc\n" > "$SGT_ROOT/.sgt/mayor-start.receipt"
 printf "spawn log\n" > "$SGT_ROOT/.sgt/mayor-start.log"
 printf "1|startup-failed|attempt|log|detail\n" > "$SGT_ROOT/.sgt/mayor-start-failure.state"
 printf "decision\n" > "$SGT_ROOT/.sgt/mayor-decisions.log"
 printf "notes\n" > "$SGT_ROOT/.sgt/mayor-workspace/CLAUDE.md"
+mkdir -p "$SGT_ROOT/.sgt/mayor-action-receipts" "$SGT_ROOT/.sgt/mayor-notify-receipts" "$SGT_ROOT/.sgt/mayor-notify-attempts" "$SGT_ROOT/.sgt/mayor-dispatch-triggers" "$SGT_ROOT/.sgt/mayor-dispatch-attempts"
+printf "receipt\n" > "$SGT_ROOT/.sgt/mayor-action-receipts/one"
+printf "notify\n" > "$SGT_ROOT/.sgt/mayor-notify-receipts/one"
+printf "attempt\n" > "$SGT_ROOT/.sgt/mayor-notify-attempts/one"
+printf "trigger\n" > "$SGT_ROOT/.sgt/mayor-dispatch-triggers/one"
+printf "dispatch\n" > "$SGT_ROOT/.sgt/mayor-dispatch-attempts/one"
 '
 
 SHARED_OUT="$TMP_ROOT/shared-refresh.out"
 run_env "$SHARED_HOME" "$SHARED_SESSIONS" bash --noprofile --norc -c 'set -euo pipefail; timeout 15 sgt mayor refresh' > "$SHARED_OUT"
 shared_handoff="$(tail -n 1 "$SHARED_OUT")"
 assert_file "$shared_handoff"
-assert_file "$(dirname "$shared_handoff")/mayor-briefing.md"
-assert_file "$(dirname "$shared_handoff")/mayor-dispatch-snapshot.tsv"
-assert_file "$(dirname "$shared_handoff")/mayor-ai-cycle.state"
-assert_file "$(dirname "$shared_handoff")/mayor-start.receipt"
-assert_file "$(dirname "$shared_handoff")/mayor-start.log"
-assert_file "$(dirname "$shared_handoff")/mayor-start-failure.state"
+for entry in "${shared_transient_entries[@]}"; do
+  if [[ -d "$(dirname "$shared_handoff")/$entry" ]]; then
+    :
+  elif [[ "$entry" == "mayor-workspace" || "$entry" == "mayor-action-receipts" || "$entry" == "mayor-notify-receipts" || "$entry" == "mayor-notify-attempts" || "$entry" == "mayor-dispatch-triggers" || "$entry" == "mayor-dispatch-attempts" ]]; then
+    [[ -d "$(dirname "$shared_handoff")/$entry" ]] || {
+      echo "expected archived directory: $entry" >&2
+      exit 1
+    }
+  else
+    assert_file "$(dirname "$shared_handoff")/$entry"
+  fi
+done
 assert_file "$(dirname "$shared_handoff")/mayor-workspace/CLAUDE.md"
 assert_file "$SHARED_HOME/sgt/.sgt/mayor-decisions.log"
 assert_file_missing "$SHARED_HOME/sgt/.sgt/mayor-briefing.md"
 assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-workspace"
+assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-action-receipts"
+assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-notify-receipts"
+assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-notify-attempts"
+assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-dispatch-triggers"
+assert_dir_missing "$SHARED_HOME/sgt/.sgt/mayor-dispatch-attempts"
 grep -qx 'sgt-mayor' "$SHARED_SESSIONS" || {
   echo "expected shared mayor session to be restarted" >&2
   exit 1
@@ -182,6 +237,32 @@ cp "$SGT_SCRIPT" "$RIG_HOME/.local/bin/sgt"
 chmod +x "$RIG_HOME/.local/bin/sgt"
 printf 'sgt-mayor-alpha\nsgt-mayor-beta\n' > "$RIG_SESSIONS"
 
+per_rig_transient_entries=(
+  mayor-action-receipts
+  mayor-agent-heartbeat-watchdog.state
+  mayor-ai-cycle.state
+  mayor-ai-observability.state
+  mayor-auto-refresh.state
+  mayor-briefing.md
+  mayor-ci-check-watchdog.state
+  mayor-critical-alert.state
+  mayor-dispatch-attempts
+  mayor-dispatch-snapshot.tsv
+  mayor-dispatch-triggers
+  mayor-exit.state
+  mayor-heartbeat.state
+  mayor-last-cycle.state
+  mayor-notify-alert.state
+  mayor-notify-attempts
+  mayor-notify-receipts
+  mayor-prompt-budget.state
+  mayor-review-watchdog.state
+  mayor-start-failure.state
+  mayor-start.log
+  mayor-start.receipt
+  mayor-workspace
+)
+
 run_env "$RIG_HOME" "$RIG_SESSIONS" bash --noprofile --norc -c '
 set -euo pipefail
 sgt init >/dev/null
@@ -191,6 +272,28 @@ printf "https://github.com/acme/beta\n" > "$SGT_ROOT/.sgt/rigs/beta"
 mkdir -p "$SGT_ROOT/.sgt/mayors/alpha/mayor-workspace" "$SGT_ROOT/.sgt/mayors/beta/mayor-workspace"
 printf "alpha briefing\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-briefing.md"
 printf "beta briefing\n" > "$SGT_ROOT/.sgt/mayors/beta/mayor-briefing.md"
+printf "alpha obs\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-ai-observability.state"
+printf "alpha cycle\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-ai-cycle.state"
+printf "alpha budget\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-prompt-budget.state"
+printf "alpha refresh\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-auto-refresh.state"
+printf "alpha heartbeat\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-heartbeat.state"
+printf "alpha last cycle\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-last-cycle.state"
+printf "alpha exit\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-exit.state"
+printf "alpha critical\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-critical-alert.state"
+printf "alpha notify\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-notify-alert.state"
+printf "alpha review\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-review-watchdog.state"
+printf "alpha ci\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-ci-check-watchdog.state"
+printf "alpha agent hb\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-agent-heartbeat-watchdog.state"
+printf "alpha start receipt\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-start.receipt"
+printf "alpha start log\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-start.log"
+printf "alpha start failure\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-start-failure.state"
+printf "alpha snapshot\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-dispatch-snapshot.tsv"
+mkdir -p "$SGT_ROOT/.sgt/mayors/alpha/mayor-action-receipts" "$SGT_ROOT/.sgt/mayors/alpha/mayor-notify-receipts" "$SGT_ROOT/.sgt/mayors/alpha/mayor-notify-attempts" "$SGT_ROOT/.sgt/mayors/alpha/mayor-dispatch-triggers" "$SGT_ROOT/.sgt/mayors/alpha/mayor-dispatch-attempts"
+printf "alpha action receipt\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-action-receipts/one"
+printf "alpha notify receipt\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-notify-receipts/one"
+printf "alpha notify attempt\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-notify-attempts/one"
+printf "alpha trigger\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-dispatch-triggers/one"
+printf "alpha dispatch attempt\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-dispatch-attempts/one"
 printf "alpha notes\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-workspace/CLAUDE.md"
 printf "beta notes\n" > "$SGT_ROOT/.sgt/mayors/beta/mayor-workspace/CLAUDE.md"
 printf "alpha decision\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-decisions.log"
@@ -201,13 +304,27 @@ RIG_OUT="$TMP_ROOT/per-rig-refresh.out"
 run_env "$RIG_HOME" "$RIG_SESSIONS" SGT_MAYOR_ARCHITECTURE=per-rig bash --noprofile --norc -c 'set -euo pipefail; timeout 15 sgt mayor refresh alpha' > "$RIG_OUT"
 rig_handoff="$(tail -n 1 "$RIG_OUT")"
 assert_file "$rig_handoff"
-assert_file "$(dirname "$rig_handoff")/mayor-briefing.md"
+for entry in "${per_rig_transient_entries[@]}"; do
+  if [[ "$entry" == "mayor-workspace" || "$entry" == "mayor-action-receipts" || "$entry" == "mayor-notify-receipts" || "$entry" == "mayor-notify-attempts" || "$entry" == "mayor-dispatch-triggers" || "$entry" == "mayor-dispatch-attempts" ]]; then
+    [[ -d "$(dirname "$rig_handoff")/$entry" ]] || {
+      echo "expected archived per-rig directory: $entry" >&2
+      exit 1
+    }
+  else
+    assert_file "$(dirname "$rig_handoff")/$entry"
+  fi
+done
 assert_file "$(dirname "$rig_handoff")/mayor-workspace/CLAUDE.md"
 assert_file "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-decisions.log"
 assert_file "$RIG_HOME/sgt/.sgt/mayors/beta/mayor-briefing.md"
 assert_file "$RIG_HOME/sgt/.sgt/mayors/beta/mayor-workspace/CLAUDE.md"
 assert_file_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-briefing.md"
 assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-workspace"
+assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-action-receipts"
+assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-notify-receipts"
+assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-notify-attempts"
+assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-dispatch-triggers"
+assert_dir_missing "$RIG_HOME/sgt/.sgt/mayors/alpha/mayor-dispatch-attempts"
 grep -qx 'sgt-mayor-alpha' "$RIG_SESSIONS" || {
   echo "expected alpha mayor session to be restarted" >&2
   exit 1

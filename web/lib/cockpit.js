@@ -787,8 +787,8 @@ function buildCockpitSnapshot({
 function resolveStreamSession(target, { configDir }) {
   if (!target) return null;
   if (target === 'deacon') return { session: 'sgt-deacon', target };
-  if (target === 'mayor') return { session: 'sgt-mayor', target };
-  if (target.startsWith('mayor/')) return { session: `sgt-mayor-${target.slice('mayor/'.length)}`, target };
+  const mayorSession = resolveMayorSessionName(target);
+  if (mayorSession) return { session: mayorSession, target };
   if (target.startsWith('witness/')) return { session: `sgt-witness-${target.slice('witness/'.length)}`, target };
   if (target.startsWith('refinery/')) return { session: `sgt-refinery-${target.slice('refinery/'.length)}`, target };
   if (target.startsWith('crew/')) return { session: `sgt-crew-${target.slice('crew/'.length)}`, target };
@@ -811,14 +811,23 @@ function isMayorTarget(target) {
   return target === 'mayor' || target.startsWith('mayor/');
 }
 
-function resolveMayorLogPath(target, { configDir }) {
-  if (target === 'mayor') {
-    return path.join(configDir, 'mayor-start.log');
-  }
-  if (target.startsWith('mayor/')) {
-    return path.join(configDir, 'mayors', target.slice('mayor/'.length), 'mayor-start.log');
+function resolveMayorSessionName(target) {
+  if (target === 'mayor') return 'sgt-mayor';
+  if (target && target.startsWith('mayor/')) return `sgt-mayor-${target.slice('mayor/'.length)}`;
+  return '';
+}
+
+function resolveMayorRuntimeDir(target, { configDir }) {
+  if (target === 'mayor') return configDir;
+  if (target && target.startsWith('mayor/')) {
+    return path.join(configDir, 'mayors', target.slice('mayor/'.length));
   }
   return '';
+}
+
+function resolveMayorLogPath(target, { configDir }) {
+  const runtimeDir = resolveMayorRuntimeDir(target, { configDir });
+  return runtimeDir ? path.join(runtimeDir, 'mayor-start.log') : '';
 }
 
 function hasVisibleContent(content) {
@@ -1007,6 +1016,8 @@ module.exports = {
   readRecentLogLines,
   readStateFile,
   resolveMayorLogPath,
+  resolveMayorRuntimeDir,
+  resolveMayorSessionName,
   resolveStreamSession,
   tryReadJson,
 };
