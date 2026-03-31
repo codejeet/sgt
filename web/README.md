@@ -179,6 +179,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 | GET | `/api/peek/:target` | Peek at tmux pane output |
 | GET | `/api/logs?lines=N` | Tail sgt.log |
 | GET | `/api/plan-state/:rig` | Repo plan-state JSON for one rig |
+| POST | `/api/nudge` | Send a pane-scoped nudge `{target, message}` |
 | POST | `/api/sling` | Dispatch a polecat `{rig, task, labels?, convoy?}` |
 | POST | `/api/sling-dog` | Dispatch a dog `{rig, issue}` |
 | WS | `/` | Real-time status/log stream plus snapshot + tmux stream events |
@@ -196,7 +197,7 @@ The stream section defaults to a polecat-focused monitor wall:
 - rig and role filters narrow the active live panes without leaving the page
 - `Match` filters by worker name, rig, issue, or branch text
 - `Tail All` toggles auto-follow across every subscribed pane
-- each pane still supports `Tail`, `Focus`, and `Peek`
+- each pane still supports `Tail`, `Focus`, `Peek`, and a bottom-anchored `Nudge` input scoped to that pane target
 
 Server-to-client additions:
 
