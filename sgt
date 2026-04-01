@@ -12575,6 +12575,7 @@ _president_operator_log_event() {
 
 _president_supervise_rig_mayor() {
   local rig="${1:-}" cycle_reason="${2:-periodic}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   local mayor_session mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale mayor_hb_health
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local activity changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
@@ -12667,13 +12668,13 @@ _president_supervise_rig_mayor() {
   fi
 
   if [[ -z "$action" ]]; then
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 1
   fi
 
   if ! _president_intervention_allowed "$rig" "$reason" "$action"; then
     _president_operator_log_event "$rig" "$action" "$reason" "suppressed-by-cooldown" "$detail" "$cycle_reason"
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 1
   fi
 
@@ -12688,7 +12689,7 @@ _president_supervise_rig_mayor() {
       cmd_wake_mayor "president:${rig}:${reason}" >/dev/null
       ;;
     *)
-      _mayor_scope_apply ""
+      _mayor_scope_apply "$prior_scope_rig"
       return 1
       ;;
   esac
@@ -12696,7 +12697,7 @@ _president_supervise_rig_mayor() {
   _president_operator_log_event "$rig" "$action" "$reason" "intervened" "$detail" "$cycle_reason"
   log_event "PRESIDENT_INTERVENTION rig=$rig action=$action reason=$reason detail=\"$(_escape_quotes "$detail")\" cycle_trigger=\"$(_escape_quotes "$cycle_reason")\""
   echo "[president] intervened on mayor/$rig — action=$action reason=$reason detail=$detail"
-  _mayor_scope_apply ""
+  _mayor_scope_apply "$prior_scope_rig"
   return 0
 }
 
@@ -12861,6 +12862,7 @@ cmd_wake_president() {
 
 _deacon_supervise_mayor() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   _mayor_scope_apply "$scope_rig"
   local mayor_name mayor_session_name
   mayor_name="$(_mayor_scope_agent_name "$scope_rig")"
@@ -12892,7 +12894,10 @@ _deacon_supervise_mayor() {
     restart_line="[deacon] mayor heartbeat stale (${hb_age}s > ${hb_stale_secs}s) — restarting"
   fi
 
-  [[ -n "$restart_reason" ]] || return 1
+  if [[ -z "$restart_reason" ]]; then
+    _mayor_scope_apply "$prior_scope_rig"
+    return 1
+  fi
 
   if [[ "$restart_reason" == heartbeat-* ]]; then
     tmux kill-session -t "$mayor_session_name" 2>/dev/null || true
@@ -12917,6 +12922,7 @@ _deacon_supervise_mayor() {
   echo "$restart_line"
   log_event "DEACON_RESTART_MAYOR reason=$restart_reason rig=${scope_rig:-shared} session=$mayor_session heartbeat_state=${hb_state:-unknown} heartbeat_health=${hb_health:-unknown} heartbeat_age=${hb_age:-unknown}s heartbeat_phase=${hb_phase:-unknown} heartbeat_cycle=${hb_cycle:-unknown} trigger=\"$(_escape_quotes "${hb_trigger:-unknown}")\" last_exit_reason=${exit_reason:-none} last_exit_signal=${exit_signal:-none} last_exit_code=${exit_code:-unknown} last_exit_unexpected=${exit_unexpected:-unknown} last_exit_pid=${exit_pid:-unknown} last_cycle_trigger=\"$(_escape_quotes "${exit_trigger:-unknown}")\" last_cycle_status=${exit_cycle_status:-unknown} last_cycle_at=\"$(_escape_quotes "${exit_cycle_at:-unknown}")\""
   cmd_mayor_start "$scope_rig"
+  _mayor_scope_apply "$prior_scope_rig"
   return 0
 }
 
@@ -15261,6 +15267,7 @@ EOF
 
 _cmd_mayor_start_one() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   ensure_init
   _mayor_scope_apply "$scope_rig"
 
@@ -15268,7 +15275,8 @@ _cmd_mayor_start_one() {
   session="$(_mayor_scope_session_name "$scope_rig")"
   if tmux has-session -t "$session" 2>/dev/null; then
     info "$(_mayor_scope_agent_name "$scope_rig") already running"
-    return
+    _mayor_scope_apply "$prior_scope_rig"
+    return 0
   fi
 
   # Create FIFO for event-driven wake
@@ -15311,11 +15319,13 @@ _cmd_mayor_start_one() {
     _mayor_exit_state_write "tmux-new-session-failed" "1" "START" "true" "$$" "" "" "spawn-failed"
     log_event "MAYOR_SPAWN_FAILED reason_code=tmux-new-session-failed attempt=$attempt_token exec_path=\"$(_escape_quotes "$sgt_exec")\" detail=\"$(_escape_quotes "$startup_detail")\""
     warn "$(_mayor_scope_agent_name "$scope_rig") spawn failed before startup validation (attempt=$attempt_token). See $mayor_log"
+    _mayor_scope_apply "$prior_scope_rig"
     return 1
   fi
 
   if _mayor_wait_for_start "$session" "$attempt_token" "$startup_timeout"; then
     info "$(_mayor_scope_agent_name "$scope_rig") started (session: $session, event-driven + fallback every ${SGT_MAYOR_INTERVAL}s)"
+    _mayor_scope_apply "$prior_scope_rig"
     return 0
   fi
 
@@ -15333,6 +15343,7 @@ _cmd_mayor_start_one() {
   log_event "MAYOR_SPAWN_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
   log_event "MAYOR_START_FAILED reason_code=startup-validation-failed attempt=$attempt_token timeout=${startup_timeout}s log_path=\"$(_escape_quotes "$mayor_log")\" detail=\"$(_escape_quotes "$startup_detail")\""
   warn "$(_mayor_scope_agent_name "$scope_rig") spawn failed validation (attempt=$attempt_token, timeout=${startup_timeout}s). See $mayor_log"
+  _mayor_scope_apply "$prior_scope_rig"
   return 1
 }
 
@@ -15342,8 +15353,10 @@ cmd_mayor_start() {
   if _mayor_architecture_per_rig; then
     _hierarchy_cutover_retire_shared_mayor || true
     if [[ -n "$scope_rig" ]]; then
-      _cmd_mayor_start_one "$scope_rig"
-      return $?
+      local start_rc=0
+      _cmd_mayor_start_one "$scope_rig" || start_rc=$?
+      _mayor_scope_apply "$prior_scope_rig"
+      return "$start_rc"
     fi
     local rig
     for rig in $(_mayor_all_rigs); do
@@ -15353,10 +15366,12 @@ cmd_mayor_start() {
     return 0
   fi
   _cmd_mayor_start_one ""
+  _mayor_scope_apply "$prior_scope_rig"
 }
 
 _cmd_mayor_stop_one() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   _mayor_scope_apply "$scope_rig"
   local session
   session="$(_mayor_scope_session_name "$scope_rig")"
@@ -15369,6 +15384,7 @@ _cmd_mayor_stop_one() {
   fi
   # Clean up FIFO
   [[ -p "$SGT_MAYOR_FIFO" ]] && rm -f "$SGT_MAYOR_FIFO"
+  _mayor_scope_apply "$prior_scope_rig"
   return 0
 }
 
@@ -15377,8 +15393,10 @@ cmd_mayor_stop() {
   local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   if _mayor_architecture_per_rig; then
     if [[ -n "$scope_rig" ]]; then
-      _cmd_mayor_stop_one "$scope_rig"
-      return $?
+      local stop_rc=0
+      _cmd_mayor_stop_one "$scope_rig" || stop_rc=$?
+      _mayor_scope_apply "$prior_scope_rig"
+      return "$stop_rc"
     fi
     local rig
     for rig in $(_mayor_all_rigs); do
@@ -15388,10 +15406,12 @@ cmd_mayor_stop() {
     return 0
   fi
   _cmd_mayor_stop_one ""
+  _mayor_scope_apply "$prior_scope_rig"
 }
 
 _cmd_mayor_refresh_one() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   local was_running="false" handoff_token handoff_dir handoff_file status_snapshot refresh_reason
   ensure_init
   _mayor_scope_apply "$scope_rig"
@@ -15422,6 +15442,7 @@ _cmd_mayor_refresh_one() {
     refresh_reason="manual-refresh|handoff=$handoff_token"
   fi
   cmd_wake_mayor "$refresh_reason"
+  _mayor_scope_apply "$prior_scope_rig"
   echo "$handoff_file"
 }
 
@@ -15430,8 +15451,10 @@ cmd_mayor_refresh() {
   local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   if _mayor_architecture_per_rig "$scope_rig"; then
     if [[ -n "$scope_rig" ]]; then
-      _cmd_mayor_refresh_one "$scope_rig"
-      return $?
+      local refresh_rc=0
+      _cmd_mayor_refresh_one "$scope_rig" || refresh_rc=$?
+      _mayor_scope_apply "$prior_scope_rig"
+      return "$refresh_rc"
     fi
     local rig
     for rig in $(_mayor_all_rigs); do
@@ -15441,6 +15464,7 @@ cmd_mayor_refresh() {
     return 0
   fi
   _cmd_mayor_refresh_one ""
+  _mayor_scope_apply "$prior_scope_rig"
 }
 
 # Public command: wake the mayor on demand

@@ -1352,3 +1352,59 @@ Required follow-up:
 ```
 - 2026-04-01T08:25:16+02:00 — 2026-04-01 issue #361: added test_ralph_mode_latest_main_proof.sh as the repo-owned latest-main proof path for Ralph mode; it bundles config/state, President intervention, stranded-rig refill, and cockpit visibility coverage, and README now points operators at that single entrypoint.
 - 2026-04-01T08:54:09+02:00 — 2026-04-01 issue #364 duplicate redispatch fallout: plan tick no longer treats default task status pending/planned as an authoritative reopen of completed work. Explicit repo-local reopen now requires status=reopened/requeue or reopen=true, while unchanged tasks retain the latest merged plan-task issue lineage so duplicate open plan-<task> issues do not reset completed tasks back to pending/dispatched.
+- 2026-04-01T09:07:10+02:00 — 2026-04-01 issue #366: when Ralph is enabled and the condition remains unmet, plan-state completion.acceptance now mirrors the effective pending status instead of leaking stale verified/waived terminal metadata; the original declared terminal status/timestamp is preserved under completion.acceptance.declared_* for operator forensics, and regression coverage lives in test_ralph_mode_config_and_state.sh.
+- 2026-04-01T09:08:14+02:00 — Acceptance blocker sgt-acceptance-1775027294-89db909c reported by witness: Replacement work required after stalled polecat for issue #366
+
+### Acceptance Blocker sgt-acceptance-1775027294-89db909c
+
+- Reported at: 2026-04-01T09:08:14+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #366
+
+```markdown
+Replacement work required after stalled polecat for issue #366
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #366
+- Issue URL: https://github.com/codejeet/sgt/issues/366
+- Issue title: unknown
+- Polecat: sgt-89881ba7
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T09:09:57+02:00 — Issue #367: the Web cockpit now exposes inline per-rig Ralph controls via POST /api/ralph/:rig (enable/disable, condition text, target concurrency, condition status, count-support toggle), while test_ralph_mode_config_and_state.sh now asserts human status and durable event-log visibility for Ralph state changes.
+- 2026-04-01T11:16:35+02:00 — 2026-04-01 issue #370: per-rig mayor helper calls must preserve the caller's rig scope and existing errexit mode. Status/notify/start-stop-refresh helpers that reset scope to shared or blindly restore set -e can make President-started mayor/<rig> sessions fall off after startup/event handling with clean-exit or nonzero-exit noise instead of staying resident.
+- 2026-04-01T11:18:05+02:00 — Acceptance blocker sgt-acceptance-1775035085-041bcff8 reported by witness: Replacement work required after stalled polecat for issue #370
+
+### Acceptance Blocker sgt-acceptance-1775035085-041bcff8
+
+- Reported at: 2026-04-01T11:18:05+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #370
+
+```markdown
+Replacement work required after stalled polecat for issue #370
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #370
+- Issue URL: https://github.com/codejeet/sgt/issues/370
+- Issue title: unknown
+- Polecat: sgt-f1ac7cda
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T11:34:21+02:00 — 2026-04-01 issue #371: per-rig mayor liveness under President depends on preserving both caller rig scope and the current errexit mode across helper calls. In practice, _mayor_notify_rigger flipping set -e back on and helper paths like status/wake/start/stop/refresh resetting scope to shared can make mayor/<rig> exit after its first startup/event cycle instead of staying resident.
