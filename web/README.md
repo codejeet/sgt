@@ -108,6 +108,7 @@ That broader proof also checks `sgt status --json` President event history plus 
 - **Live tmux monitoring** — Mayor gets a dedicated live monitor, while all active polecats can stay open simultaneously in a filtered multi-pane wall with per-pane tail/focus/peek controls
 - **Acceptance blocker center** — Open blockers stay prominent with rig ownership, evidence snippets, and timestamps
 - **Recent alert rail** — Defaults to recent and actionable President incidents plus unresolved blocker openings/follow-ups, while trimming stale resolved noise and long-title clutter
+- **Ralph controls per rig** — Each rig card exposes live Ralph state plus inline controls for enable/disable, condition text, target concurrency, condition status, and support-lane counting
 - **Optional ElevenLabs voice** — Env-gated blocker voice announcements with browser mute control plus backend dedupe and rate limiting
 - **Realtime WS** — Normalized `snapshot` pushes plus tmux stream events and live `sgt.log` updates; reconnect/backoff and stale states remain visible
 - **Topology radar** — Force-laid live graph driven from normalized `topology` nodes/edges, using WebGL when available plus a canvas fallback with click/hover focus plus direct focus/peek actions for `president` and `mayor/<rig>` nodes
@@ -204,6 +205,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 | GET | `/api/logs?lines=N` | Tail sgt.log |
 | GET | `/api/plan-state/:rig` | Repo plan-state JSON for one rig |
 | POST | `/api/nudge` | Send a pane-scoped nudge `{target, message}` |
+| POST | `/api/ralph/:rig` | Update Ralph mode config `{enabled?, condition?, conditionStatus?, targetConcurrency?, countSupportLanes?}` |
 | POST | `/api/sling` | Dispatch a polecat `{rig, task, labels?, convoy?}` |
 | POST | `/api/sling-dog` | Dispatch a dog `{rig, issue}` |
 | WS | `/` | Real-time status/log stream plus snapshot + tmux stream events |

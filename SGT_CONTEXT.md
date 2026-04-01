@@ -1350,3 +1350,5 @@ Required follow-up:
 - re-investigate why the worker exited without producing a PR
 
 ```
+- 2026-04-01T08:25:16+02:00 — 2026-04-01 issue #361: added test_ralph_mode_latest_main_proof.sh as the repo-owned latest-main proof path for Ralph mode; it bundles config/state, President intervention, stranded-rig refill, and cockpit visibility coverage, and README now points operators at that single entrypoint.
+- 2026-04-01T08:54:09+02:00 — 2026-04-01 issue #364 duplicate redispatch fallout: plan tick no longer treats default task status pending/planned as an authoritative reopen of completed work. Explicit repo-local reopen now requires status=reopened/requeue or reopen=true, while unchanged tasks retain the latest merged plan-task issue lineage so duplicate open plan-<task> issues do not reset completed tasks back to pending/dispatched.

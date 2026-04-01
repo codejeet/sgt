@@ -370,6 +370,55 @@ a {
   font-size: 12px;
 }
 
+.ralph-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(103, 183, 255, 0.14);
+}
+
+.ralph-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.ralph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.ralph-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+}
+
+.ralph-check {
+  align-content: start;
+}
+
+.ralph-check span {
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+.ralph-check input {
+  width: auto;
+  margin: 2px 0 0;
+}
+
+.ralph-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .pill,
 .state-pill,
 .severity-pill {
@@ -816,7 +865,9 @@ a {
 
 .dispatch-form input,
 .dispatch-form textarea,
-.dispatch-form select {
+.dispatch-form select,
+.ralph-form input,
+.ralph-form select {
   width: 100%;
   padding: 12px;
   color: var(--text);
