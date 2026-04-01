@@ -524,6 +524,22 @@ log_event() {
   echo "[$(date -Iseconds)] $*" >> "$SGT_LOG"
 }
 
+_shell_errexit_state() {
+  if [[ $- == *e* ]]; then
+    printf '1\n'
+  else
+    printf '0\n'
+  fi
+}
+
+_shell_errexit_restore() {
+  if [[ "${1:-0}" == "1" ]]; then
+    set -e
+  else
+    set +e
+  fi
+}
+
 _sgt_exec_path() {
   if [[ -n "${SGT_EXEC_PATH:-}" ]]; then
     printf '%s\n' "$SGT_EXEC_PATH"
@@ -4711,7 +4727,7 @@ EOF
 
 _refinery_branch_deleted_state() {
   local repo="${1:-}" branch="${2:-}"
-  local owner_repo encoded_branch api_out api_rc
+  local owner_repo encoded_branch api_out api_rc restore_errexit
   [[ -n "$repo" && -n "$branch" ]] || {
     echo "unknown"
     return 0
@@ -4719,10 +4735,11 @@ _refinery_branch_deleted_state() {
   owner_repo="$(_repo_owner_repo "$repo")"
   [[ -n "$owner_repo" ]] || owner_repo="$repo"
   encoded_branch="${branch//\//%2F}"
+  restore_errexit="$(_shell_errexit_state)"
   set +e
   api_out="$(gh api "repos/$owner_repo/branches/$encoded_branch" 2>&1 >/dev/null)"
   api_rc=$?
-  set -e
+  _shell_errexit_restore "$restore_errexit"
   if [[ "$api_rc" -eq 0 ]]; then
     echo "false"
     return 0
@@ -5685,7 +5702,7 @@ _context_index_is_fresh() {
 }
 
 _context_search_run() {
-  local rig="${1:-}" query="${2:-}" index_path py_bin model api_key context_file search_rc retrying err_file
+  local rig="${1:-}" query="${2:-}" index_path py_bin model api_key context_file search_rc retrying err_file restore_errexit
   [[ -n "$query" ]] || die "usage: sgt context search <rig> <query>"
   context_file="$(_ensure_context_file "$rig")"
   if ! _context_index_is_fresh "$rig"; then
@@ -5699,6 +5716,7 @@ _context_search_run() {
   retrying=0
   err_file="$(mktemp)"
   while true; do
+    restore_errexit="$(_shell_errexit_state)"
     set +e
     "$py_bin" - "$rig" "$index_path" "$model" "$api_key" "$query" 2>"$err_file" <<'PY'
 import json
@@ -5784,7 +5802,7 @@ for score, entry in top:
     print(f"{score:.3f}\t{date}\tline {line}\t{text}")
 PY
     search_rc=$?
-    set -e
+    _shell_errexit_restore "$restore_errexit"
     if [[ "$search_rc" -eq 0 ]]; then
       cat "$err_file" >&2
       rm -f "$err_file"
@@ -8289,12 +8307,14 @@ _mayor_notify_rigger() {
     verify_details=""
 
     local -a cmd=(openclaw agent --agent "$agent" --deliver --json --message "[SGT Mayor] $message" --channel "$channel")
+    local restore_errexit
     [[ -n "$to" ]] && cmd+=(--to "$to")
     [[ -n "$reply_to" ]] && cmd+=(--reply-to "$reply_to")
+    restore_errexit="$(_shell_errexit_state)"
     set +e
     verify_details="$("${cmd[@]}" 2>&1)"
     send_rc=$?
-    set -e
+    _shell_errexit_restore "$restore_errexit"
     verify_details="$(_one_line "$verify_details")"
 
     _mayor_notify_classify_receipt "$send_rc" "$verify_details"
@@ -8388,7 +8408,7 @@ _mayor_notify_rigger_fail_open() {
 _wake_mayor() {
   local reason="${1:-unknown}"
   if _mayor_architecture_per_rig; then
-    local rig sent=0
+    local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}" rig sent=0
     for rig in $(_mayor_target_rigs_for_reason "$reason"); do
       _mayor_scope_apply "$rig"
       if [[ -p "$SGT_MAYOR_FIFO" ]]; then
@@ -8399,7 +8419,7 @@ _wake_mayor() {
         sent=1
       fi
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 0
   fi
   if [[ -p "$SGT_MAYOR_FIFO" ]]; then
@@ -9086,6 +9106,7 @@ _json_print_array() {
 
 cmd_status_json() {
   ensure_init
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   local -a agents=() dogs=() crew=() merge_queue=() polecats=() mayor_rigs=()
   local daemon_alive="off" daemon_pid="" daemon_pid_json
   if [[ -f "$SGT_DAEMON_PID" ]] && kill -0 "$(cat "$SGT_DAEMON_PID")" 2>/dev/null; then
@@ -9198,7 +9219,7 @@ cmd_status_json() {
       IFS='|' read -r review_watch_count review_watch_oldest review_watch_threshold <<< "$(_mayor_review_watchdog_status_snapshot)"
       agents+=("{\"name\":$(_json_quote "mayor/$mayor_scope_rig"),\"role\":$(_json_quote "mayor"),\"scope\":$(_json_quote "rig"),\"rig\":$(_json_quote "$mayor_scope_rig"),\"status\":$(_json_quote "$mayor_alive"),\"lock\":{\"state\":$(_json_quote "$mayor_lock_state"),\"owner_pid\":$(_json_quote "$mayor_lock_owner"),\"started_at\":$(_json_quote "$mayor_lock_started"),\"lease_until\":$(_json_quote "$mayor_lock_until")},\"heartbeat\":{\"age_seconds\":$(_json_quote "$mayor_hb_age"),\"timestamp\":$(_json_quote "$mayor_hb_ts"),\"state\":$(_json_quote "$mayor_hb_state"),\"health\":$(_json_quote "$mayor_hb_health"),\"stale_seconds\":$(_json_quote "$mayor_hb_stale_secs"),\"pid\":$(_json_quote "$mayor_hb_pid"),\"phase\":$(_json_quote "$mayor_hb_phase"),\"cycle\":$(_json_quote "$mayor_hb_cycle"),\"trigger\":$(_json_quote "$mayor_hb_trigger")},\"last_exit\":{\"timestamp\":$(_json_quote "$mayor_exit_ts"),\"age_seconds\":$(_json_quote "$mayor_exit_age"),\"reason_code\":$(_json_quote "$mayor_exit_reason"),\"exit_code\":$(_json_quote "$mayor_exit_code"),\"signal\":$(_json_quote "$mayor_exit_signal"),\"unexpected\":$(_json_quote "$mayor_exit_unexpected"),\"pid\":$(_json_quote "$mayor_exit_pid"),\"last_cycle_trigger\":$(_json_quote "$mayor_exit_trigger"),\"last_cycle_at\":$(_json_quote "$mayor_exit_cycle_at"),\"last_cycle_status\":$(_json_quote "$mayor_exit_cycle_status")},\"decision_log_warning\":{\"timestamp\":$(_json_quote "$log_fail_ts"),\"age_seconds\":$(_json_quote "$log_fail_age"),\"context\":$(_json_quote "$log_fail_context"),\"workspace\":$(_json_quote "$log_fail_workspace"),\"error\":$(_json_quote "$log_fail_error")},\"notify_warning\":{\"timestamp\":$(_json_quote "$notify_alert_ts"),\"age_seconds\":$(_json_quote "$notify_alert_age"),\"channel\":$(_json_quote "$notify_alert_channel"),\"target\":$(_json_quote "$notify_alert_target"),\"message_key\":$(_json_quote "$notify_alert_message_key"),\"attempt\":$(_json_quote "$notify_alert_attempt"),\"outcome\":$(_json_quote "$notify_alert_outcome"),\"reason\":$(_json_quote "$notify_alert_reason"),\"matcher\":$(_json_quote "$notify_alert_matcher"),\"fail_open\":$(_json_quote "$notify_alert_fail_open")},\"prompt_budget\":{\"timestamp\":$(_json_quote "$budget_ts"),\"age_seconds\":$(_json_quote "$budget_age"),\"measured_at\":$(_json_quote "$budget_measured_at"),\"estimated_tokens\":$(_json_quote "$budget_tokens"),\"char_count\":$(_json_quote "$budget_chars"),\"threshold\":$(_json_quote "$budget_threshold"),\"over_budget\":$(_json_quote "$budget_over"),\"source_path\":$(_json_quote "$budget_source")},\"auto_refresh\":{\"timestamp\":$(_json_quote "$refresh_ts"),\"age_seconds\":$(_json_quote "$refresh_age"),\"refreshed_at\":$(_json_quote "$refresh_at"),\"trigger\":$(_json_quote "$refresh_trigger"),\"estimated_tokens\":$(_json_quote "$refresh_tokens"),\"char_count\":$(_json_quote "$refresh_chars"),\"threshold\":$(_json_quote "$refresh_threshold"),\"handoff_path\":$(_json_quote "$refresh_handoff"),\"handoff_token\":$(_json_quote "$refresh_token"),\"status\":$(_json_quote "$refresh_status")},\"review_watchdog\":{\"count\":$(_json_quote "$review_watch_count"),\"oldest_seconds\":$(_json_quote "$review_watch_oldest"),\"threshold_seconds\":$(_json_quote "$review_watch_threshold")}}")
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
   else
     local mayor_alive="off"
     tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
@@ -9421,6 +9442,7 @@ cmd_status_json() {
 
 _cmd_status_human() {
   ensure_init
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   local status_term_cols status_pr_title_cols
   status_term_cols="$(_term_cols)"
   [[ "$status_term_cols" =~ ^[0-9]+$ ]] || status_term_cols=80
@@ -9603,7 +9625,7 @@ _cmd_status_human() {
         printf "  %-16s %s%s%s\n" "" "$(_dim)" "review watchdog: clear (threshold>=${review_watch_threshold}s)" "$(_reset)"
       fi
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
   else
     local mayor_alive="off"
     tmux has-session -t "sgt-mayor" 2>/dev/null && mayor_alive="on"
@@ -10346,11 +10368,12 @@ cmd_sweep() {
     [[ -f "$f" ]] || continue
     local pname
     pname="$(basename "$f")"
-    local probe_output probe_rc
+    local probe_output probe_rc restore_errexit
+    restore_errexit="$(_shell_errexit_state)"
     set +e
     probe_output="$(_sweep_probe_polecat "$f")"
     probe_rc=$?
-    set -e
+    _shell_errexit_restore "$restore_errexit"
 
     if [[ "$probe_rc" -eq 141 ]]; then
       info "polecat $pname had a benign closed stream — skipping"
@@ -15174,10 +15197,12 @@ cmd_mayor_merge() {
   if [[ "$use_auto" == "true" ]]; then
     merge_cmd+=(--auto)
   fi
+  local restore_errexit
+  restore_errexit="$(_shell_errexit_state)"
   set +e
   merge_out="$("${merge_cmd[@]}" 2>&1)"
   merge_rc=$?
-  set -e
+  _shell_errexit_restore "$restore_errexit"
   pr_state="$(gh pr view "$pr" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
   merged_at="$(gh pr view "$pr" --repo "$repo" --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
   merge_observed_state="pr_state=${pr_state:-unknown};merged_at=${merged_at:-none};merge_rc=${merge_rc}"
@@ -15313,6 +15338,7 @@ _cmd_mayor_start_one() {
 
 cmd_mayor_start() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   if _mayor_architecture_per_rig; then
     _hierarchy_cutover_retire_shared_mayor || true
     if [[ -n "$scope_rig" ]]; then
@@ -15323,7 +15349,7 @@ cmd_mayor_start() {
     for rig in $(_mayor_all_rigs); do
       _cmd_mayor_start_one "$rig"
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 0
   fi
   _cmd_mayor_start_one ""
@@ -15348,6 +15374,7 @@ _cmd_mayor_stop_one() {
 
 cmd_mayor_stop() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   if _mayor_architecture_per_rig; then
     if [[ -n "$scope_rig" ]]; then
       _cmd_mayor_stop_one "$scope_rig"
@@ -15357,7 +15384,7 @@ cmd_mayor_stop() {
     for rig in $(_mayor_all_rigs); do
       _cmd_mayor_stop_one "$rig"
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 0
   fi
   _cmd_mayor_stop_one ""
@@ -15400,6 +15427,7 @@ _cmd_mayor_refresh_one() {
 
 cmd_mayor_refresh() {
   local scope_rig="${1:-}"
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   if _mayor_architecture_per_rig "$scope_rig"; then
     if [[ -n "$scope_rig" ]]; then
       _cmd_mayor_refresh_one "$scope_rig"
@@ -15409,7 +15437,7 @@ cmd_mayor_refresh() {
     for rig in $(_mayor_all_rigs); do
       _cmd_mayor_refresh_one "$rig"
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     return 0
   fi
   _cmd_mayor_refresh_one ""
@@ -15419,6 +15447,7 @@ cmd_mayor_refresh() {
 cmd_wake_mayor() {
   local reason="${1:-manual}"
   local target_rig
+  local prior_scope_rig="${SGT_MAYOR_SCOPE_RIG:-}"
   target_rig="$(_mayor_wake_reason_rig "$reason")"
   if _mayor_architecture_per_rig; then
     local rig started=0
@@ -15431,7 +15460,7 @@ cmd_wake_mayor() {
       fi
       _wake_mayor "$reason"
     done
-    _mayor_scope_apply ""
+    _mayor_scope_apply "$prior_scope_rig"
     if [[ "$started" -eq 1 && -z "$target_rig" ]]; then
       return 0
     fi
