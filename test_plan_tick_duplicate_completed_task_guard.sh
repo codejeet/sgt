@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: plan tick should bind to an explicit open plan-task issue instead of recreating the lane.
+# Regression: default plan "pending" status must not reopen a task already completed by merged lineage.
 
 set -euo pipefail
 
@@ -26,10 +26,7 @@ case "${1:-}" in
   has-session)
     exit 1
     ;;
-  new-session)
-    exit 0
-    ;;
-  kill-session)
+  new-session|kill-session)
     exit 0
     ;;
   *)
@@ -59,9 +56,9 @@ case "${1:-}" in
       add)
         shift
         if [[ "${1:-}" == "-b" ]]; then
-          worktree="$3"
+          worktree="${3:-}"
         else
-          worktree="$1"
+          worktree="${1:-}"
         fi
         mkdir -p "$worktree"
         exit 0
@@ -79,35 +76,61 @@ chmod +x "$TMP_HOME/mock-bin/git"
 cat > "$TMP_HOME/mock-bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-STATE_DIR="${GH_STATE_DIR:?missing GH_STATE_DIR}"
-ISSUES_DIR="$STATE_DIR/issues"
-mkdir -p "$ISSUES_DIR"
+command="${1:-}"
+subcommand="${2:-}"
+shift 2 || true
 
-case "${1:-}:${2:-}" in
-  label:create)
+case "$command:$subcommand" in
+  label:create|issue:edit|pr:view|api:*)
     exit 0
     ;;
   issue:list)
-    label=""
     state_filter="open"
+    label=""
+    json_fields=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        --label) label="${2:-}"; shift 2 ;;
         --state) state_filter="${2:-}"; shift 2 ;;
-        --json) shift 2 ;;
-        --limit) shift 2 ;;
-        --repo) shift 2 ;;
+        --label) label="${2:-}"; shift 2 ;;
+        --json) json_fields="${2:-}"; shift 2 ;;
+        --limit|--repo) shift 2 ;;
         *) shift ;;
       esac
     done
-    if [[ "$label" == "plan-PKOC2" && "$state_filter" == "open" ]]; then
-      cat <<JSON
+    if [[ "$label" == "plan-SGT55" && "$state_filter" == "all" ]]; then
+      cat <<'JSON'
 [
   {
-    "number": 542,
-    "url": "https://github.com/acme/demo/issues/542",
-    "updatedAt": "2026-04-01T06:45:00Z",
-    "createdAt": "2026-04-01T06:40:00Z"
+    "number": 335,
+    "url": "https://github.com/acme/demo/issues/335",
+    "state": "CLOSED",
+    "closedAt": "2026-04-01T04:59:02Z",
+    "createdAt": "2026-04-01T04:42:27Z"
+  },
+  {
+    "number": 361,
+    "url": "https://github.com/acme/demo/issues/361",
+    "state": "CLOSED",
+    "closedAt": "2026-04-01T06:26:22Z",
+    "createdAt": "2026-04-01T06:23:00Z"
+  },
+  {
+    "number": 364,
+    "url": "https://github.com/acme/demo/issues/364",
+    "state": "OPEN",
+    "closedAt": null,
+    "createdAt": "2026-04-01T06:41:52Z"
+  }
+]
+JSON
+    elif [[ "$label" == "plan-SGT55" && "$state_filter" == "open" ]]; then
+      cat <<'JSON'
+[
+  {
+    "number": 364,
+    "url": "https://github.com/acme/demo/issues/364",
+    "updatedAt": "2026-04-01T06:41:52Z",
+    "createdAt": "2026-04-01T06:41:52Z"
   }
 ]
 JSON
@@ -116,9 +139,9 @@ JSON
     fi
     ;;
   issue:view)
-    issue_number="${3:-}"
+    issue_number="${1:-}"
     issue_number="${issue_number#\#}"
-    shift 3
+    shift || true
     json_fields=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -129,21 +152,31 @@ JSON
       esac
     done
     case "$issue_number:$json_fields" in
-      540:state) echo "CLOSED" ;;
-      542:state) echo "OPEN" ;;
-      542:title) echo "Canonical successor issue" ;;
+      335:state) echo "CLOSED" ;;
+      361:state) echo "CLOSED" ;;
+      364:state) echo "OPEN" ;;
       *) echo "" ;;
     esac
     ;;
   pr:list)
-    echo '[]'
+    cat <<'JSON'
+[
+  {
+    "number": 341,
+    "body": "Closes #335",
+    "mergedAt": "2026-04-01T04:59:02Z"
+  },
+  {
+    "number": 362,
+    "body": "Closes #361",
+    "mergedAt": "2026-04-01T06:26:21Z"
+  }
+]
+JSON
     ;;
   issue:create)
     echo "unexpected duplicate issue creation" >&2
     exit 1
-    ;;
-  issue:edit|pr:view|api:*)
-    exit 0
     ;;
   *)
     exit 0
@@ -156,7 +189,6 @@ COMMON_ENV=(
   "HOME=$TMP_HOME"
   "PATH=$TMP_HOME/mock-bin:$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
   "TERM=${TERM:-xterm}"
-  "GH_STATE_DIR=$TMP_HOME/state"
   "SGT_MAYOR_DISPATCH_COOLDOWN=0"
 )
 
@@ -172,24 +204,18 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
   "rig": "demo",
   "policy": { "max_in_flight": 1 },
   "tasks": [
-    { "id": "PKOC2", "title": "Record onchain dispatcher readiness", "status": "reopened" },
-    { "id": "PKOC3", "title": "Dispatch the next ready control-plane task", "depends_on": ["PKOC2"] }
+    { "id": "SGT55", "title": "Define Ralph mode config, state model, and concurrency accounting rules", "status": "pending" }
   ]
 }
 JSON
 cat > "$HOME/sgt/.sgt/plan-state/demo.json" <<'JSON'
 {
   "tasks": {
-    "PKOC2": {
-      "issue_number": "540",
-      "issue_url": "https://github.com/acme/demo/issues/540",
-      "status": "completed",
-      "completed_at": "2026-04-01T06:35:00Z",
-      "updated_at": "2026-04-01T06:35:00Z"
-    },
-    "PKOC3": {
-      "status": "pending",
-      "updated_at": "2026-04-01T06:35:00Z"
+    "SGT55": {
+      "issue_number": "364",
+      "issue_url": "https://github.com/acme/demo/issues/364",
+      "status": "dispatched",
+      "updated_at": "2026-04-01T06:41:56Z"
     }
   }
 }
@@ -207,17 +233,22 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
-pkoc2 = data["tasks"]["PKOC2"]
-pkoc3 = data["tasks"]["PKOC3"]
-
-assert pkoc2["status"] in ("dispatched", "in_progress"), pkoc2
-assert str(pkoc2.get("issue_number")) == "542", pkoc2
-assert "completed_at" not in pkoc2, pkoc2
-assert pkoc3["status"] == "pending", pkoc3
+task = data["tasks"]["SGT55"]
+assert task["status"] == "completed", task
+assert str(task.get("issue_number")) == "361", task
+assert "completed_at" in task, task
+assert task.get("reopen_requested") is False, task
 PY
 
-grep -q 'PLAN_TASK_CANONICAL_ISSUE_BIND rig=demo task=PKOC2 issue=#542 previous_issue=#none previous_status=pending source=manual' "$TMP_HOME/sgt/sgt.log" || {
-  echo "expected canonical issue bind log entry" >&2
+grep -q 'PLAN_TASK_RETAIN_MERGED_LINEAGE rig=demo task=SGT55 issue=#361 pr=#362 merged_at=2026-04-01T06:26:21Z source=manual' "$TMP_HOME/sgt/sgt.log" || {
+  echo "expected merged-lineage retention log entry" >&2
+  cat "$TMP_HOME/sgt/sgt.log" >&2
+  exit 1
+}
+
+grep -q 'dispatched_now=0' "$TMP_HOME/plan-tick.out" || {
+  echo "expected duplicate completed task to avoid fresh dispatch" >&2
+  cat "$TMP_HOME/plan-tick.out" >&2
   exit 1
 }
 

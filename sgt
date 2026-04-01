@@ -6553,6 +6553,17 @@ def declared_task_status(value):
         return "pending"
     return ""
 
+def explicit_reopen_requested(task):
+    if not isinstance(task, dict):
+        return False
+    raw_status = str(task.get("status") or "").strip().lower().replace("-", "_")
+    if raw_status in {"reopen", "reopened", "requeue", "requeued"}:
+        return True
+    raw_flag = task.get("reopen")
+    if isinstance(raw_flag, str):
+        return raw_flag.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw_flag)
+
 normalized = {}
 for task in tasks:
     if not isinstance(task, dict):
@@ -6560,19 +6571,55 @@ for task in tasks:
     task_id = str(task.get("id", "")).strip()
     if not task_id:
         continue
+    title = one_line(task.get("title") or task.get("task") or task_id)
+    task_text = one_line(task.get("task") or task.get("title") or task_id)
+    deps = task.get("depends_on") or []
+    if not isinstance(deps, list):
+        deps = []
+    deps = [str(dep).strip() for dep in deps if str(dep).strip()]
+    labels = task.get("labels") or []
+    if not isinstance(labels, list):
+        labels = []
+    backend = str(task.get("backend") or "").strip()
+    task_signature = json.dumps(
+        {
+            "title": title,
+            "task": task_text,
+            "depends_on": deps,
+            "labels": [str(label).strip() for label in labels if str(label).strip()],
+            "backend": backend,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     current = tasks_state.get(task_id)
     if not isinstance(current, dict):
         current = {}
+    current_signature = str(current.get("task_signature") or "").strip()
     declared_status = declared_task_status(task.get("status"))
     current_status = str(current.get("status") or "").strip()
+    reopen_requested = explicit_reopen_requested(task)
+    if reopen_requested and current_status != "pending":
+        # Explicit reopen intent wins over stale completed/dispatched state.
+        current = {"status": "pending"}
+        current_status = "pending"
     if declared_status:
         if declared_status == "completed":
             current["status"] = "completed"
-        elif current_status != declared_status:
+        elif reopen_requested and current_status != declared_status:
             # Repo-local plan truth can explicitly reopen or requeue a task;
             # when that happens, drop stale issue/completion bookkeeping.
             current = {"status": declared_status}
+        elif current_status == "":
+            current["status"] = declared_status
+    if current_signature and current_signature != task_signature and current.get("status") == "completed":
+        # A materially changed task definition should open fresh work instead
+        # of inheriting stale completion bookkeeping from the previous shape.
+        current = {"status": "pending"}
     current.setdefault("status", "pending")
+    current["task_signature"] = task_signature
+    current["reopen_requested"] = bool(reopen_requested)
     normalized[task_id] = current
 
 doc = {
@@ -6667,6 +6714,8 @@ for task in tasks:
             issue_url,
             ",".join(str(label).strip() for label in labels if str(label).strip()),
             backend,
+            str(state_entry.get("task_signature") or ""),
+            "1" if state_entry.get("reopen_requested") else "0",
         ])
     )
 PY
@@ -6918,6 +6967,76 @@ print(f"{number}|{url}")
 PY
 }
 
+_plan_find_latest_merged_task_issue() {
+  local repo="${1:-}" task_id="${2:-}"
+  local issues_json pr_json
+  [[ -n "$repo" && -n "$task_id" ]] || return 1
+  issues_json="$(gh issue list --repo "$repo" --state all --label "plan-$task_id" --limit 100 --json number,url,state,closedAt,createdAt 2>/dev/null || true)"
+  [[ -n "$issues_json" ]] || return 1
+  pr_json="$(gh pr list --repo "$repo" --state merged --limit 100 --json number,body,mergedAt 2>/dev/null || true)"
+  [[ -n "$pr_json" ]] || return 1
+  python3 - "$issues_json" "$pr_json" "$(_repo_owner_repo "$repo")" <<'PY'
+import json
+import re
+import sys
+
+try:
+    issues = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+try:
+    pulls = json.loads(sys.argv[2])
+except Exception:
+    raise SystemExit(1)
+owner_repo = str(sys.argv[3] or "").strip().lower()
+
+if not isinstance(issues, list) or not isinstance(pulls, list):
+    raise SystemExit(1)
+
+issue_map = {}
+for issue in issues:
+    if not isinstance(issue, dict):
+        continue
+    number = str(issue.get("number") or "").strip()
+    url = str(issue.get("url") or "").strip()
+    state = str(issue.get("state") or "").strip().upper()
+    if not number or not url:
+        continue
+    issue_map[number] = {"url": url, "state": state}
+
+if not issue_map:
+    raise SystemExit(1)
+
+pattern = re.compile(
+    r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:"
+    + re.escape(owner_repo)
+    + r"#|#)(\d+)\b"
+)
+
+best = None
+for pr in pulls:
+    if not isinstance(pr, dict):
+        continue
+    pr_number = str(pr.get("number") or "").strip()
+    merged_at = str(pr.get("mergedAt") or "").strip()
+    body = str(pr.get("body") or "")
+    if not pr_number or not merged_at:
+        continue
+    for issue_number in pattern.findall(body):
+        if issue_number not in issue_map:
+            continue
+        item = issue_map[issue_number]
+        sort_key = (merged_at, pr_number, issue_number)
+        if best is None or sort_key > best[0]:
+            best = (sort_key, issue_number, item["url"], pr_number, merged_at, item["state"])
+
+if best is None:
+    raise SystemExit(1)
+
+print(f"{best[1]}|{best[2]}|{best[3]}|{best[4]}|{best[5]}")
+PY
+}
+
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
   local canonical_plan_file plan_file repo snapshot_line
@@ -6954,8 +7073,8 @@ _plan_tick_run() {
     "$( [[ "$ralph_underfilled" == "1" ]] && printf 'true' || printf 'false' )" \
     "$( [[ "$ralph_completion_blocked" == "1" ]] && printf 'true' || printf 'false' )")"
   local -a task_ids=()
-  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=()
-  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9; do
+  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=() task_signature=() task_reopen_requested=()
+  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11; do
     [[ -n "$record_type" ]] || continue
     case "$record_type" in
       CONFIG)
@@ -6978,6 +7097,8 @@ _plan_tick_run() {
         task_issue_url["$c1"]="$c7"
         task_labels["$c1"]="$c8"
         task_backend["$c1"]="$c9"
+        task_signature["$c1"]="$c10"
+        task_reopen_requested["$c1"]="$c11"
         ;;
     esac
   done < <(_plan_state_snapshot "$rig" "$plan_file" "$canonical_plan_file")
@@ -6995,11 +7116,33 @@ _plan_tick_run() {
   fi
 
   local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0 dispatch_failures=0 pending_ready=0 pending_blocked=0 last_failure_reason_code="" last_failure_detail=""
-  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at explicit_issue_snapshot explicit_issue_number explicit_issue_url previous_issue_number previous_task_status
-  local -A merged_closing_pr_cache=()
+  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at explicit_issue_snapshot explicit_issue_number explicit_issue_url previous_issue_number previous_task_status merged_task_snapshot merged_task_issue_number merged_task_issue_url merged_task_pr_number merged_task_pr_merged_at merged_task_issue_state
+  local -A merged_closing_pr_cache=() merged_task_issue_cache=()
   for task_id in "${task_ids[@]}"; do
     issue_number="${task_issue[$task_id]}"
-    explicit_issue_snapshot="$(_plan_find_open_task_issue "$repo" "$task_id" "$issue_number" 2>/dev/null || true)"
+    if [[ "${task_reopen_requested[$task_id]:-0}" != "1" ]]; then
+      if [[ -v "merged_task_issue_cache[$task_id]" ]]; then
+        merged_task_snapshot="${merged_task_issue_cache[$task_id]}"
+      else
+        merged_task_snapshot="$(_plan_find_latest_merged_task_issue "$repo" "$task_id" 2>/dev/null || true)"
+        merged_task_issue_cache["$task_id"]="$merged_task_snapshot"
+      fi
+      if [[ -n "$merged_task_snapshot" && "$merged_task_snapshot" == *"|"* ]]; then
+        IFS='|' read -r merged_task_issue_number merged_task_issue_url merged_task_pr_number merged_task_pr_merged_at merged_task_issue_state <<< "$merged_task_snapshot"
+        if [[ -n "$merged_task_issue_number" && ( "${task_status[$task_id]}" != "completed" || "$issue_number" != "$merged_task_issue_number" ) ]]; then
+          _plan_state_update_task "$rig" "$task_id" "completed" "$merged_task_issue_number" "${merged_task_issue_url:-${task_issue_url[$task_id]}}"
+          task_status["$task_id"]="completed"
+          task_issue["$task_id"]="$merged_task_issue_number"
+          task_issue_url["$task_id"]="${merged_task_issue_url:-${task_issue_url[$task_id]}}"
+          issue_number="$merged_task_issue_number"
+          log_event "PLAN_TASK_RETAIN_MERGED_LINEAGE rig=$rig task=$task_id issue=#$merged_task_issue_number pr=#${merged_task_pr_number:-unknown} merged_at=${merged_task_pr_merged_at:-unknown} source=$tick_source"
+        fi
+      fi
+    fi
+    explicit_issue_snapshot=""
+    if [[ "${task_reopen_requested[$task_id]:-0}" == "1" ]]; then
+      explicit_issue_snapshot="$(_plan_find_open_task_issue "$repo" "$task_id" "$issue_number" 2>/dev/null || true)"
+    fi
     if [[ -n "$explicit_issue_snapshot" && "$explicit_issue_snapshot" == *"|"* ]]; then
       IFS='|' read -r explicit_issue_number explicit_issue_url <<< "$explicit_issue_snapshot"
       if [[ -n "$explicit_issue_number" && ( "$issue_number" != "$explicit_issue_number" || "${task_status[$task_id]}" == "completed" ) ]]; then
