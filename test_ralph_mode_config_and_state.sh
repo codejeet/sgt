@@ -161,7 +161,13 @@ sgt config ralph demo --enable --condition "1K PNL for 5m btc pipeline" --target
 sgt plan tick demo >/dev/null 2>&1
 sgt status --json > "$SGT_ROOT/status-before.json"
 
-python3 - "$SGT_ROOT/status-before.json" "$SGT_ROOT/.sgt/plan-state/demo.json" <<'PY'
+BLOCKER_FILE="$SGT_ROOT/.sgt/plan-blockers/demo--__continuation__.env"
+[[ -f "$BLOCKER_FILE" ]] || {
+  echo "expected Ralph continuation blocker to be recorded while live lanes stay below target" >&2
+  exit 1
+}
+
+python3 - "$SGT_ROOT/status-before.json" "$SGT_ROOT/.sgt/plan-state/demo.json" "$BLOCKER_FILE" <<'PY'
 import json
 import sys
 
@@ -169,6 +175,14 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     status = json.load(fh)
 with open(sys.argv[2], "r", encoding="utf-8") as fh:
     plan_state = json.load(fh)
+blocker = {}
+with open(sys.argv[3], "r", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        blocker[key] = value
 
 mayor_rigs = status.get("mayor_rigs") or []
 demo = next((item for item in mayor_rigs if item.get("rig") == "demo"), None)
@@ -188,6 +202,11 @@ assert completion.get("status") == "pending", completion
 assert completion.get("rollup") == "ralph-underfilled", completion
 assert "Ralph mode remains active" in completion.get("details", ""), completion
 assert completion.get("blocked_reason") == "ralph condition unmet: 1K PNL for 5m btc pipeline", completion
+assert blocker.get("TASK_ID") == "__continuation__", blocker
+assert blocker.get("REASON_CODE") == "continuation-underfilled", blocker
+assert "Ralph continuation intent remains active" in blocker.get("REASON", ""), blocker
+assert "live_polecats=1" in blocker.get("REASON", ""), blocker
+assert "target=2" in blocker.get("REASON", ""), blocker
 
 plan_ralph = plan_state.get("ralph") or {}
 assert plan_ralph.get("target_concurrency") == 2, plan_ralph
