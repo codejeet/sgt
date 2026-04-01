@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: duplicate-closed completed lineage must not block a materially changed successor from dispatching.
+# Regression: a materially changed successor must clear stale lineage/bindings and dispatch fresh work.
 
 set -euo pipefail
 
@@ -176,10 +176,10 @@ cat > "$HOME/sgt/.sgt/plan-state/demo.json" <<'JSON'
 {
   "tasks": {
     "ACC2": {
-      "status": "completed",
+      "status": "dispatched",
       "issue_number": "42",
       "issue_url": "https://github.com/acme/demo/issues/42",
-      "completed_at": "2026-04-01T04:52:23Z",
+      "dispatched_at": "2026-04-01T04:52:23Z",
       "task_signature": "{\"backend\":\"\",\"depends_on\":[],\"labels\":[],\"task\":\"Duplicate-closed continuation lane\",\"title\":\"Duplicate-closed continuation lane\"}",
       "updated_at": "2026-04-01T04:52:23Z"
     }
@@ -187,7 +187,7 @@ cat > "$HOME/sgt/.sgt/plan-state/demo.json" <<'JSON'
 }
 JSON
 
-printf 'STATE=%q\nTITLE=%q\n' 'CLOSED' 'Duplicate-closed continuation lane' > "$HOME/state/issues/42.env"
+printf 'STATE=%q\nTITLE=%q\n' 'OPEN' 'Duplicate-closed continuation lane' > "$HOME/state/issues/42.env"
 
 sgt plan tick demo > "$HOME/plan-tick.out" 2>&1
 BASH

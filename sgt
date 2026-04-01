@@ -6674,13 +6674,15 @@ for task in tasks:
             current = {"status": declared_status}
         elif current_status == "":
             current["status"] = declared_status
-    if current_signature and current_signature != task_signature and current.get("status") == "completed":
+    signature_changed = bool(current_signature and current_signature != task_signature)
+    if signature_changed and current.get("status") == "completed":
         # A materially changed task definition should open fresh work instead
         # of inheriting stale completion bookkeeping from the previous shape.
         current = {"status": "pending"}
     current.setdefault("status", "pending")
     current["task_signature"] = task_signature
     current["reopen_requested"] = bool(reopen_requested)
+    current["signature_changed"] = bool(signature_changed)
     normalized[task_id] = current
 
 doc = {
@@ -6777,6 +6779,7 @@ for task in tasks:
             backend,
             str(state_entry.get("task_signature") or ""),
             "1" if state_entry.get("reopen_requested") else "0",
+            "1" if state_entry.get("signature_changed") else "0",
         ])
     )
 PY
@@ -6803,8 +6806,12 @@ entry = tasks.setdefault(task_id, {})
 entry["status"] = status
 if issue_number:
     entry["issue_number"] = issue_number
+else:
+    entry.pop("issue_number", None)
 if issue_url:
     entry["issue_url"] = issue_url
+else:
+    entry.pop("issue_url", None)
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 entry["updated_at"] = now
 if status in ("dispatched", "in_progress") and "dispatched_at" not in entry:
@@ -7124,6 +7131,111 @@ print(f"{best[1]}|{best[2]}|{best[3]}|{best[4]}|{best[5]}")
 PY
 }
 
+_plan_task_issue_mismatch_details() {
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}" fallback_title="${4:-}" py_bin=""
+  local plan_file issue_json
+  [[ -n "$rig" && -n "$repo" && -n "$issue_number" ]] || return 1
+  plan_file="$(_plan_file_path "$rig")"
+  [[ -f "$plan_file" ]] || return 1
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  issue_json="$(gh issue view "$issue_number" --repo "$repo" --json title,body,labels 2>/dev/null || true)"
+  [[ -n "$issue_json" ]] || return 1
+  SGT_PLAN_TASK_ISSUE_JSON="$issue_json" "$py_bin" - "$plan_file" "$fallback_title" <<'PY'
+import json
+import os
+import re
+import sys
+
+plan_file = sys.argv[1]
+fallback_title = sys.argv[2]
+try:
+    with open(plan_file, "r", encoding="utf-8") as fh:
+        plan = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+
+try:
+    issue = json.loads(os.environ.get("SGT_PLAN_TASK_ISSUE_JSON", "") or "{}")
+except Exception:
+    raise SystemExit(0)
+
+if not isinstance(plan, dict) or not isinstance(issue, dict):
+    raise SystemExit(0)
+
+tasks = plan.get("tasks") or []
+if not isinstance(tasks, list):
+    raise SystemExit(0)
+
+task_map = {}
+for task in tasks:
+    if not isinstance(task, dict):
+        continue
+    task_id = str(task.get("id") or "").strip()
+    if task_id:
+        task_map[task_id] = task
+
+labels = issue.get("labels") or []
+plan_task_ids = []
+for label in labels:
+    if not isinstance(label, dict):
+        continue
+    name = str(label.get("name") or "").strip()
+    if name.startswith("plan-") and len(name) > 5:
+        plan_task_ids.append(name[5:])
+
+if not plan_task_ids:
+    raise SystemExit(0)
+
+def one_line(value):
+    return str(value or "").replace("\t", " ").replace("\n", " ").strip()
+
+def normalize(value):
+    return re.sub(r"\s+", " ", one_line(value).lower()).strip()
+
+issue_title = normalize(issue.get("title") or fallback_title)
+issue_body = normalize(issue.get("body") or "")
+if not issue_title and not issue_body:
+    raise SystemExit(0)
+
+for task_id in plan_task_ids:
+    task = task_map.get(task_id)
+    if not isinstance(task, dict):
+        print(f"{task_id}|plan-task-missing|||")
+        raise SystemExit(0)
+    expected_title = one_line(task.get("title") or task.get("task") or task_id)
+    expected_task = one_line(task.get("task") or task.get("title") or task_id)
+    expected_title_norm = normalize(expected_title)
+    expected_task_norm = normalize(expected_task)
+    matches = issue_title in {expected_title_norm, expected_task_norm}
+    if not matches and issue_body:
+        matches = expected_title_norm in issue_body or expected_task_norm in issue_body
+    if matches:
+        raise SystemExit(0)
+    print(f"{task_id}|plan-task-mismatch|{expected_title}|{expected_task}|{one_line(issue.get('title') or fallback_title)}")
+    raise SystemExit(0)
+PY
+}
+
+_plan_task_issue_matches_current_plan() {
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}" fallback_title="${4:-}"
+  local mismatch_details=""
+  _PLAN_TASK_MISMATCH_TASK_ID=""
+  _PLAN_TASK_MISMATCH_REASON_CODE=""
+  _PLAN_TASK_MISMATCH_EXPECTED_TITLE=""
+  _PLAN_TASK_MISMATCH_EXPECTED_TASK=""
+  _PLAN_TASK_MISMATCH_ISSUE_TITLE=""
+  mismatch_details="$(_plan_task_issue_mismatch_details "$rig" "$repo" "$issue_number" "$fallback_title" 2>/dev/null || true)"
+  [[ -z "$mismatch_details" ]] && return 0
+  IFS='|' read -r _PLAN_TASK_MISMATCH_TASK_ID _PLAN_TASK_MISMATCH_REASON_CODE _PLAN_TASK_MISMATCH_EXPECTED_TITLE _PLAN_TASK_MISMATCH_EXPECTED_TASK _PLAN_TASK_MISMATCH_ISSUE_TITLE <<< "$mismatch_details"
+  return 1
+}
+
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
   local canonical_plan_file plan_file repo snapshot_line
@@ -7160,8 +7272,8 @@ _plan_tick_run() {
     "$( [[ "$ralph_underfilled" == "1" ]] && printf 'true' || printf 'false' )" \
     "$( [[ "$ralph_completion_blocked" == "1" ]] && printf 'true' || printf 'false' )")"
   local -a task_ids=()
-  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=() task_signature=() task_reopen_requested=()
-  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11; do
+  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=() task_signature=() task_reopen_requested=() task_signature_changed=()
+  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12; do
     [[ -n "$record_type" ]] || continue
     case "$record_type" in
       CONFIG)
@@ -7186,6 +7298,7 @@ _plan_tick_run() {
         task_backend["$c1"]="$c9"
         task_signature["$c1"]="$c10"
         task_reopen_requested["$c1"]="$c11"
+        task_signature_changed["$c1"]="$c12"
         ;;
     esac
   done < <(_plan_state_snapshot "$rig" "$plan_file" "$canonical_plan_file")
@@ -7243,6 +7356,23 @@ _plan_tick_run() {
         fi
         _plan_state_update_task "$rig" "$task_id" "${task_status[$task_id]}" "$issue_number" "${task_issue_url[$task_id]}"
         log_event "PLAN_TASK_CANONICAL_ISSUE_BIND rig=$rig task=$task_id issue=#$issue_number previous_issue=#${previous_issue_number:-none} previous_status=${previous_task_status:-pending} source=$tick_source"
+      fi
+    fi
+    if [[ -n "$issue_number" ]]; then
+      issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+      if [[ "${task_signature_changed[$task_id]:-0}" == "1" ]]; then
+        active_polecat=""
+        if [[ "$issue_state" == "OPEN" ]]; then
+          active_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)"
+        fi
+        if [[ "$issue_state" != "OPEN" || -z "$active_polecat" ]]; then
+          _plan_state_update_task "$rig" "$task_id" "pending" "" ""
+          log_event "PLAN_TASK_CLEAR_STALE_BINDING rig=$rig task=$task_id issue=#$issue_number state=${issue_state:-unknown} source=$tick_source reason_code=task-signature-changed-no-active-lane"
+          task_status["$task_id"]="pending"
+          task_issue["$task_id"]=""
+          task_issue_url["$task_id"]=""
+          issue_number=""
+        fi
       fi
     fi
     if [[ -n "$issue_number" ]]; then
@@ -10282,6 +10412,10 @@ _sweep_watchdog_resling_open_authorized_issues() {
   while IFS=$'\t' read -r issue_number issue_title; do
     [[ -n "$issue_number" ]] || continue
     source_event_key="${source_event}:${rig}:issue#${issue_number}"
+    if ! _plan_task_issue_matches_current_plan "$rig" "$repo" "$issue_number" "$issue_title"; then
+      log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch} task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown} source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
     if existing_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$existing_polecat" ]]; then
       log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=active-polecat-existing polecat=$existing_polecat source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
       continue
@@ -10371,6 +10505,12 @@ _mayor_recover_stranded_actionable_rig() {
   while IFS=$'\t' read -r issue_number issue_title; do
     [[ -n "$issue_number" ]] || continue
     source_event_key="${source_event}:${rig}:issue#${issue_number}"
+    if ! _plan_task_issue_matches_current_plan "$rig" "$repo" "$issue_number" "$issue_title"; then
+      _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+      _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch}|task=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown}"$'\n'
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch} task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown} source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
 
     if existing_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$existing_polecat" ]]; then
       _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
@@ -10982,6 +11122,11 @@ _witness_loop() {
                 log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=manual-hibernation"
                 continue
               fi
+              if ! _plan_task_issue_matches_current_plan "$rig" "$p_repo" "$p_issue" "$issue_title"; then
+                echo "[witness/$rig] issue #$p_issue no longer matches current plan task — leaving it parked"
+                log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch} task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown}"
+                continue
+              fi
               echo "[witness/$rig] re-slinging issue #$p_issue: $issue_title"
               log_event "WITNESS_RESLING $pname issue=#$p_issue reason_code=$runtime_reason"
               if ! _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled" "witness-stalled:$pname:#$p_issue"; then
@@ -11081,6 +11226,11 @@ _witness_loop() {
             if _mayor_rig_manually_hibernated "$rig"; then
               echo "[witness/$rig] rig manually hibernated — leaving stalled issue #$p_issue parked"
               log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=manual-hibernation"
+              continue
+            fi
+            if ! _plan_task_issue_matches_current_plan "$rig" "$p_repo" "$p_issue" "$issue_title"; then
+              echo "[witness/$rig] issue #$p_issue no longer matches current plan task — leaving it parked"
+              log_event "WITNESS_RESLING_SKIP $pname rig=$rig issue=#$p_issue reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch} task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown}"
               continue
             fi
             echo "[witness/$rig] re-slinging issue #$p_issue: $issue_title"
@@ -11210,6 +11360,11 @@ _resling_existing_issue() {
   if ! _has_sgt_authorized "$repo" "$issue_number"; then
     echo "[resling] issue #$issue_number lacks sgt-authorized label — skipping"
     log_event "RESLING_SKIP_UNAUTHORIZED issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" skip_reason=\"issue lacks sgt-authorized\""
+    return 1
+  fi
+  if ! _plan_task_issue_matches_current_plan "$rig" "$repo" "$issue_number" "$task"; then
+    echo "[resling] issue #$issue_number no longer matches current plan task — skipping"
+    log_event "RESLING_SKIP_STALE_PLAN_TASK issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown} reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch}"
     return 1
   fi
 
