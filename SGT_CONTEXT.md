@@ -1408,3 +1408,121 @@ Required follow-up:
 
 ```
 - 2026-04-01T11:34:21+02:00 — 2026-04-01 issue #371: per-rig mayor liveness under President depends on preserving both caller rig scope and the current errexit mode across helper calls. In practice, _mayor_notify_rigger flipping set -e back on and helper paths like status/wake/start/stop/refresh resetting scope to shared can make mayor/<rig> exit after its first startup/event cycle instead of staying resident.
+- 2026-04-01T11:48:19+02:00 — 2026-04-01 issue #370: preserve caller mayor scope across President/Deacon per-rig supervision and mayor start/stop/refresh helpers. Those helpers must not force scope back to shared after rig-targeted calls, or President-started mayor/<rig> sessions can lose scoped state/heartbeat paths and fall off after startup. Regression coverage now asserts scope preservation across cmd_mayor_start/stop/refresh, their _cmd_* helpers, and _president_supervise_rig_mayor.
+- 2026-04-01T11:49:42+02:00 — 2026-04-01 issue #363: expanded test_plan_tick_duplicate_completed_task_guard.sh to pin the live Ralph duplicate-redispatch shape across SGT55/SGT56/SGT57. Default repo-local pending/planned task statuses must retain latest merged task lineage and stay completed; only explicit reopen markers (status=reopened/requeue or reopen=true) may clear completion and redispatch.
+- 2026-04-01T11:50:01+02:00 — 2026-04-01 issue #357: President supervision now hard-skips hibernated rigs before any start/refresh/wake decision, so actionable-no-forward-motion and pending-plan/ralph checks cannot trigger manual-refresh|rig=<rig> or restart mayor/<rig> while the rig remains hibernated. Regression coverage: test_president_runtime_supervision.sh.
+- 2026-04-01T11:50:22+02:00 — 2026-04-01: President runtime supervision now short-circuits hibernated rigs before selecting any start/refresh/wake action, so actionable-no-forward-motion and actionable-rig-recheck no longer trigger manual-refresh|rig=<rig> or restart a per-rig mayor while the rig remains manually hibernated. Regression coverage: test_president_runtime_supervision.sh and test_president_runtime_latest_main_proof.sh.
+- 2026-04-01T11:50:34+02:00 — 2026-04-01 issue #366: when Ralph keeps a rig pending, plan-state completion.acceptance now mirrors the effective pending status instead of leaking stale verified/waived/blocked terminal metadata; original declared terminal status and timestamps are preserved under completion.acceptance.declared_* for operator forensics, with regression coverage in test_ralph_mode_config_and_state.sh.
+- 2026-04-01T11:50:48+02:00 — 2026-04-01 issue #356 follow-up: current origin/master already covers the duplicate-close continuation redispatch bug through the later plan-task lineage/reopen fix train from PR #365. Effective guardrails are retained merged plan-task issue lineage plus explicit reopen semantics; unchanged pending/planned task defaults no longer reopen completed work, so refill/top-up does not recreate the just duplicate-closed lane without a materially changed task payload or explicit open successor.
+- 2026-04-01T11:50:54+02:00 — Acceptance blocker sgt-acceptance-1775037054-36b6a910 reported by witness: Replacement work required after stalled polecat for issue #357
+
+### Acceptance Blocker sgt-acceptance-1775037054-36b6a910
+
+- Reported at: 2026-04-01T11:50:54+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #357
+
+```markdown
+Replacement work required after stalled polecat for issue #357
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #357
+- Issue URL: https://github.com/codejeet/sgt/issues/357
+- Issue title: unknown
+- Polecat: sgt-2255024f
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T11:51:30+02:00 — Acceptance blocker sgt-acceptance-1775037090-5552e67c reported by witness: Replacement work required after stalled polecat for issue #356
+
+### Acceptance Blocker sgt-acceptance-1775037090-5552e67c
+
+- Reported at: 2026-04-01T11:51:30+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #356
+
+```markdown
+Replacement work required after stalled polecat for issue #356
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #356
+- Issue URL: https://github.com/codejeet/sgt/issues/356
+- Issue title: unknown
+- Polecat: sgt-d90e6faf
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T11:51:35+02:00 — Acceptance blocker sgt-acceptance-1775037095-0d58f10b reported by witness: Replacement work required after stalled polecat for issue #366
+
+### Acceptance Blocker sgt-acceptance-1775037095-0d58f10b
+
+- Reported at: 2026-04-01T11:51:35+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #366
+
+```markdown
+Replacement work required after stalled polecat for issue #366
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #366
+- Issue URL: https://github.com/codejeet/sgt/issues/366
+- Issue title: unknown
+- Polecat: sgt-f6cc4fa1
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T11:52:12+02:00 — Acceptance blocker sgt-acceptance-1775037131-162b91f4 reported by witness: Replacement work required after stalled polecat for issue #359
+
+### Acceptance Blocker sgt-acceptance-1775037131-162b91f4
+
+- Reported at: 2026-04-01T11:52:12+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #359
+
+```markdown
+Replacement work required after stalled polecat for issue #359
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #359
+- Issue URL: https://github.com/codejeet/sgt/issues/359
+- Issue title: unknown
+- Polecat: sgt-7cfb9131
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775035085-041bcff8 resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775022704-d829bc00 resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775037090-5552e67c resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775027294-89db909c resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775037054-36b6a910 resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775022423-817268fb resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775037131-162b91f4 resolved.
+- 2026-04-01T12:07:56+02:00 — Acceptance blocker sgt-acceptance-1775037095-0d58f10b resolved.
