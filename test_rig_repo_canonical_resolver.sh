@@ -19,11 +19,14 @@ extract_fn() {
 
 eval "$(extract_fn _one_line)"
 eval "$(extract_fn _escape_quotes)"
+eval "$(extract_fn _repo_owner_repo)"
 eval "$(extract_fn _repo_owner_repo_strict)"
 eval "$(extract_fn _repo_owner_repo_url)"
 eval "$(extract_fn _rig_repo_resolve_error)"
 eval "$(extract_fn _rig_repo_resolve_error_unpack)"
 eval "$(extract_fn _resolve_rig_repo_canonical)"
+eval "$(extract_fn _resling_live_issue_state)"
+eval "$(extract_fn _resling_live_pr_state_mergeable)"
 eval "$(extract_fn _resling_pre_dispatch_revalidate)"
 
 export SGT_ROOT="$TMP_ROOT/root"
@@ -43,30 +46,51 @@ rig_repo() {
 }
 
 GH_CALLS_FILE="$TMP_ROOT/gh-calls"
+GH_MODE_FILE="$TMP_ROOT/gh-mode"
 printf '0\n' > "$GH_CALLS_FILE"
+printf 'direct\n' > "$GH_MODE_FILE"
 gh() {
   local calls
+  local mode
+  mode="$(cat "$GH_MODE_FILE")"
+  calls="$(cat "$GH_CALLS_FILE")"
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > "$GH_CALLS_FILE"
+
   if [[ "${1:-}" == "issue" && "${2:-}" == "view" ]]; then
-    calls="$(cat "$GH_CALLS_FILE")"
-    calls=$((calls + 1))
-    printf '%s\n' "$calls" > "$GH_CALLS_FILE"
+    if [[ "$mode" == "issue-rest-fallback" || "$mode" == "mixed-rest-fallback" ]]; then
+      return 1
+    fi
     echo "OPEN"
     return 0
   fi
   if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
-    calls="$(cat "$GH_CALLS_FILE")"
-    calls=$((calls + 1))
-    printf '%s\n' "$calls" > "$GH_CALLS_FILE"
+    if [[ "$mode" == "pr-rest-fallback" || "$mode" == "mixed-rest-fallback" ]]; then
+      return 1
+    fi
     echo "OPEN|MERGEABLE"
     return 0
+  fi
+  if [[ "${1:-}" == "api" ]]; then
+    case "${2:-}" in
+      repos/acme/openclaw-agent-dm/issues/12)
+        echo "OPEN"
+        return 0
+        ;;
+      repos/acme/openclaw-agent-dm/pulls/34)
+        echo "OPEN|MERGEABLE"
+        return 0
+        ;;
+    esac
   fi
   echo "mock gh unsupported: $*" >&2
   return 1
 }
 
 assert_ok() {
-  local name="$1" rig="$2" repo="$3" issue="$4" source_pr="$5" expect_calls="$6"
+  local name="$1" mode="$2" rig="$3" repo="$4" issue="$5" source_pr="$6" expect_calls="$7"
   local out before after
+  printf '%s\n' "$mode" > "$GH_MODE_FILE"
   before="$(cat "$GH_CALLS_FILE")"
   out="$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue" "$source_pr" 2>&1 || true)"
   after="$(cat "$GH_CALLS_FILE")"
@@ -106,8 +130,11 @@ assert_fail() {
 }
 
 echo "=== rig repo canonical resolver regression ==="
-assert_ok "canonical repo" "oadm" "https://github.com/acme/openclaw-agent-dm" "12" "34" "2"
-assert_ok "alias owner/repo" "oadm" "acme/openclaw-agent-dm" "12" "34" "2"
+assert_ok "canonical repo" "direct" "oadm" "https://github.com/acme/openclaw-agent-dm" "12" "34" "2"
+assert_ok "alias owner/repo" "direct" "oadm" "acme/openclaw-agent-dm" "12" "34" "2"
+assert_ok "issue state REST fallback" "issue-rest-fallback" "oadm" "https://github.com/acme/openclaw-agent-dm" "12" "34" "3"
+assert_ok "source PR REST fallback" "pr-rest-fallback" "oadm" "https://github.com/acme/openclaw-agent-dm" "12" "34" "3"
+assert_ok "issue and PR REST fallback" "mixed-rest-fallback" "oadm" "https://github.com/acme/openclaw-agent-dm" "12" "34" "4"
 assert_fail "missing repo rejected" "oadm" "" "12" "34" "missing repo"
 assert_fail "mismatched repo rejected" "oadm" "acme/other-repo" "12" "34" "repo mismatch"
 
