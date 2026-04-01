@@ -1670,3 +1670,6 @@ Required follow-up:
 
 ```
 - 2026-04-01T13:28:48+02:00 — 2026-04-01 issue #392: regression coverage now pins Ralph lane issue-number accounting, the non-underfilled anti-false-completion override (declared acceptance waived/verified still forced back to pending while condition is unmet), and President's ralph-idle branch as refresh-not-wake distinct from ralph-underfilled refill wakes.
+- 2026-04-01T13:34:17+02:00 — 2026-04-01 issue #394: README now includes a realistic PMKB-style Ralph-mode walkthrough (target=3, active=2, backlog=1, support-only excluded, duplicate excluded) and test_ralph_mode_latest_main_proof.sh now runs test_ralph_mode_realistic_rig_example.sh so latest-main proof covers documented operator-plausible Ralph behavior, anti-false-completion, and refillable underfill state.
+- 2026-04-01T13:42:59+02:00 — Acceptance blocker sgt-acceptance-1775041349-4cbdb7d1 resolved.
+- 2026-04-01T13:42:59+02:00 — Acceptance blocker sgt-acceptance-1775039964-1c53354b resolved.

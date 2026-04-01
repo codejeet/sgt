@@ -6586,6 +6586,8 @@ completion_condition = completion_condition.strip()
 acceptance = plan.get("acceptance")
 if not isinstance(acceptance, dict):
     acceptance = {}
+else:
+    acceptance = dict(acceptance)
 
 allowed_completion_status = {"pending", "completed", "verified", "blocked", "waived"}
 plan_completion_status = str(acceptance.get("status") or "").strip().lower()
@@ -6710,12 +6712,26 @@ completion_doc = {
         "not_declared" if not (completion_condition or acceptance) else "pending"
     ),
 }
+ralph_completion_blocked = bool(ralph_state.get("completion_blocked_by_condition"))
+completion_rollup = str(completion_state.get("rollup") or "").strip().lower()
+if ralph_completion_blocked or completion_rollup.startswith("ralph-"):
+    effective_acceptance = completion_state.get("acceptance")
+    if isinstance(effective_acceptance, dict):
+        completion_doc["acceptance"] = dict(effective_acceptance)
+    effective_status = str(completion_state.get("status") or "").strip().lower()
+    if effective_status:
+        completion_doc["status"] = effective_status
+    effective_rollup = str(completion_state.get("rollup") or "").strip()
+    if effective_rollup:
+        completion_doc["rollup"] = effective_rollup
+    completion_doc["details"] = one_line(completion_state.get("details") or completion_doc["details"])
+    completion_doc["blocked_reason"] = one_line(completion_state.get("blocked_reason") or completion_doc["blocked_reason"])
 timestamp_field = {
     "completed": "completed_at",
     "verified": "verified_at",
     "blocked": "blocked_at",
     "waived": "waived_at",
-}.get(completion_status)
+}.get(str(completion_doc.get("status") or "").strip().lower())
 if timestamp_field:
     value = acceptance.get(timestamp_field) or completion_state.get(timestamp_field)
     if value:
@@ -6858,9 +6874,10 @@ except Exception:
     acceptance = dict(previous_acceptance)
 
 acceptance = dict(acceptance)
-for key in list(acceptance):
+preserved_declared = {}
+for key, value in list(acceptance.items()):
     if str(key).startswith("declared_"):
-        acceptance.pop(key, None)
+        preserved_declared[str(key)] = value
 
 declared_status = str(acceptance.get("status") or "").strip().lower()
 declared_terminal_fields = ("completed_at", "verified_at", "blocked_at", "blocked_reason", "waived_at")
@@ -6881,6 +6898,8 @@ if status != "blocked":
     acceptance.pop("blocked_reason", None)
 if status != "waived":
     acceptance.pop("waived_at", None)
+for key, value in preserved_declared.items():
+    acceptance[key] = value
 
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 completion["declared"] = bool(condition.strip() or acceptance)
