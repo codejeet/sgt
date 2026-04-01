@@ -190,6 +190,41 @@ if grep -q 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG"; then
   exit 1
 fi
 
+tmux() {
+  return 1
+}
+
+hibernated_missing_session_refresh_before="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+hibernated_missing_session_wake_before="$(wc -l < "$WAKE_LOG" || true)"
+hibernated_missing_session_start_before="$(grep -c '^mayor-start:demo$' "$START_LOG" || true)"
+hibernated_missing_session_event_before="$(grep -c 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG" || true)"
+
+_president_supervise_rig_mayor demo startup > "$TMP_ROOT/president-hibernated-missing-session.out" || true
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$hibernated_missing_session_refresh_before" ]]; then
+  echo "expected President not to refresh a hibernated rig when the rig-local mayor session is missing" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$WAKE_LOG" || true)" -ne "$hibernated_missing_session_wake_before" ]]; then
+  echo "expected President not to wake a hibernated rig when the rig-local mayor session is missing" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^mayor-start:demo$' "$START_LOG" || true)" -ne "$hibernated_missing_session_start_before" ]]; then
+  echo "expected President not to restart a hibernated rig-local mayor when the session is missing" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG" || true)" -ne "$hibernated_missing_session_event_before" ]]; then
+  echo "expected hibernated missing-session rig to skip durable President intervention logging" >&2
+  exit 1
+fi
+
+tmux() {
+  if [[ "${1:-}" == "has-session" && "${2:-}" == "-t" && "${3:-}" == "sgt-mayor-demo" ]]; then
+    return 0
+  fi
+  return 1
+}
+
 _mayor_rig_activity_snapshot() {
   printf 'active|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
 }
