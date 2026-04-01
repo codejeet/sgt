@@ -241,12 +241,38 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=drift severity=warning noti
 fi
 
 _ralph_mode_snapshot_fields() {
+  printf '1|1K PNL for 5m btc pipeline|unmet|3|0|idle|condition unmet; no active admissible lanes toward target 3|0|2|2|0|0|1|1||||\n'
+}
+
+refresh_count_before_ralph_idle="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+wake_count_before_ralph_idle="$(grep -c '^president:demo:ralph-idle$' "$WAKE_LOG" || true)"
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-ralph-idle.out"
+
+if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne $((refresh_count_before_ralph_idle + 1)) ]]; then
+  echo "expected Ralph idle to trigger a refresh intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^president:demo:ralph-idle$' "$WAKE_LOG" || true)" -ne "$wake_count_before_ralph_idle" ]]; then
+  echo "expected Ralph idle to refresh instead of issuing a wake" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=refresh reason=ralph-idle' "$EVENT_LOG"; then
+  echo "expected durable President refresh intervention for Ralph idle" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=drift severity=warning notify=1 dedupe_key=president:demo:drift:ralph-idle:refresh overlap_key=rig-incident:demo:ralph action=refresh reason=ralph-idle outcome=intervened' "$EVENT_LOG"; then
+  echo "expected structured President drift event for Ralph idle refresh" >&2
+  exit 1
+fi
+
+_ralph_mode_snapshot_fields() {
   printf '1|1K PNL for 5m btc pipeline|unmet|3|0|underfilled|condition unmet; active_lanes=1 target=3|1|1|0|0|0|1|1||||\n'
 }
 
+refresh_count_before_ralph_contradiction="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
 _president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-ralph-contradiction.out"
 
-if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne 2 ]]; then
+if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne $((refresh_count_before_ralph_contradiction + 1)) ]]; then
   echo "expected Ralph contradiction to trigger a refresh intervention" >&2
   exit 1
 fi

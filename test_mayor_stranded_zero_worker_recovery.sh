@@ -28,6 +28,7 @@ export SGT_LOG="$TMP_ROOT/sgt.log"
 _repo_owner_repo() { printf '%s\n' "${1#https://github.com/}"; }
 _mayor_rig_hibernated() { return 1; }
 _mayor_rig_activity_snapshot() { printf '%s\n' 'active|open_issues=2 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|2|0|0|0|0|not_declared|not_declared'; }
+_plan_task_issue_matches_current_plan() { return 0; }
 _issue_backend_dispatch_limited_reason() { return 1; }
 _resling_find_existing_issue_polecat() { return 1; }
 _sweep_watchdog_find_open_pr_for_issue() { return 1; }
