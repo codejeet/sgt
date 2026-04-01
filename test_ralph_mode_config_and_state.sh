@@ -151,7 +151,8 @@ cat > "$SGT_ROOT/rigs/demo/SGT_PLAN.json" <<'JSON'
   "completion_condition": "Fresh-state proof passes.",
   "acceptance": {
     "status": "verified",
-    "details": "Latest main already looked green."
+    "details": "Latest main already looked green.",
+    "verified_at": "2026-03-31T00:00:00Z"
   },
   "tasks": []
 }
@@ -218,6 +219,11 @@ assert completion.get("status") == "pending", completion
 assert completion.get("rollup") == "ralph-underfilled", completion
 assert "Ralph mode remains active" in completion.get("details", ""), completion
 assert completion.get("blocked_reason") == "ralph condition unmet: 1K PNL for 5m btc pipeline", completion
+acceptance = completion.get("acceptance") or {}
+assert acceptance.get("status") == "pending", acceptance
+assert acceptance.get("declared_status") == "verified", acceptance
+assert acceptance.get("declared_verified_at") == "2026-03-31T00:00:00Z", acceptance
+assert acceptance.get("verified_at") is None, acceptance
 assert blocker.get("TASK_ID") == "__continuation__", blocker
 assert blocker.get("REASON_CODE") == "continuation-underfilled", blocker
 assert "Ralph continuation intent remains active" in blocker.get("REASON", ""), blocker
