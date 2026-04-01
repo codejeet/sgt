@@ -26,6 +26,15 @@ eval "$(extract_fn _mayor_scope_dir)"
 eval "$(extract_fn _mayor_scope_apply)"
 eval "$(extract_fn _mayor_target_rigs_for_reason)"
 eval "$(extract_fn _wake_mayor)"
+eval "$(extract_fn _mayor_architecture_per_rig)"
+eval "$(extract_fn _cmd_mayor_start_one)"
+eval "$(extract_fn cmd_mayor_start)"
+eval "$(extract_fn _cmd_mayor_stop_one)"
+eval "$(extract_fn cmd_mayor_stop)"
+eval "$(extract_fn _cmd_mayor_refresh_one)"
+eval "$(extract_fn cmd_mayor_refresh)"
+eval "$(extract_fn cmd_wake_mayor)"
+eval "$(extract_fn _president_supervise_rig_mayor)"
 eval "$(extract_fn cmd_status_json)"
 eval "$(extract_fn _cmd_status_human)"
 eval "$(extract_fn _mayor_notify_rigger)"
@@ -43,8 +52,14 @@ mkdir -p "$SGT_CONFIG" "$SGT_RIGS" "$SGT_POLECATS" "$SGT_AGENTS"
 printf 'demo-repo\n' > "$SGT_RIGS/demo"
 printf 'beta-repo\n' > "$SGT_RIGS/beta"
 export SGT_ROOT SGT_CONFIG SGT_RIGS SGT_POLECATS SGT_AGENTS SGT_DAEMON_PID SGT_LOG TMP_ROOT
+SGT_MAYOR_ARCHITECTURE="per-rig"
+SGT_MAYOR_INTERVAL="60"
+export SGT_MAYOR_ARCHITECTURE SGT_MAYOR_INTERVAL
 
 ensure_init() { :; }
+die() { echo "${1:-die}" >&2; exit 1; }
+info() { :; }
+warn() { :; }
 _json_quote() { printf '"%s"' "${1:-}"; }
 _json_print_array() {
   local first=1 item
@@ -98,6 +113,7 @@ _polecat_runtime_json() { printf '{}'; }
 _agent_heartbeat_stale_secs() { echo 180; }
 _agent_heartbeat_snapshot() { printf '0|2026-04-01T00:00:00Z|ok\n'; }
 _mayor_scope_agent_name() { printf 'mayor/%s\n' "${1:-${SGT_MAYOR_SCOPE_RIG:-}}"; }
+_hierarchy_cutover_retire_shared_mayor() { :; }
 _openclaw_notify_config_read() { printf 'main\nlast\n\n\n'; }
 _rig_notify_agent_read() { return 1; }
 _mayor_notify_result_set() { :; }
@@ -116,7 +132,41 @@ _mayor_record_decision() { :; }
 _one_line() { printf '%s' "${1:-}"; }
 log_event() { :; }
 _escape_quotes() { printf '%s' "${1:-}"; }
-tmux() { return 1; }
+_sgt_exec_path() { printf '%s/fake-sgt\n' "$TMP_ROOT"; }
+_mayor_start_log_file() { printf '%s/mayor-start.log\n' "$TMP_ROOT"; }
+_mayor_start_validation_timeout_secs() { echo 1; }
+_mayor_wait_for_start() { return 0; }
+_mayor_start_failure_state_write() { :; }
+_mayor_exit_state_write() { :; }
+_mayor_refresh_token() { printf 'refresh-token\n'; }
+_mayor_refresh_handoffs_dir() { printf '%s/handoffs\n' "$TMP_ROOT"; }
+_mayor_dispatch_snapshot_file() { :; }
+_mayor_build_briefing() { :; }
+_mayor_refresh_archive_transients() { :; }
+_mayor_refresh_write_handoff() { :; }
+_president_intervention_allowed() { return 0; }
+_president_operator_log_event() { :; }
+_president_intervention_state_write() { :; }
+_mayor_rig_activity_snapshot() { printf 'active|steady|0|0|0|0|0|tasks-in-progress|pending\n'; }
+_mayor_rig_activity_state_read() { printf 'active|steady|2026-04-01T00:00:00Z|0|none|2026-04-01T00:00:00Z|0|steady|2026-04-01T00:00:00Z|manual\n'; }
+rig_repo() { printf 'demo-repo\n'; }
+_ralph_mode_snapshot_fields() { printf '0||||||0|0|0|0|0|0|0||||\n'; }
+_plan_pending_underfill_target() { echo 0; }
+cmd_mayor_start_called=0
+cmd_mayor_refresh_called=0
+cmd_wake_mayor_called=0
+tmux() {
+  if [[ "${1:-}" == "has-session" ]]; then
+    return 1
+  fi
+  return 0
+}
+mkfifo() {
+  if [[ -p "${1:-}" ]]; then
+    return 0
+  fi
+  command mkfifo "$@"
+}
 openclaw() { printf '{}\n'; }
 
 _mayor_scope_apply "demo"
@@ -149,6 +199,55 @@ touch "$SGT_MAYOR_FIFO"
 _wake_mayor "broadcast" >/dev/null
 if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "demo" ]]; then
   echo "expected _wake_mayor to preserve caller scope after per-rig routing" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+cmd_mayor_start "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected cmd_mayor_start to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+cmd_mayor_stop "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected cmd_mayor_stop to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+cmd_mayor_refresh "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected cmd_mayor_refresh to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+_cmd_mayor_start_one "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected _cmd_mayor_start_one to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+_cmd_mayor_stop_one "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected _cmd_mayor_stop_one to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+_cmd_mayor_refresh_one "demo" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected _cmd_mayor_refresh_one to preserve caller scope" >&2
+  exit 1
+fi
+
+_mayor_scope_apply "outer"
+_president_supervise_rig_mayor "demo" "startup" >/dev/null
+if [[ "${SGT_MAYOR_SCOPE_RIG:-}" != "outer" ]]; then
+  echo "expected _president_supervise_rig_mayor to preserve caller scope" >&2
   exit 1
 fi
 BASH
