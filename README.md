@@ -206,6 +206,45 @@ sgt plan tick scrapegoat
 sgt wake-mayor "plan-update:scrapegoat"
 ```
 
+## Ralph Mode
+
+Ralph mode pins a rig into ongoing work until an explicit operator-owned Ralph condition is satisfied or the operator disables Ralph mode.
+
+Configure it per rig with:
+
+```bash
+sgt config ralph pmkb \
+  --enable \
+  --condition "1K PNL for 5m btc pipeline" \
+  --target 5
+```
+
+Optional knobs:
+
+```bash
+sgt config ralph pmkb --condition-status met
+sgt config ralph pmkb --count-support yes
+sgt config ralph pmkb --disable
+```
+
+Current model:
+- Ralph config lives in `~/.sgt/rig-config/<rig>.json` under `ralph_mode`.
+- Ralph runtime state is computed from rig config plus live rig work and is also persisted into `~/.sgt/plan-state/<rig>.json` under `ralph`.
+- While Ralph is enabled and `condition_status` is not `met` or `waived`, plan completion is forced back to a non-terminal pending rollup (`ralph-condition-unmet` or `ralph-underfilled`) even if stale acceptance metadata says `verified` or `waived`.
+- `sgt status`, `sgt status --json`, and the Web cockpit expose Ralph state, condition, target concurrency, active lane count, admissible lane count, underfill state, and the latest President action for that rig.
+
+Concurrency accounting policy:
+- A Ralph lane is a distinct open `sgt-authorized` issue number on that rig.
+- Issues labeled `duplicate` or `redundant` never count toward Ralph concurrency.
+- Issues labeled `support-only` or `cleanup-only` do not count by default; opt in with `sgt config ralph <rig> --count-support yes`.
+- `active_lane_count` counts admissible lanes that currently have a live polecat on that issue.
+- `backlog_lane_count` counts admissible open lanes that exist but are not currently active.
+
+Example:
+- Issue `#101` with a live polecat counts as one active Ralph lane.
+- Issue `#102` labeled `support-only` does not count unless support lanes are enabled.
+- Issue `#103` labeled `duplicate` never counts.
+
 ## CI self-healing (Mayor watchdog)
 
 For rigs with `SGT_PLAN.json`, Mayor also watches the latest **master** GitHub Actions run.

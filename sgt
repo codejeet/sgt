@@ -2013,6 +2013,7 @@ _mayor_wake_reason_targets_rig() {
 
 _mayor_rig_activity_snapshot() {
   local rig="${1:-}" repo open_prs open_authorized active_polecats merge_queue pending_plan_requests plan_rollup plan_status actionable state reason
+  local ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
   repo="$(rig_repo "$rig" 2>/dev/null || true)"
   open_prs=0
   open_authorized=0
@@ -2055,13 +2056,17 @@ PY
       IFS='|' read -r plan_rollup plan_status <<< "$plan_snapshot"
     fi
   fi
+  IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
   actionable=0
   if (( open_prs > 0 || open_authorized > 0 || active_polecats > 0 || merge_queue > 0 || pending_plan_requests > 0 )); then
     actionable=1
   fi
   state="idle"
   reason="no actionable work"
-  if (( actionable > 0 )); then
+  if [[ "$ralph_completion_blocked" == "1" ]]; then
+    state="active"
+    reason="ralph state=${ralph_state:-active} target=${ralph_target:-1} active_lanes=${ralph_active_lanes:-0} admissible_lanes=${ralph_admissible_lanes:-0} underfilled=${ralph_underfilled:-0} condition=\"${ralph_condition:-}\""
+  elif (( actionable > 0 )); then
     state="active"
     reason="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} pending_plan_requests=${pending_plan_requests}"
   elif [[ "$plan_rollup" == "blocked-pending-external" ]]; then
@@ -6393,6 +6398,10 @@ completion_state = state.get("completion")
 if not isinstance(completion_state, dict):
     completion_state = {}
 
+ralph_state = state.get("ralph")
+if not isinstance(ralph_state, dict):
+    ralph_state = {}
+
 max_in_flight = 1
 policy = plan.get("policy")
 if isinstance(policy, dict):
@@ -6482,6 +6491,7 @@ updated_at = completion_state.get("updated_at")
 if updated_at:
     completion_doc["updated_at"] = str(updated_at)
 doc["completion"] = completion_doc
+doc["ralph"] = ralph_state
 
 tmp = state_file + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -6577,7 +6587,8 @@ PY
 }
 
 _plan_state_update_completion() {
-  local rig="${1:-}" condition="${2:-}" acceptance_json="${3:-{}}" status="${4:-not_declared}" rollup="${5:-not_declared}" details="${6:-}" blocked_reason="${7:-}"
+  local rig="${1:-}" condition="${2:-}" acceptance_json="${3:-}" status="${4:-not_declared}" rollup="${5:-not_declared}" details="${6:-}" blocked_reason="${7:-}"
+  [[ -n "$acceptance_json" ]] || acceptance_json="{}"
   local state_file
   state_file="$(_plan_state_path "$rig")"
   mkdir -p "$(dirname "$state_file")"
@@ -6625,6 +6636,39 @@ if status == "waived":
 elif previous_status == "waived":
     completion.pop("waived_at", None)
 doc["updated_at"] = now
+tmp = state_file + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
+os.replace(tmp, state_file)
+PY
+}
+
+_plan_state_update_ralph() {
+  local rig="${1:-}" ralph_json="${2:-}"
+  [[ -n "$ralph_json" ]] || ralph_json="{}"
+  local state_file
+  state_file="$(_plan_state_path "$rig")"
+  mkdir -p "$(dirname "$state_file")"
+  SGT_PLAN_RALPH_JSON="$ralph_json" python3 - "$state_file" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+doc = {}
+if os.path.exists(state_file):
+    with open(state_file, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+try:
+    ralph = json.loads(os.environ.get("SGT_PLAN_RALPH_JSON", "{}") or "{}")
+    if not isinstance(ralph, dict):
+        ralph = {}
+except Exception:
+    ralph = {}
+
+doc["ralph"] = ralph
+doc["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 tmp = state_file + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, ensure_ascii=True, indent=2, sort_keys=True)
@@ -6714,6 +6758,30 @@ _plan_tick_run() {
 
   local max_in_flight=1
   local plan_completion_status="not_declared" plan_completion_rollup="not_declared" plan_completion_condition="" plan_acceptance_json="{}" plan_completion_details="" plan_completion_blocked_reason=""
+  local ralph_json ralph_enabled ralph_condition ralph_condition_status ralph_target ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
+  IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
+  [[ "$ralph_target" =~ ^[0-9]+$ ]] || ralph_target=1
+  [[ "$ralph_active_lanes" =~ ^[0-9]+$ ]] || ralph_active_lanes=0
+  [[ "$ralph_admissible_lanes" =~ ^[0-9]+$ ]] || ralph_admissible_lanes=0
+  [[ "$ralph_backlog_lanes" =~ ^[0-9]+$ ]] || ralph_backlog_lanes=0
+  [[ "$ralph_support_lanes" =~ ^[0-9]+$ ]] || ralph_support_lanes=0
+  [[ "$ralph_duplicate_lanes" =~ ^[0-9]+$ ]] || ralph_duplicate_lanes=0
+  ralph_json="$(printf '{"rig":%s,"enabled":%s,"condition":%s,"condition_status":%s,"target_concurrency":%s,"count_support_lanes":%s,"state":%s,"reason":%s,"active_lane_count":%s,"admissible_lane_count":%s,"backlog_lane_count":%s,"support_lane_count":%s,"duplicate_lane_count":%s,"underfilled":%s,"completion_blocked_by_condition":%s}' \
+    "$(_json_quote "$rig")" \
+    "$( [[ "$ralph_enabled" == "1" ]] && printf 'true' || printf 'false' )" \
+    "$(_json_quote "$ralph_condition")" \
+    "$(_json_quote "${ralph_condition_status:-unmet}")" \
+    "$ralph_target" \
+    "$( [[ "$ralph_count_support" == "1" ]] && printf 'true' || printf 'false' )" \
+    "$(_json_quote "${ralph_state:-disabled}")" \
+    "$(_json_quote "$ralph_reason")" \
+    "$ralph_active_lanes" \
+    "$ralph_admissible_lanes" \
+    "$ralph_backlog_lanes" \
+    "$ralph_support_lanes" \
+    "$ralph_duplicate_lanes" \
+    "$( [[ "$ralph_underfilled" == "1" ]] && printf 'true' || printf 'false' )" \
+    "$( [[ "$ralph_completion_blocked" == "1" ]] && printf 'true' || printf 'false' )")"
   local -a task_ids=()
   local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=()
   while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9; do
@@ -6724,7 +6792,8 @@ _plan_tick_run() {
         plan_completion_status="${c2:-not_declared}"
         plan_completion_rollup="${c3:-not_declared}"
         plan_completion_condition="${c4:-}"
-        plan_acceptance_json="${c5:-{}}"
+        plan_acceptance_json="${c5:-}"
+        [[ -n "$plan_acceptance_json" ]] || plan_acceptance_json="{}"
         plan_completion_details="${c6:-}"
         plan_completion_blocked_reason="${c7:-}"
         ;;
@@ -6916,6 +6985,21 @@ _plan_tick_run() {
       ;;
   esac
 
+  if [[ "$ralph_completion_blocked" == "1" ]]; then
+    plan_completion_status="pending"
+    if [[ "$ralph_underfilled" == "1" ]]; then
+      plan_completion_rollup="ralph-underfilled"
+    else
+      plan_completion_rollup="ralph-condition-unmet"
+    fi
+    if [[ -n "$plan_completion_details" ]]; then
+      plan_completion_details="${plan_completion_details} Ralph mode remains active until condition is met or Ralph is disabled."
+    else
+      plan_completion_details="Ralph mode remains active until condition is met or Ralph is disabled."
+    fi
+    plan_completion_blocked_reason="ralph condition unmet: ${ralph_condition:-operator-defined}"
+  fi
+
   _plan_state_update_completion \
     "$rig" \
     "$plan_completion_condition" \
@@ -6924,6 +7008,7 @@ _plan_tick_run() {
     "$plan_completion_rollup" \
     "$plan_completion_details" \
     "$plan_completion_blocked_reason"
+  _plan_state_update_ralph "$rig" "$ralph_json"
 
   printf 'PLAN_TICK|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$rig" \
@@ -7009,6 +7094,73 @@ cmd_config_notify() {
   _rig_notify_agent_write "$rig" "$agent_id" || die "failed to write rig config for $rig"
   log_event "RIG_NOTIFY_AGENT_SET rig=$rig agent=$agent_id source=config-notify"
   info "rig $rig notify_agent set to: $agent_id"
+}
+
+cmd_config_ralph() {
+  local rig="${1:-}" enabled="" condition="" condition_status="" target="" count_support="" current_json
+  [[ -n "$rig" ]] || die "usage: sgt config ralph <rig> [--enable|--disable] [--condition <text>] [--condition-status <unmet|met|waived>] [--target <n>] [--count-support <yes|no>]"
+  shift || true
+  ensure_init
+  ensure_rig "$rig"
+
+  current_json="$(_ralph_mode_config_json "$rig" 2>/dev/null || printf '{}\n')"
+  if [[ -n "$current_json" ]]; then
+    IFS='|' read -r enabled condition condition_status target count_support _ _ _ _ _ _ _ _ _ _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$(rig_repo "$rig" 2>/dev/null || true)" 2>/dev/null || true)"
+  fi
+  [[ "$enabled" == "1" ]] && enabled="true" || enabled="false"
+  [[ -n "$condition_status" ]] || condition_status="unmet"
+  [[ -n "$target" ]] || target="1"
+  [[ "$count_support" == "1" ]] && count_support="true" || count_support="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enable) enabled="true"; shift ;;
+      --disable) enabled="false"; shift ;;
+      --condition) condition="${2:-}"; shift 2 ;;
+      --condition-status)
+        condition_status="${2:-}"
+        case "$condition_status" in
+          unmet|met|waived) ;;
+          *) die "invalid Ralph condition status: $condition_status (try: unmet, met, waived)" ;;
+        esac
+        shift 2
+        ;;
+      --target)
+        target="${2:-}"
+        [[ "$target" =~ ^[1-9][0-9]*$ ]] || die "Ralph target must be a positive integer"
+        shift 2
+        ;;
+      --count-support)
+        case "${2:-}" in
+          yes|true|1|on) count_support="true" ;;
+          no|false|0|off) count_support="false" ;;
+          *) die "invalid Ralph support-lane flag: ${2:-} (try: yes or no)" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        die "usage: sgt config ralph <rig> [--enable|--disable] [--condition <text>] [--condition-status <unmet|met|waived>] [--target <n>] [--count-support <yes|no>]"
+        ;;
+    esac
+  done
+
+  if [[ "$enabled" == "true" && -z "$condition" ]]; then
+    die "Ralph mode requires a non-empty --condition when enabled"
+  fi
+
+  _ralph_mode_config_write "$rig" "$enabled" "$condition" "$condition_status" "$target" "$count_support" || die "failed to write Ralph config for $rig"
+  log_event "RIG_RALPH_MODE_SET rig=$rig enabled=$enabled condition_status=$condition_status target=$target count_support_lanes=$count_support condition=\"$(_escape_quotes "$condition")\""
+
+  local ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked ralph_last_ts ralph_last_action ralph_last_reason ralph_last_outcome
+  IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked ralph_last_ts ralph_last_action ralph_last_reason ralph_last_outcome <<< "$(_ralph_mode_snapshot_fields "$rig" "$(rig_repo "$rig" 2>/dev/null || true)" 2>/dev/null || true)"
+
+  info "rig $rig Ralph mode: $( [[ "$ralph_enabled" == "1" ]] && printf 'enabled' || printf 'disabled' )"
+  info "condition: ${ralph_condition:-"(none)"}"
+  info "condition_status: ${ralph_condition_status:-unmet}"
+  info "target_concurrency: ${ralph_target:-1}"
+  info "active_lanes: ${ralph_active_lanes:-0} admissible_lanes: ${ralph_admissible_lanes:-0} backlog_lanes: ${ralph_backlog_lanes:-0}"
+  info "support_excluded: ${ralph_support_lanes:-0} duplicate_excluded: ${ralph_duplicate_lanes:-0} underfilled: ${ralph_underfilled:-0}"
+  info "state: ${ralph_state:-unknown} (${ralph_reason:-no detail})"
 }
 
 cmd_create_blocker() {
@@ -7177,6 +7329,425 @@ with open(path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 ' "$config_path" "$agent_id" 2>/dev/null
+}
+
+_ralph_mode_config_json() {
+  local rig="${1:-}" config_path="" py_bin=""
+  [[ -n "$rig" ]] || return 1
+  config_path="$(_rig_config_path "$rig")"
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  "$py_bin" - "$config_path" <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+path = sys.argv[1]
+data = {}
+if os.path.isfile(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+
+raw = data.get("ralph_mode")
+if not isinstance(raw, dict):
+    raw = {}
+
+enabled = bool(raw.get("enabled", False))
+condition = str(raw.get("condition") or raw.get("condition_text") or "").strip()
+target = raw.get("target_concurrency", raw.get("concurrency", 1))
+try:
+    target = int(target)
+except Exception:
+    target = 1
+if target <= 0:
+    target = 1
+
+condition_status = str(raw.get("condition_status") or "unmet").strip().lower()
+if condition_status not in {"unmet", "met", "waived"}:
+    condition_status = "unmet"
+
+count_support = raw.get("count_support_lanes", False)
+if isinstance(count_support, str):
+    count_support = count_support.strip().lower() in {"1", "true", "yes", "on"}
+else:
+    count_support = bool(count_support)
+
+support_labels = raw.get("support_labels")
+if not isinstance(support_labels, list):
+    support_labels = ["support-only", "cleanup-only"]
+support_labels = [str(item).strip().lower() for item in support_labels if str(item).strip()]
+if not support_labels:
+    support_labels = ["support-only", "cleanup-only"]
+
+duplicate_labels = raw.get("duplicate_labels")
+if not isinstance(duplicate_labels, list):
+    duplicate_labels = ["duplicate", "redundant"]
+duplicate_labels = [str(item).strip().lower() for item in duplicate_labels if str(item).strip()]
+if not duplicate_labels:
+    duplicate_labels = ["duplicate", "redundant"]
+
+doc = {
+    "enabled": enabled,
+    "condition": condition,
+    "condition_status": condition_status,
+    "target_concurrency": target,
+    "count_support_lanes": count_support,
+    "support_labels": support_labels,
+    "duplicate_labels": duplicate_labels,
+    "lane_policy": "distinct-open-authorized-issues; exclude duplicate labels; exclude support-only labels unless count_support_lanes=true; active lanes require a live polecat on that issue",
+}
+print(json.dumps(doc, ensure_ascii=True, sort_keys=True))
+PY
+}
+
+_ralph_mode_config_write() {
+  local rig="${1:-}" enabled="${2:-}" condition="${3:-}" condition_status="${4:-}" target="${5:-}" count_support="${6:-}"
+  local config_path="" py_bin=""
+  [[ -n "$rig" ]] || return 1
+  config_path="$(_rig_config_path "$rig")"
+  mkdir -p "$SGT_RIG_CONFIG"
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  "$py_bin" - "$config_path" "$enabled" "$condition" "$condition_status" "$target" "$count_support" <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+path, enabled_raw, condition, condition_status, target_raw, count_support_raw = sys.argv[1:7]
+data = {}
+if os.path.isfile(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+
+condition_status = str(condition_status or "unmet").strip().lower()
+if condition_status not in {"unmet", "met", "waived"}:
+    condition_status = "unmet"
+
+try:
+    target = int(target_raw)
+except Exception:
+    target = 1
+if target <= 0:
+    target = 1
+
+count_support = str(count_support_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+data["ralph_mode"] = {
+    "enabled": str(enabled_raw).strip().lower() in {"1", "true", "yes", "on"},
+    "condition": str(condition or "").strip(),
+    "condition_status": condition_status,
+    "target_concurrency": target,
+    "count_support_lanes": count_support,
+    "support_labels": ["support-only", "cleanup-only"],
+    "duplicate_labels": ["duplicate", "redundant"],
+}
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=True, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+}
+
+_president_operator_event_latest_for_rig_json() {
+  local rig="${1:-}" state_file py_bin=""
+  [[ -n "$rig" ]] || {
+    printf '{}\n'
+    return 0
+  }
+  state_file="$(_president_operator_events_file)"
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    printf '{}\n'
+    return 0
+  fi
+  "$py_bin" - "$rig" "$state_file" <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+rig, path = sys.argv[1:3]
+if not os.path.isfile(path):
+    print("{}")
+    raise SystemExit(0)
+
+latest = None
+with open(path, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.rstrip("\n")
+        if not raw:
+            continue
+        parts = raw.split("\t")
+        if len(parts) < 13:
+            continue
+        if parts[2] != rig:
+            continue
+        latest = {
+            "ts": parts[0],
+            "created_at": parts[1],
+            "rig": parts[2],
+            "kind": parts[3],
+            "severity": parts[4],
+            "notify": parts[5] == "1",
+            "dedupe_key": parts[6],
+            "overlap_key": parts[7],
+            "action": parts[8],
+            "reason": parts[9],
+            "outcome": parts[10],
+            "cycle_trigger": parts[11],
+            "detail": parts[12],
+        }
+
+print(json.dumps(latest or {}, ensure_ascii=True, sort_keys=True))
+PY
+}
+
+_ralph_mode_snapshot_json() {
+  local rig="${1:-}" repo="${2:-}" config_json issues_json active_issues president_action_json py_bin=""
+  [[ -n "$rig" ]] || return 1
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+
+  config_json="$(_ralph_mode_config_json "$rig" 2>/dev/null || printf '{}\n')"
+  issues_json='[]'
+  if [[ -n "$repo" ]]; then
+    issues_json="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number,labels,title 2>/dev/null || printf '[]\n')"
+  fi
+  active_issues="$(
+    local f issue session alive
+    for f in "$SGT_POLECATS"/*; do
+      [[ -f "$f" ]] || continue
+      issue=""
+      session=""
+      alive="dead"
+      (
+        source "$f" 2>/dev/null || exit 0
+        [[ -n "${ISSUE:-}" ]] || exit 0
+        session="${SESSION:-}"
+        if [[ -n "$session" ]] && tmux has-session -t "$session" 2>/dev/null; then
+          printf '%s\n' "${ISSUE#\#}"
+        fi
+      )
+    done
+  )"
+  president_action_json="$(_president_operator_event_latest_for_rig_json "$rig" 2>/dev/null || printf '{}\n')"
+
+  SGT_RALPH_CONFIG_JSON="$config_json" \
+  SGT_RALPH_ISSUES_JSON="$issues_json" \
+  SGT_RALPH_ACTIVE_ISSUES="$active_issues" \
+  SGT_RALPH_PRESIDENT_ACTION_JSON="$president_action_json" \
+  "$py_bin" - "$rig" <<'PY'
+import json
+import os
+import sys
+
+rig = sys.argv[1]
+
+try:
+    config = json.loads(os.environ.get("SGT_RALPH_CONFIG_JSON", "{}"))
+except Exception:
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+
+try:
+    issues = json.loads(os.environ.get("SGT_RALPH_ISSUES_JSON", "[]"))
+except Exception:
+    issues = []
+if not isinstance(issues, list):
+    issues = []
+
+try:
+    president_action = json.loads(os.environ.get("SGT_RALPH_PRESIDENT_ACTION_JSON", "{}"))
+except Exception:
+    president_action = {}
+if not isinstance(president_action, dict):
+    president_action = {}
+
+active_issue_numbers = {
+    line.strip().lstrip("#")
+    for line in os.environ.get("SGT_RALPH_ACTIVE_ISSUES", "").splitlines()
+    if line.strip()
+}
+
+enabled = bool(config.get("enabled", False))
+condition = str(config.get("condition") or "").strip()
+condition_status = str(config.get("condition_status") or "unmet").strip().lower()
+if condition_status not in {"unmet", "met", "waived"}:
+    condition_status = "unmet"
+target = config.get("target_concurrency", 1)
+try:
+    target = int(target)
+except Exception:
+    target = 1
+if target <= 0:
+    target = 1
+
+count_support = bool(config.get("count_support_lanes", False))
+support_labels = {
+    str(label).strip().lower()
+    for label in (config.get("support_labels") or ["support-only", "cleanup-only"])
+    if str(label).strip()
+}
+duplicate_labels = {
+    str(label).strip().lower()
+    for label in (config.get("duplicate_labels") or ["duplicate", "redundant"])
+    if str(label).strip()
+}
+
+admissible = set()
+support_only = set()
+duplicate = set()
+issue_titles = {}
+for issue in issues:
+    if not isinstance(issue, dict):
+        continue
+    number = str(issue.get("number") or "").strip().lstrip("#")
+    if not number:
+        continue
+    labels = {
+        str((label or {}).get("name") or "").strip().lower()
+        for label in (issue.get("labels") or [])
+        if isinstance(label, dict)
+    }
+    issue_titles[number] = str(issue.get("title") or "").strip()
+    if labels & duplicate_labels:
+        duplicate.add(number)
+        continue
+    if (labels & support_labels) and not count_support:
+        support_only.add(number)
+        continue
+    admissible.add(number)
+
+active_admissible = sorted(admissible & active_issue_numbers, key=lambda item: int(item))
+backlog_admissible = sorted(admissible - set(active_admissible), key=lambda item: int(item))
+
+condition_met = condition_status in {"met", "waived"}
+completion_blocked = enabled and not condition_met
+underfilled = completion_blocked and len(active_admissible) < target
+
+if not enabled:
+    state = "disabled"
+    reason = "Ralph mode disabled"
+elif condition_met:
+    state = "satisfied"
+    reason = f"condition_status={condition_status}"
+elif underfilled and not active_admissible:
+    state = "idle"
+    reason = f"condition unmet; no active admissible lanes toward target {target}"
+elif underfilled:
+    state = "underfilled"
+    reason = f"condition unmet; active_lanes={len(active_admissible)} target={target}"
+else:
+    state = "active"
+    reason = f"condition unmet; active_lanes={len(active_admissible)} target={target}"
+
+doc = {
+    "rig": rig,
+    "enabled": enabled,
+    "condition": condition,
+    "condition_status": condition_status,
+    "target_concurrency": target,
+    "count_support_lanes": count_support,
+    "lane_policy": config.get("lane_policy") or (
+        "distinct-open-authorized-issues; exclude duplicate labels; "
+        "exclude support-only labels unless count_support_lanes=true; "
+        "active lanes require a live polecat on that issue"
+    ),
+    "state": state,
+    "reason": reason,
+    "active_lane_count": len(active_admissible),
+    "admissible_lane_count": len(admissible),
+    "backlog_lane_count": len(backlog_admissible),
+    "support_lane_count": len(support_only),
+    "duplicate_lane_count": len(duplicate),
+    "underfilled": underfilled,
+    "completion_blocked_by_condition": completion_blocked,
+    "active_issue_numbers": active_admissible,
+    "backlog_issue_numbers": backlog_admissible,
+    "support_issue_numbers": sorted(support_only, key=lambda item: int(item)),
+    "duplicate_issue_numbers": sorted(duplicate, key=lambda item: int(item)),
+    "active_issue_titles": {num: issue_titles.get(num, "") for num in active_admissible},
+    "backlog_issue_titles": {num: issue_titles.get(num, "") for num in backlog_admissible},
+    "last_president_action": president_action,
+}
+
+print(json.dumps(doc, ensure_ascii=True, sort_keys=True))
+PY
+}
+
+_ralph_mode_snapshot_fields() {
+  local rig="${1:-}" repo="${2:-}" py_bin=""
+  [[ -n "$rig" ]] || return 1
+  if command -v python3 &>/dev/null; then
+    py_bin="python3"
+  elif command -v python &>/dev/null; then
+    py_bin="python"
+  else
+    return 1
+  fi
+  local snapshot_json
+  snapshot_json="$(_ralph_mode_snapshot_json "$rig" "$repo" 2>/dev/null || printf '{}\n')"
+  SGT_RALPH_SNAPSHOT_JSON="$snapshot_json" "$py_bin" - <<'PY'
+import json
+import os
+
+try:
+    doc = json.loads(os.environ.get("SGT_RALPH_SNAPSHOT_JSON", "{}"))
+except Exception:
+    doc = {}
+if not isinstance(doc, dict):
+    doc = {}
+
+last = doc.get("last_president_action")
+if not isinstance(last, dict):
+    last = {}
+
+fields = [
+    "1" if doc.get("enabled") else "0",
+    str(doc.get("condition") or ""),
+    str(doc.get("condition_status") or "unmet"),
+    str(doc.get("target_concurrency") or 1),
+    "1" if doc.get("count_support_lanes") else "0",
+    str(doc.get("state") or "disabled"),
+    str(doc.get("reason") or ""),
+    str(doc.get("active_lane_count") or 0),
+    str(doc.get("admissible_lane_count") or 0),
+    str(doc.get("backlog_lane_count") or 0),
+    str(doc.get("support_lane_count") or 0),
+    str(doc.get("duplicate_lane_count") or 0),
+    "1" if doc.get("underfilled") else "0",
+    "1" if doc.get("completion_blocked_by_condition") else "0",
+    str(last.get("created_at") or ""),
+    str(last.get("action") or ""),
+    str(last.get("reason") or ""),
+    str(last.get("outcome") or ""),
+]
+print("|".join(fields))
+PY
 }
 
 # Notify via OpenClaw (delivered) if configured. No-op if missing.
@@ -8172,8 +8743,10 @@ cmd_status_json() {
     if _mayor_rig_activity_enabled; then
       _mayor_rig_activity_ensure_state "$rig_name"
       local mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason
+      local ralph_json
       IFS='|' read -r mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason <<< "$(_mayor_rig_activity_state_read "$rig_name")"
-      mayor_rigs+=("{\"rig\":$(_json_quote "$rig_name"),\"state\":$(_json_quote "$mr_state"),\"reason\":$(_json_quote "$mr_reason"),\"changed_at\":$(_json_quote "$mr_changed_at"),\"changed_epoch\":$(_json_quote "$mr_changed_epoch"),\"hibernation_mode\":$(_json_quote "$mr_mode"),\"last_meaningful_at\":$(_json_quote "$mr_meaningful_at"),\"last_meaningful_epoch\":$(_json_quote "$mr_meaningful_epoch"),\"last_meaningful_reason\":$(_json_quote "$mr_meaningful_reason"),\"last_wake_at\":$(_json_quote "$mr_wake_at"),\"last_wake_reason\":$(_json_quote "$mr_wake_reason")}")
+      ralph_json="$(_ralph_mode_snapshot_json "$rig_name" "$(rig_repo "$rig_name" 2>/dev/null || true)" 2>/dev/null || printf '{}')"
+      mayor_rigs+=("{\"rig\":$(_json_quote "$rig_name"),\"state\":$(_json_quote "$mr_state"),\"reason\":$(_json_quote "$mr_reason"),\"changed_at\":$(_json_quote "$mr_changed_at"),\"changed_epoch\":$(_json_quote "$mr_changed_epoch"),\"hibernation_mode\":$(_json_quote "$mr_mode"),\"last_meaningful_at\":$(_json_quote "$mr_meaningful_at"),\"last_meaningful_epoch\":$(_json_quote "$mr_meaningful_epoch"),\"last_meaningful_reason\":$(_json_quote "$mr_meaningful_reason"),\"last_wake_at\":$(_json_quote "$mr_wake_at"),\"last_wake_reason\":$(_json_quote "$mr_wake_reason"),\"ralph\":$ralph_json}")
     fi
   done
 
@@ -8725,12 +9298,23 @@ _cmd_status_human() {
       [[ -f "$rig_file" ]] || continue
       mayor_rig_count=$((mayor_rig_count + 1))
       local rig_name mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason
+      local ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked ralph_last_ts ralph_last_action ralph_last_reason ralph_last_outcome
       rig_name="$(basename "$rig_file")"
       _mayor_rig_activity_ensure_state "$rig_name"
       IFS='|' read -r mr_state mr_reason mr_changed_at mr_changed_epoch mr_mode mr_meaningful_at mr_meaningful_epoch mr_meaningful_reason mr_wake_at mr_wake_reason <<< "$(_mayor_rig_activity_state_read "$rig_name")"
+      IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked ralph_last_ts ralph_last_action ralph_last_reason ralph_last_outcome <<< "$(_ralph_mode_snapshot_fields "$rig_name" "$(rig_repo "$rig_name" 2>/dev/null || true)" 2>/dev/null || true)"
       printf "  %-16s %s  %s%s%s\n" "$rig_name" "$(_status_badge "$mr_state")" "$(_dim)" "mode=${mr_mode:-none}" "$(_reset)"
       if [[ -n "$mr_reason" ]]; then
         printf "  %-16s %s%s%s\n" "" "$(_dim)" "reason: $mr_reason" "$(_reset)"
+      fi
+      if [[ "$ralph_enabled" == "1" ]]; then
+        printf "  %-16s %s%s%s\n" "" "$(_dim)" "ralph: state=${ralph_state:-unknown} target=${ralph_target:-1} active_lanes=${ralph_active_lanes:-0} admissible=${ralph_admissible_lanes:-0} backlog=${ralph_backlog_lanes:-0} support_excluded=${ralph_support_lanes:-0} duplicate_excluded=${ralph_duplicate_lanes:-0} underfilled=${ralph_underfilled:-0} condition_status=${ralph_condition_status:-unmet}" "$(_reset)"
+        if [[ -n "$ralph_condition" ]]; then
+          printf "  %-16s %s%s%s\n" "" "$(_dim)" "ralph condition: $ralph_condition" "$(_reset)"
+        fi
+        if [[ -n "$ralph_last_action" || -n "$ralph_last_reason" ]]; then
+          printf "  %-16s %s%s%s\n" "" "$(_dim)" "ralph president: ${ralph_last_ts:-unknown} action=${ralph_last_action:-unknown} reason=${ralph_last_reason:-unknown} outcome=${ralph_last_outcome:-unknown}" "$(_reset)"
+        fi
       fi
       if [[ -n "$mr_changed_at" ]]; then
         printf "  %-16s %s%s%s\n" "" "$(_dim)" "since: $mr_changed_at" "$(_reset)"
@@ -11409,6 +11993,12 @@ _president_intervention_allowed() {
 _president_operator_event_kind() {
   local reason="${1:-}" action="${2:-}"
   case "$reason" in
+    ralph-underfilled|ralph-idle)
+      echo "drift"
+      ;;
+    ralph-contradiction)
+      echo "contradiction"
+      ;;
     drift*|*drift*)
       echo "drift"
       ;;
@@ -11483,6 +12073,9 @@ _president_operator_dedupe_key() {
 _president_operator_overlap_key() {
   local rig="${1:-}" kind="${2:-unknown}" reason="${3:-unknown}"
   case "$reason" in
+    ralph-underfilled|ralph-idle|ralph-contradiction)
+      printf 'rig-incident:%s:ralph\n' "${rig:-unknown}"
+      ;;
     actionable-no-forward-motion|actionable-rig-recheck)
       printf 'rig-incident:%s:actionable-no-forward-motion\n' "${rig:-unknown}"
       ;;
@@ -11517,6 +12110,7 @@ _president_supervise_rig_mayor() {
   local mayor_session mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale mayor_hb_health
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local activity changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
+  local repo ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
   local now_epoch action reason detail last_meaningful_age
 
   [[ -n "$rig" ]] || return 1
@@ -11530,6 +12124,8 @@ _president_supervise_rig_mayor() {
   snapshot="$(_mayor_rig_activity_snapshot "$rig")"
   IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
   IFS='|' read -r activity snapshot_reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+  repo="$(rig_repo "$rig" 2>/dev/null || true)"
+  IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
 
   action=""
   reason=""
@@ -11547,6 +12143,14 @@ _president_supervise_rig_mayor() {
     action="refresh"
     reason="mayor-heartbeat-stale"
     detail="heartbeat_age=${mayor_hb_age}s threshold=${mayor_hb_stale}s"
+  elif [[ "$ralph_completion_blocked" == "1" && "${ralph_active_lanes:-0}" =~ ^[0-9]+$ && "${ralph_target:-0}" =~ ^[0-9]+$ && "${ralph_active_lanes:-0}" -eq 0 ]]; then
+    action="refresh"
+    reason="ralph-idle"
+    detail="condition=\"${ralph_condition:-}\" active_lanes=${ralph_active_lanes:-0} admissible_lanes=${ralph_admissible_lanes:-0} target=${ralph_target:-1}"
+  elif [[ "$ralph_underfilled" == "1" ]]; then
+    action="wake"
+    reason="ralph-underfilled"
+    detail="condition=\"${ralph_condition:-}\" active_lanes=${ralph_active_lanes:-0} admissible_lanes=${ralph_admissible_lanes:-0} backlog_lanes=${ralph_backlog_lanes:-0} target=${ralph_target:-1}"
   elif [[ "$open_authorized" =~ ^[0-9]+$ && "$open_prs" =~ ^[0-9]+$ && "$active_polecats" =~ ^[0-9]+$ && "$merge_queue" =~ ^[0-9]+$ ]] \
     && (( open_authorized > 0 )) && (( open_prs == 0 )) && (( active_polecats == 0 )) && (( merge_queue == 0 )); then
     if [[ "$meaningful_epoch" =~ ^[0-9]+$ ]]; then
@@ -14877,14 +15481,15 @@ _worker_plan_completion_context_md() {
         status="${c2:-not_declared}"
         rollup="${c3:-not_declared}"
         condition="${c4:-}"
-        acceptance_json="${c5:-{}}"
+        acceptance_json="${c5:-}"
+        [[ -n "$acceptance_json" ]] || acceptance_json="{}"
         details="${c6:-}"
         blocked_reason="${c7:-}"
         ;;
     esac
   done < <(_plan_state_snapshot "$rig" "$plan_file" "$(_plan_file_path "$rig")" 2>/dev/null || true)
 
-  if [[ "$status" == "not_declared" && -z "$condition" && "${acceptance_json:-{}}" == "{}" ]]; then
+  if [[ "$status" == "not_declared" && -z "$condition" && "${acceptance_json:-}" == "{}" ]]; then
     return 0
   fi
 
@@ -15028,6 +15633,8 @@ Core Commands:
   create blocker <rig> <evidence> Store a durable verified acceptance blocker and wake the mayor
     --file <path>                 Read blocker evidence from a file
     --agent <openclaw-id>         Reporter id for follow-up routing
+  config notify <rig> <agent>    Set or show the per-rig OpenClaw notify route
+  config ralph <rig> [opts]      Configure Ralph mode policy for a rig
   sling <rig> <task> [opts]     Dispatch coding work (issue + branch + polecat)
     --convoy <name>               Add to milestone
     --label <label>               Add label (repeatable)
@@ -15197,7 +15804,8 @@ main() {
       shift 2>/dev/null || true
       case "$sub" in
         notify) cmd_config_notify "$@" ;;
-        *)      die "unknown config command: $sub (try: notify)" ;;
+        ralph)  cmd_config_ralph "$@" ;;
+        *)      die "unknown config command: $sub (try: notify, ralph)" ;;
       esac
       ;;
     sling)          cmd_sling "$@" ;;

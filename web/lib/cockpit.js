@@ -869,6 +869,7 @@ function buildRigMap({ rigs, mayorRigs, workers, blockers, mergeQueue }) {
       state: 'unknown',
       reason: '',
       hibernationMode: 'none',
+      ralph: null,
       lastMeaningfulAt: '',
       lastWakeAt: '',
       blockers: 0,
@@ -887,12 +888,14 @@ function buildRigMap({ rigs, mayorRigs, workers, blockers, mergeQueue }) {
       blockers: 0,
       activeWorkers: 0,
       mergeQueue: 0,
+      ralph: null,
     };
     rigMap.set(mayorRig.rig, {
       ...existing,
       state: mayorRig.state || existing.state || 'unknown',
       reason: mayorRig.reason || '',
       hibernationMode: mayorRig.hibernation_mode || 'none',
+      ralph: mayorRig.ralph || existing.ralph || null,
       lastMeaningfulAt: mayorRig.last_meaningful_at || '',
       lastWakeAt: mayorRig.last_wake_at || '',
     });
@@ -909,6 +912,7 @@ function buildRigMap({ rigs, mayorRigs, workers, blockers, mergeQueue }) {
       state: 'unknown',
       reason: '',
       hibernationMode: 'none',
+      ralph: null,
       lastMeaningfulAt: '',
       lastWakeAt: '',
       blockers: 0,
