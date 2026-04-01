@@ -149,18 +149,28 @@ _status_badge() {
 }
 
 _mayor_architecture() {
+  local rig_hint="${1:-}"
   case "${SGT_MAYOR_ARCHITECTURE:-shared}" in
     per-rig|per_rig)
       printf 'per-rig\n'
-      ;;
-    *)
-      printf 'shared\n'
+      return 0
       ;;
   esac
+  if command -v tmux >/dev/null 2>&1; then
+    if tmux has-session -t "$(_president_session_name)" 2>/dev/null; then
+      printf 'per-rig\n'
+      return 0
+    fi
+    if [[ -n "$rig_hint" ]] && tmux has-session -t "$(_mayor_scope_session_name "$rig_hint")" 2>/dev/null; then
+      printf 'per-rig\n'
+      return 0
+    fi
+  fi
+  printf 'shared\n'
 }
 
 _mayor_architecture_per_rig() {
-  [[ "$(_mayor_architecture)" == "per-rig" ]]
+  [[ "$(_mayor_architecture "${1:-}")" == "per-rig" ]]
 }
 
 _president_enabled() {
@@ -6531,6 +6541,18 @@ else:
 def one_line(value):
     return str(value or "").replace("\t", " ").replace("\n", " ").strip()
 
+def declared_task_status(value):
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized in {"completed", "done", "closed", "verified"}:
+        return "completed"
+    if normalized in {"in_progress", "active", "working"}:
+        return "in_progress"
+    if normalized in {"dispatched", "queued", "issued"}:
+        return "dispatched"
+    if normalized in {"pending", "planned", "open", "todo", "ready"}:
+        return "pending"
+    return ""
+
 normalized = {}
 for task in tasks:
     if not isinstance(task, dict):
@@ -6541,6 +6563,15 @@ for task in tasks:
     current = tasks_state.get(task_id)
     if not isinstance(current, dict):
         current = {}
+    declared_status = declared_task_status(task.get("status"))
+    current_status = str(current.get("status") or "").strip()
+    if declared_status:
+        if declared_status == "completed":
+            current["status"] = "completed"
+        elif current_status != declared_status:
+            # Repo-local plan truth can explicitly reopen or requeue a task;
+            # when that happens, drop stale issue/completion bookkeeping.
+            current = {"status": declared_status}
     current.setdefault("status", "pending")
     normalized[task_id] = current
 
@@ -6553,7 +6584,7 @@ doc = {
     "tasks": normalized,
 }
 
-completion_details = one_line(acceptance.get("details") or completion_state.get("details"))
+completion_details = one_line(acceptance.get("details") or acceptance.get("note") or completion_state.get("details"))
 blocked_reason = one_line(acceptance.get("blocked_reason") or completion_state.get("blocked_reason"))
 if completion_status != "blocked":
     blocked_reason = ""
@@ -15200,7 +15231,7 @@ _cmd_mayor_refresh_one() {
 
 cmd_mayor_refresh() {
   local scope_rig="${1:-}"
-  if _mayor_architecture_per_rig; then
+  if _mayor_architecture_per_rig "$scope_rig"; then
     if [[ -n "$scope_rig" ]]; then
       _cmd_mayor_refresh_one "$scope_rig"
       return $?
