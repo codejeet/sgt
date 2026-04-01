@@ -125,6 +125,10 @@ _mayor_rig_activity_state_read() {
   printf 'active|open_issues=1|2026-03-31T00:00:00Z|1774915200|none|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|periodic\n'
 }
 
+_ralph_mode_snapshot_fields() {
+  printf '0||||0|disabled|Ralph mode disabled|0|0|0|0|0|0|0||||\n'
+}
+
 tmux() {
   if [[ "${1:-}" == "has-session" && "${2:-}" == "-t" ]]; then
     case "${3:-}" in
@@ -181,6 +185,48 @@ if [[ -s "$WAKE_LOG" ]]; then
   exit 1
 fi
 
+_ralph_mode_snapshot_fields() {
+  printf '1|1K PNL for 5m btc pipeline|unmet|3|0|underfilled|condition unmet; active_lanes=1 target=3|1|3|2|0|0|1|1||||\n'
+}
+
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-ralph-underfilled.out"
+
+grep -qx 'president:demo:ralph-underfilled' "$WAKE_LOG" || {
+  echo "expected President to wake mayor for Ralph underfill when admissible backlog exists" >&2
+  exit 1
+}
+if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=wake reason=ralph-underfilled' "$EVENT_LOG"; then
+  echo "expected durable President wake intervention for Ralph underfill" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=drift severity=warning notify=1 dedupe_key=president:demo:drift:ralph-underfilled:wake overlap_key=rig-incident:demo:ralph action=wake reason=ralph-underfilled outcome=intervened' "$EVENT_LOG"; then
+  echo "expected structured President drift event for Ralph refill wake" >&2
+  exit 1
+fi
+
+_ralph_mode_snapshot_fields() {
+  printf '1|1K PNL for 5m btc pipeline|unmet|3|0|underfilled|condition unmet; active_lanes=1 target=3|1|1|0|0|0|1|1||||\n'
+}
+
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-ralph-contradiction.out"
+
+if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne 2 ]]; then
+  echo "expected Ralph contradiction to trigger a refresh intervention" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=refresh reason=ralph-contradiction' "$EVENT_LOG"; then
+  echo "expected durable President contradiction intervention for unrefillable Ralph state" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=contradiction severity=warning notify=1 dedupe_key=president:demo:contradiction:ralph-contradiction:refresh overlap_key=rig-incident:demo:ralph action=refresh reason=ralph-contradiction outcome=intervened' "$EVENT_LOG"; then
+  echo "expected structured President contradiction event for unrefillable Ralph state" >&2
+  exit 1
+fi
+
+_ralph_mode_snapshot_fields() {
+  printf '0||||0|disabled|Ralph mode disabled|0|0|0|0|0|0|0||||\n'
+}
+
 cat > "$SGT_PLAN_STATE_DIR/demo.json" <<'JSON'
 {
   "policy": {
@@ -197,9 +243,10 @@ _mayor_rig_activity_snapshot() {
   printf 'active|pending-plan-underfilled target=2 active_polecats=0 open_issues=0 open_prs=0 merge_queue=0|0|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
 }
 
+refresh_count_before_pending_plan="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
 _president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-plan-underfill.out"
 
-if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne 2 ]]; then
+if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne $((refresh_count_before_pending_plan + 1)) ]]; then
   echo "expected president to refresh again for pending plan underfill" >&2
   exit 1
 fi

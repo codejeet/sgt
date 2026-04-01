@@ -51,6 +51,9 @@ Current President supervision reasons map as follows:
 
 - `mayor-session-missing` -> `intervention`, `severity=warning`, `notify=1`
 - `mayor-heartbeat-invalid` or `mayor-heartbeat-stale` -> `intervention`, `severity=warning`, `notify=1`
+- `ralph-underfilled` -> `drift`, `severity=warning`, `notify=1` when President can refill by waking the rig-local Mayor toward existing admissible backlog
+- `ralph-idle` -> `drift`, `severity=warning`, `notify=1` when Ralph is still unmet but no live admissible lane remains
+- `ralph-contradiction` -> `contradiction`, `severity=warning`, `notify=1` when Ralph is still unmet but the rig looks fake-complete or has no refillable backlog toward target concurrency
 - `actionable-no-forward-motion` -> `stalled-purpose`, `severity=warning`, `notify=1`
 - `actionable-rig-recheck` -> `intervention`, `severity=info`, `notify=0`
 
