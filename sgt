@@ -2013,7 +2013,7 @@ _mayor_wake_reason_targets_rig() {
 }
 
 _mayor_rig_activity_snapshot() {
-  local rig="${1:-}" repo open_prs open_authorized active_polecats merge_queue pending_plan_requests plan_rollup plan_status actionable state reason
+  local rig="${1:-}" repo open_prs open_authorized active_polecats merge_queue pending_plan_requests plan_rollup plan_status actionable state reason pending_plan_target
   local ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
   repo="$(rig_repo "$rig" 2>/dev/null || true)"
   open_prs=0
@@ -2058,6 +2058,8 @@ PY
     fi
   fi
   IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
+  pending_plan_target="$(_plan_pending_underfill_target "$rig" 2>/dev/null || true)"
+  [[ "$pending_plan_target" =~ ^[1-9][0-9]*$ ]] || pending_plan_target=0
   actionable=0
   if (( open_prs > 0 || open_authorized > 0 || active_polecats > 0 || merge_queue > 0 || pending_plan_requests > 0 )); then
     actionable=1
@@ -2067,6 +2069,9 @@ PY
   if [[ "$ralph_completion_blocked" == "1" ]]; then
     state="active"
     reason="ralph state=${ralph_state:-active} target=${ralph_target:-1} active_lanes=${ralph_active_lanes:-0} admissible_lanes=${ralph_admissible_lanes:-0} underfilled=${ralph_underfilled:-0} condition=\"${ralph_condition:-}\""
+  elif (( pending_plan_target > 0 && active_polecats < pending_plan_target )); then
+    state="active"
+    reason="pending-plan-underfilled target=${pending_plan_target} active_polecats=${active_polecats} open_issues=${open_authorized} open_prs=${open_prs} merge_queue=${merge_queue}"
   elif (( actionable > 0 )); then
     state="active"
     reason="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} pending_plan_requests=${pending_plan_requests}"
@@ -6388,6 +6393,34 @@ os.replace(tmp, path)
 PY
 }
 
+_plan_pending_underfill_target() {
+  local rig="${1:-}" state_file
+  state_file="$(_plan_state_path "$rig")"
+  [[ -f "$state_file" ]] || return 0
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+
+completion = state.get("completion") or {}
+if str(completion.get("status") or "").strip().lower() != "pending":
+    raise SystemExit(0)
+if str(completion.get("rollup") or "").strip() != "tasks-exhausted-awaiting-acceptance":
+    raise SystemExit(0)
+
+policy = state.get("policy") or {}
+target = policy.get("max_in_flight", 1)
+if not isinstance(target, int) or target <= 0:
+    target = 1
+print(target)
+PY
+}
+
 _mayor_rig_actionable_work_counts() {
   local rig="${1:-}" repo="${2:-}"
   local open_prs open_authorized open_polecats pending_plan_requests
@@ -7107,6 +7140,24 @@ _plan_tick_run() {
       plan_completion_rollup="not_declared"
       ;;
   esac
+
+  local live_active_polecats pending_plan_target continuation_blocker_id continuation_reason
+  live_active_polecats="$(_active_polecat_count "$rig" 2>/dev/null || true)"
+  [[ "$live_active_polecats" =~ ^[0-9]+$ ]] || live_active_polecats=0
+  pending_plan_target=0
+  if [[ "$plan_completion_status" == "pending" && "$plan_completion_rollup" == "tasks-exhausted-awaiting-acceptance" ]]; then
+    pending_plan_target="$max_in_flight"
+  fi
+  if (( pending_plan_target > 0 && live_active_polecats < pending_plan_target )); then
+    continuation_reason="acceptance remains pending with repo-local continuation intent open; live_polecats=${live_active_polecats} target=${pending_plan_target} rollup=${plan_completion_rollup}"
+    continuation_blocker_id="$(_plan_blocker_record "$rig" "__continuation__" "Plan continuation" "continuation-underfilled" "$continuation_reason" "$tick_source" 2>/dev/null || true)"
+    log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=__continuation__ blocker_id=${continuation_blocker_id:-unavailable} reason_code=continuation-underfilled source=$tick_source reason=\"$(_escape_quotes "$continuation_reason")\""
+    if [[ "$tick_source" == "mayor" ]]; then
+      _mayor_record_decision "PLAN MOVEMENT BLOCKER rig=$rig task=__continuation__ blocker_id=${continuation_blocker_id:-unavailable} reason_code=continuation-underfilled retry=next-mayor-cycle reason=\"$(_escape_quotes "$continuation_reason")\"" "plan-movement-blocker" "$SGT_ROOT" || true
+    fi
+  else
+    _plan_blocker_resolve "$rig" "__continuation__" || true
+  fi
 
   if [[ "$ralph_completion_blocked" == "1" ]]; then
     plan_completion_status="pending"
@@ -12154,7 +12205,7 @@ _president_operator_event_kind() {
     drift*|*drift*)
       echo "drift"
       ;;
-    actionable-no-forward-motion|stalled-purpose*|*stalled-purpose*)
+    actionable-no-forward-motion|pending-plan-underfilled|stalled-purpose*|*stalled-purpose*)
       echo "stalled-purpose"
       ;;
     contradiction*|*contradict*)
@@ -12228,6 +12279,9 @@ _president_operator_overlap_key() {
     ralph-underfilled|ralph-idle|ralph-contradiction)
       printf 'rig-incident:%s:ralph\n' "${rig:-unknown}"
       ;;
+    pending-plan-underfilled)
+      printf 'rig-incident:%s:pending-plan-underfill\n' "${rig:-unknown}"
+      ;;
     actionable-no-forward-motion|actionable-rig-recheck)
       printf 'rig-incident:%s:actionable-no-forward-motion\n' "${rig:-unknown}"
       ;;
@@ -12263,7 +12317,7 @@ _president_supervise_rig_mayor() {
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local activity changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
   local repo ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
-  local now_epoch action reason detail last_meaningful_age
+  local now_epoch action reason detail last_meaningful_age pending_plan_target
 
   [[ -n "$rig" ]] || return 1
   now_epoch="$(date +%s)"
@@ -12278,6 +12332,8 @@ _president_supervise_rig_mayor() {
   IFS='|' read -r activity snapshot_reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
   repo="$(rig_repo "$rig" 2>/dev/null || true)"
   IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
+  pending_plan_target="$(_plan_pending_underfill_target "$rig" 2>/dev/null || true)"
+  [[ "$pending_plan_target" =~ ^[1-9][0-9]*$ ]] || pending_plan_target=0
 
   action=""
   reason=""
@@ -12303,6 +12359,14 @@ _president_supervise_rig_mayor() {
     action="wake"
     reason="ralph-underfilled"
     detail="condition=\"${ralph_condition:-}\" active_lanes=${ralph_active_lanes:-0} admissible_lanes=${ralph_admissible_lanes:-0} backlog_lanes=${ralph_backlog_lanes:-0} target=${ralph_target:-1}"
+  elif (( pending_plan_target > 0 && active_polecats < pending_plan_target )); then
+    if (( active_polecats == 0 )); then
+      action="refresh"
+    else
+      action="wake"
+    fi
+    reason="pending-plan-underfilled"
+    detail="plan_rollup=${plan_rollup:-tasks-exhausted-awaiting-acceptance} plan_status=${plan_status:-pending} active_polecats=${active_polecats:-0} target=${pending_plan_target}"
   elif [[ "$open_authorized" =~ ^[0-9]+$ && "$open_prs" =~ ^[0-9]+$ && "$active_polecats" =~ ^[0-9]+$ && "$merge_queue" =~ ^[0-9]+$ ]] \
     && (( open_authorized > 0 )) && (( open_prs == 0 )) && (( active_polecats == 0 )) && (( merge_queue == 0 )); then
     if [[ "$meaningful_epoch" =~ ^[0-9]+$ ]]; then

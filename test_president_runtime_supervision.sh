@@ -41,6 +41,8 @@ eval "$(extract_fn _president_operator_notify_enabled)"
 eval "$(extract_fn _president_operator_dedupe_key)"
 eval "$(extract_fn _president_operator_overlap_key)"
 eval "$(extract_fn _president_operator_log_event)"
+eval "$(extract_fn _plan_state_path)"
+eval "$(extract_fn _plan_pending_underfill_target)"
 eval "$(extract_fn _deacon_supervise_president)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
@@ -48,13 +50,14 @@ TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 SGT_ROOT="$TMP_ROOT/root"
 SGT_CONFIG="$SGT_ROOT/.sgt"
-mkdir -p "$SGT_CONFIG/president" "$SGT_CONFIG/mayors/demo"
+SGT_PLAN_STATE_DIR="$SGT_CONFIG/plan-state"
+mkdir -p "$SGT_CONFIG/president" "$SGT_CONFIG/mayors/demo" "$SGT_PLAN_STATE_DIR"
 EVENT_LOG="$TMP_ROOT/events.log"
 EVENT_STATE="$SGT_CONFIG/president/president-operator-events.tsv"
 START_LOG="$TMP_ROOT/start.log"
 REFRESH_LOG="$TMP_ROOT/refresh.log"
 WAKE_LOG="$TMP_ROOT/wake.log"
-export SGT_ROOT SGT_CONFIG EVENT_LOG EVENT_STATE START_LOG REFRESH_LOG WAKE_LOG
+export SGT_ROOT SGT_CONFIG SGT_PLAN_STATE_DIR EVENT_LOG EVENT_STATE START_LOG REFRESH_LOG WAKE_LOG
 export SGT_PRESIDENT_INTERVAL=60
 export SGT_PRESIDENT_INTERVENTION_STALE_SECS=900
 export SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS=600
@@ -177,6 +180,43 @@ if [[ -s "$WAKE_LOG" ]]; then
   echo "expected refresh intervention instead of plain wake for stale rig" >&2
   exit 1
 fi
+
+cat > "$SGT_PLAN_STATE_DIR/demo.json" <<'JSON'
+{
+  "policy": {
+    "max_in_flight": 2
+  },
+  "completion": {
+    "status": "pending",
+    "rollup": "tasks-exhausted-awaiting-acceptance"
+  }
+}
+JSON
+
+_mayor_rig_activity_snapshot() {
+  printf 'active|pending-plan-underfilled target=2 active_polecats=0 open_issues=0 open_prs=0 merge_queue=0|0|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
+}
+
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-plan-underfill.out"
+
+if [[ "$(grep -cx 'demo' "$REFRESH_LOG")" -ne 2 ]]; then
+  echo "expected president to refresh again for pending plan underfill" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=refresh reason=pending-plan-underfilled' "$EVENT_LOG"; then
+  echo "expected durable president intervention event for pending plan underfill" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=stalled-purpose severity=warning notify=1 dedupe_key=president:demo:stalled-purpose:pending-plan-underfilled:refresh overlap_key=rig-incident:demo:pending-plan-underfill action=refresh reason=pending-plan-underfilled outcome=intervened' "$EVENT_LOG"; then
+  echo "expected structured President operator event for pending plan underfill" >&2
+  exit 1
+fi
+
+rm -f "$SGT_PLAN_STATE_DIR/demo.json"
+
+_mayor_rig_activity_snapshot() {
+  printf 'active|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
+}
 
 _mayor_rig_activity_state_read() {
   local now recent wake_recent
