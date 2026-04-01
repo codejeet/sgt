@@ -248,6 +248,20 @@ Example:
 - Issue `#102` labeled `support-only` does not count unless support lanes are enabled.
 - Issue `#103` labeled `duplicate` never counts.
 
+### Ralph latest-main proof path
+
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that Ralph mode configuration, state exposure, concurrency accounting, and bounded refill behavior still work end to end:
+
+```bash
+./test_ralph_mode_latest_main_proof.sh
+```
+
+That proof path bundles the checks that matter for Ralph mode:
+- `test_ralph_mode_config_and_state.sh` proves per-rig Ralph config, normalized state output, anti-false-completion semantics, and admissible/support/duplicate lane accounting.
+- `test_president_runtime_supervision.sh` proves President distinguishes Ralph underfill, idle, and contradiction states and picks the expected bounded intervention.
+- `test_mayor_stranded_zero_worker_recovery.sh` proves controller-side refill logic can top an actionable rig back up toward target live concurrency instead of leaving it quietly idle.
+- `web/test/cockpit.test.js` proves the Web cockpit snapshot keeps Ralph state attached to each rig for operator visibility.
+
 ## CI self-healing (Mayor watchdog)
 
 For rigs with `SGT_PLAN.json`, Mayor also watches the latest **master** GitHub Actions run.
