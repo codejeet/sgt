@@ -5979,39 +5979,45 @@ _plan_cache_path() {
 
 _plan_effective_file_path() {
   local rig="${1:-}"
-  local canonical_plan_file rpath default_branch current_branch local_plan_dirty remote_plan cache_path cache_tmp
+  local canonical_plan_file
   canonical_plan_file="$(_plan_file_path "$rig")"
   [[ -f "$canonical_plan_file" ]] || return 1
+  printf '%s\n' "$canonical_plan_file"
+}
 
-  rpath="$(rig_path "$rig")"
-  if [[ ! -d "$rpath" ]] || ! command -v git >/dev/null 2>&1; then
-    printf '%s\n' "$canonical_plan_file"
+_plan_request_reconcile_canonical_plan_file() {
+  local request_id="${1:-}" rig="${2:-}" canonical_plan_file="${3:-}"
+  local scope_dir workspace_plan_file workspace_rig_plan_file request_meta fallback_plan
+  [[ -n "$request_id" && -n "$rig" && -n "$canonical_plan_file" ]] || return 1
+
+  request_meta="$(_plan_request_meta_path "$request_id")"
+  scope_dir="$(_mayor_scope_dir)"
+  workspace_plan_file="$scope_dir/mayor-workspace/SGT_PLAN.json"
+  workspace_rig_plan_file="$scope_dir/mayor-workspace/$rig/SGT_PLAN.json"
+
+  if [[ -f "$canonical_plan_file" ]]; then
+    if [[ -f "$request_meta" ]]; then
+      _plan_request_update_field "$request_id" "PLAN_FILE" "$canonical_plan_file" || true
+    fi
     return 0
   fi
 
-  git -C "$rpath" fetch origin >/dev/null 2>&1 || true
-  default_branch="$(git -C "$rpath" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)"
-  [[ -n "$default_branch" ]] || default_branch="main"
-  current_branch="$(git -C "$rpath" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  local_plan_dirty="$(git -C "$rpath" status --short -- SGT_PLAN.json 2>/dev/null || true)"
-
-  if [[ "$current_branch" == "$default_branch" && -z "$local_plan_dirty" ]]; then
-    printf '%s\n' "$canonical_plan_file"
-    return 0
+  fallback_plan=""
+  if [[ -f "$workspace_rig_plan_file" ]]; then
+    fallback_plan="$workspace_rig_plan_file"
+  elif [[ -f "$workspace_plan_file" ]]; then
+    fallback_plan="$workspace_plan_file"
   fi
 
-  remote_plan="$(git -C "$rpath" show "origin/$default_branch:SGT_PLAN.json" 2>/dev/null || true)"
-  if [[ -z "$remote_plan" ]]; then
-    printf '%s\n' "$canonical_plan_file"
-    return 0
-  fi
+  [[ -n "$fallback_plan" ]] || return 1
 
-  cache_path="$(_plan_cache_path "$rig")"
-  mkdir -p "$(_plan_cache_dir)"
-  cache_tmp="${cache_path}.tmp.$$"
-  printf '%s\n' "$remote_plan" > "$cache_tmp"
-  mv -f "$cache_tmp" "$cache_path"
-  printf '%s\n' "$cache_path"
+  mkdir -p "$(dirname "$canonical_plan_file")"
+  cp "$fallback_plan" "$canonical_plan_file" || return 1
+  if [[ -f "$request_meta" ]]; then
+    _plan_request_update_field "$request_id" "PLAN_FILE" "$canonical_plan_file" || true
+  fi
+  log_event "PLAN_REQUEST_CANONICALIZED request_id=$request_id rig=$rig source=\"$(_escape_quotes "$fallback_plan")\" destination=\"$(_escape_quotes "$canonical_plan_file")\""
+  printf '%s\n' "$canonical_plan_file"
 }
 
 _plan_request_id() {
@@ -13223,15 +13229,18 @@ HEADER
   done
 
   echo "## Pending Plan Requests" >> "$briefing_tmp"
-  local pending_plan_count=0 request_line request_id request_rig request_status request_requested_at request_requester request_prompt_file
+  local pending_plan_count=0 request_line request_id request_rig request_status request_requested_at request_requester request_prompt_file request_plan_file
   while IFS='|' read -r request_id request_rig request_status request_requested_at request_requester request_prompt_file; do
     [[ -n "$request_id" ]] || continue
     pending_plan_count=$((pending_plan_count + 1))
+    request_plan_file="$(_plan_file_path "$request_rig")"
     echo "### $request_id ($request_rig)" >> "$briefing_tmp"
     echo "- status: $request_status" >> "$briefing_tmp"
     echo "- requested_at: $request_requested_at" >> "$briefing_tmp"
     echo "- requesting_agent: $request_requester" >> "$briefing_tmp"
-    echo "- plan_path: $(_plan_file_path "$request_rig")" >> "$briefing_tmp"
+    echo "- repo_path: $(rig_path "$request_rig")" >> "$briefing_tmp"
+    echo "- plan_path: $request_plan_file" >> "$briefing_tmp"
+    echo "- note: only this repo-local plan path is authoritative; ignore any SGT_PLAN.json under mayor-workspace" >> "$briefing_tmp"
     echo "- prompt_excerpt:" >> "$briefing_tmp"
     head -n 12 "$request_prompt_file" 2>/dev/null | sed 's/^/    /' >> "$briefing_tmp" || true
     echo "" >> "$briefing_tmp"
@@ -14458,6 +14467,7 @@ _mayor_loop() {
       local mayor_workspace="$(_mayor_scope_dir)/mayor-workspace"
       local dispatch_snapshot_file="$(_mayor_scope_dir)/mayor-dispatch-snapshot.tsv"
       mkdir -p "$mayor_workspace"
+      rm -f "$mayor_workspace/SGT_PLAN.json"
       _mayor_dispatch_snapshot_file "$dispatch_snapshot_file"
 
       local briefing_gate briefing briefing_status briefing_generated_at briefing_age briefing_threshold briefing_stale_detected briefing_path briefing_content
@@ -14506,6 +14516,8 @@ $briefing_content
 Decide what to do. Log decisions to $(_mayor_scope_dir)/mayor-decisions.log. Be fast.
 
 For each pending plan request, turn the request into a repo-local \`SGT_PLAN.json\` inside the rig repo when the request is clear enough.
+Use the exact \`repo_path\` / \`plan_path\` listed in the briefing as canonical truth.
+Never create or update \`SGT_PLAN.json\` under \`mayor-workspace\`; workspace-local plan files are ignored.
 For any rig-specific question, ambiguity, or missing decision, search shared rig context first with \`sgt context search <rig> "<query>"\` before guessing or escalating.
 If you still need clarification after checking context, ask the requesting OpenClaw agent via \`sgt mayor request ask ...\`.
 After creating or updating \`SGT_PLAN.json\`, call \`sgt mayor request complete <request-id>\`.
@@ -14646,9 +14658,12 @@ cmd_mayor_request_complete() {
   local meta_path="$(_plan_request_meta_path "$request_id")"
   [[ -f "$meta_path" ]] || die "plan request '$request_id' not found"
   local rig plan_file repo sync_reason sync_blocker_id
-  eval "$(grep -E '^(RIG|REQUESTING_AGENT_ID)=' "$meta_path" 2>/dev/null || true)"
+  eval "$(grep -E '^(RIG|REQUESTING_AGENT_ID|PLAN_FILE)=' "$meta_path" 2>/dev/null || true)"
   rig="${RIG:-}"
   plan_file="$(_plan_file_path "$rig")"
+  if [[ -n "$rig" ]]; then
+    _plan_request_reconcile_canonical_plan_file "$request_id" "$rig" "$plan_file" >/dev/null 2>&1 || true
+  fi
   repo="$(rig_repo "$rig" 2>/dev/null || true)"
   if [[ -n "$rig" && -n "$repo" && -f "$plan_file" ]]; then
     if ! _plan_sync_state_and_labels "$rig" "$plan_file" "$repo"; then
