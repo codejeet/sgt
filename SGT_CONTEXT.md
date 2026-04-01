@@ -1669,3 +1669,4 @@ Required follow-up:
 - re-investigate why the worker exited without producing a PR
 
 ```
+- 2026-04-01T13:28:48+02:00 — 2026-04-01 issue #392: regression coverage now pins Ralph lane issue-number accounting, the non-underfilled anti-false-completion override (declared acceptance waived/verified still forced back to pending while condition is unmet), and President's ralph-idle branch as refresh-not-wake distinct from ralph-underfilled refill wakes.
