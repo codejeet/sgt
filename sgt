@@ -7141,15 +7141,21 @@ _plan_tick_run() {
       ;;
   esac
 
-  local live_active_polecats pending_plan_target continuation_blocker_id continuation_reason
+  local live_active_polecats pending_plan_target continuation_blocker_id continuation_reason continuation_target continuation_context
   live_active_polecats="$(_active_polecat_count "$rig" 2>/dev/null || true)"
   [[ "$live_active_polecats" =~ ^[0-9]+$ ]] || live_active_polecats=0
   pending_plan_target=0
   if [[ "$plan_completion_status" == "pending" && "$plan_completion_rollup" == "tasks-exhausted-awaiting-acceptance" ]]; then
     pending_plan_target="$max_in_flight"
   fi
-  if (( pending_plan_target > 0 && live_active_polecats < pending_plan_target )); then
-    continuation_reason="acceptance remains pending with repo-local continuation intent open; live_polecats=${live_active_polecats} target=${pending_plan_target} rollup=${plan_completion_rollup}"
+  continuation_target="$pending_plan_target"
+  continuation_context="acceptance remains pending with repo-local continuation intent open"
+  if [[ "$ralph_completion_blocked" == "1" && "$ralph_target" =~ ^[1-9][0-9]*$ && "$ralph_target" -gt "$continuation_target" ]]; then
+    continuation_target="$ralph_target"
+    continuation_context="Ralph continuation intent remains active while condition is unmet"
+  fi
+  if (( continuation_target > 0 && live_active_polecats < continuation_target )); then
+    continuation_reason="${continuation_context}; live_polecats=${live_active_polecats} target=${continuation_target} rollup=${plan_completion_rollup}"
     continuation_blocker_id="$(_plan_blocker_record "$rig" "__continuation__" "Plan continuation" "continuation-underfilled" "$continuation_reason" "$tick_source" 2>/dev/null || true)"
     log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=__continuation__ blocker_id=${continuation_blocker_id:-unavailable} reason_code=continuation-underfilled source=$tick_source reason=\"$(_escape_quotes "$continuation_reason")\""
     if [[ "$tick_source" == "mayor" ]]; then
@@ -10012,6 +10018,8 @@ _mayor_recover_stranded_actionable_rig() {
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason source_event source_event_key
   local resling_output blocked_reason_code blocked_detail dispatched_limit resling_log
+  local pending_plan_target ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
+  local recovery_target recovery_due_to_underfill
 
   _MAYOR_STRANDED_RECOVERY_DISPATCHED=0
   _MAYOR_STRANDED_RECOVERY_BLOCKED=0
@@ -10028,13 +10036,44 @@ _mayor_recover_stranded_actionable_rig() {
   [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=0
   [[ "$active_polecats" =~ ^[0-9]+$ ]] || active_polecats=0
   [[ "$merge_queue" =~ ^[0-9]+$ ]] || merge_queue=0
+  ralph_target=0
+  ralph_completion_blocked=0
 
-  if (( open_authorized == 0 || open_prs > 0 || active_polecats > 0 || merge_queue > 0 )); then
+  pending_plan_target=0
+  if declare -F _plan_pending_underfill_target >/dev/null 2>&1; then
+    pending_plan_target="$(_plan_pending_underfill_target "$rig" 2>/dev/null || true)"
+  fi
+  [[ "$pending_plan_target" =~ ^[1-9][0-9]*$ ]] || pending_plan_target=0
+  if declare -F _ralph_mode_snapshot_fields >/dev/null 2>&1; then
+    IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
+  fi
+  [[ "$ralph_target" =~ ^[1-9][0-9]*$ ]] || ralph_target=0
+
+  recovery_target=0
+  if [[ "$ralph_completion_blocked" == "1" && "$ralph_target" -gt "$recovery_target" ]]; then
+    recovery_target="$ralph_target"
+  fi
+  if (( pending_plan_target > recovery_target )); then
+    recovery_target="$pending_plan_target"
+  fi
+  recovery_due_to_underfill=0
+  if (( recovery_target > 0 && active_polecats < recovery_target )); then
+    recovery_due_to_underfill=1
+  fi
+
+  if (( open_authorized == 0 )); then
+    return 0
+  fi
+  if (( recovery_due_to_underfill == 0 )) && (( open_prs > 0 || active_polecats > 0 || merge_queue > 0 )); then
     return 0
   fi
 
   source_event="mayor-zero-worker-recovery"
   dispatched_limit=1
+  if (( recovery_due_to_underfill > 0 )); then
+    dispatched_limit=$((recovery_target - active_polecats))
+    (( dispatched_limit < 1 )) && dispatched_limit=1
+  fi
   issue_rows="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --limit 100 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)"
   [[ -n "$issue_rows" ]] || return 0
 
