@@ -6403,6 +6403,23 @@ normalized_plan_completion_status = {
     "active": "pending",
     "unverified": "pending",
 }.get(plan_completion_status, plan_completion_status)
+minimum_total_net_pnl = acceptance.get("minimum_total_net_pnl_usdc")
+try:
+    minimum_total_net_pnl = float(minimum_total_net_pnl) if minimum_total_net_pnl not in (None, "") else None
+except Exception:
+    minimum_total_net_pnl = None
+allow_durable_closeout_raw = acceptance.get("allow_durable_falsification_closeout")
+allow_durable_closeout = True if allow_durable_closeout_raw is None else str(allow_durable_closeout_raw).strip().lower() in {"1", "true", "yes", "on"}
+verified_total_net_pnl = acceptance.get("verified_total_net_pnl_usdc")
+try:
+    verified_total_net_pnl = float(verified_total_net_pnl) if verified_total_net_pnl not in (None, "") else None
+except Exception:
+    verified_total_net_pnl = None
+if normalized_plan_completion_status == "verified" and minimum_total_net_pnl is not None and not allow_durable_closeout:
+    if verified_total_net_pnl is None or verified_total_net_pnl < minimum_total_net_pnl:
+        normalized_plan_completion_status = "pending"
+        acceptance["status"] = "pending"
+        acceptance["rollup"] = "profit-target-open"
 if normalized_plan_completion_status in allowed_completion_status:
     completion_status = normalized_plan_completion_status
 elif state_completion_status in allowed_completion_status:
