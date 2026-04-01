@@ -1115,3 +1115,179 @@ A good finished result should make the following true:
 - 2026-03-31T22:26:37+02:00 — 2026-03-31 issue #323: web cockpit alert feed now parses recent PRESIDENT_OPERATOR_EVENT and PRESIDENT_INTERVENTION log lines, dedupes by President overlap/dedupe keys, merges them with blocker alerts, and shows President-tagged alert cards with detail snippets so important President incidents surface in the operator rail without double paging quiet rechecks or suppressed cooldown replays.
 - 2026-03-31T22:27:31+02:00 — 2026-03-31 issue #322: President now persists bounded structured operator-event history in ~/.sgt/president/president-operator-events.tsv; sgt status --json exposes it as president_events, human status shows recent President events, and the web cockpit Alert Center renders President activity with rig, reason, action, outcome, and priority alert surfacing.
 - 2026-03-31T22:32:49+02:00 — 2026-03-31 issue #322 follow-up: current master was missing the closed PR #325 implementation even though later context referenced it. Replacement fix persists bounded President operator-event history in ~/.sgt/president/president-operator-events.tsv, exposes it via status --json as president_events plus human status lines, and the web cockpit now renders a dedicated President Activity panel from that snapshot while leaving the newer alert-feed dedupe logic intact.
+- 2026-03-31T22:38:13+02:00 — 2026-03-31 issue #328: web cockpit alert rail now defaults to recent and actionable items by filtering stale resolved/info noise, deduping blocker history to the latest transition per blocker, and trimming long alert titles/details for faster operator scanning.
+- 2026-03-31T22:38:20+02:00 — 2026-03-31 cockpit issue #327: the web live monitor now removes the focused worker from the wall instead of duplicating it, and the stream wall layout/theme is locked as a blue-on-black automatic grid of tall vertical panes via web/public/* plus operator-shell tests.
+- 2026-03-31T22:50:31+02:00 — 2026-03-31 issue #331: the web cockpit live panes now expose bottom-anchored per-pane nudge inputs via POST /api/nudge, and sgt nudge resolves mayor/<rig>, dog/<name>, and crew/<name> to the same tmux sessions used by cockpit streams.
+- 2026-03-31T22:57:56+02:00 — 2026-03-31 issue #333: docs/president-operator-surface-contract.md and ./test_president_operator_surface_latest_main_proof.sh are the repo-owned join point for the President operator-surface pass. Use that proof when verifying latest-main visibility across sgt status, sgt status --json president_events, scoped sgt peek, and the Web UI alert rail plus President Activity panel.
+
+## 2026-04-01
+- 2026-04-01T03:58:15+02:00 — 2026-04-01 operator policy for President/Mayor: PMKB should maintain multiple materially different live candidate lanes in parallel while acceptance remains pending. If PMKB trends serial or idle, President and rig-local Mayor should proactively top it back up rather than waiting for a human prompt.
+- 2026-04-01T04:22:28+02:00 — 2026-04-01 hard operator policy for PMKB control plane: do not let PMKB acceptance verify on durable falsification alone; target is >= +1000 USDC widened-corpus net PnL under realistic assumptions unless a human waives it. President/Mayor should maintain at least 3 materially different live PMKB candidate lanes in parallel while acceptance remains pending, and proactively refill the rig if active candidate count drops.
+- 2026-04-01T06:19:40+02:00 — Plan request sgt-1775017180-eee389c4 submitted by OpenClaw agent gastown. Full spec appended below.
+
+### Plan Request sgt-1775017180-eee389c4
+
+- Requested at: 2026-04-01T06:19:40+02:00
+- Requesting OpenClaw agent: gastown
+
+```markdown
+# SGT feature request: Ralph mode
+
+## Request
+
+Add a new SGT control-plane feature called **Ralph mode**.
+
+High-level idea:
+- Ralph mode **pins a rig into active work** under ongoing **President oversight**.
+- Instead of letting the rig naturally drift toward idle / acceptance-verified / parked states after each no-go or merge, Ralph mode keeps the rig continuously supplied with work until an explicit operator-defined condition is met or a human stops it.
+
+Requester: operator via Gastown
+Date: 2026-04-01
+Rig for implementation: `sgt`
+
+## Example desired usage
+
+Something like:
+
+```yaml
+ralph_mode:
+  enabled: true
+  concurrency: 5
+  ralph_condition: "1K PNL for 5m btc pipeline"
+```
+
+Or equivalent CLI/config/runtime representation.
+
+The important semantics are:
+- **constant pressure / keep working**
+- **President-supervised**
+- **target concurrency**
+- **clear success/stop condition**
+
+## Why this is needed
+
+We keep running into the same class of operational failure:
+- a rig is conceptually still open-ended
+- but the control plane keeps drifting it toward idle, verified, parked, or under-filled
+- even though the operator wants sustained forward pressure until a real objective is achieved
+
+Ralph mode should solve that by making the operator intent explicit.
+
+## Core behavior
+
+When Ralph mode is active for a rig:
+
+1. **President keeps the rig hot**
+   - continuously supervises the rig
+   - notices under-filled / idle / fake-complete / stalled states
+   - proactively tops the rig back up
+   - does not wait for the operator to notice serial drift every time
+
+2. **Concurrency is a first-class target**
+   - e.g. `concurrency: 5`
+   - if active candidate/worker count drops below target, the control plane refills the rig
+   - parallelism should apply to materially different admissible lanes, not just duplicate noise
+
+3. **Explicit Ralph condition controls completion**
+   - e.g. `ralph_condition: "1K PNL for 5m btc pipeline"`
+   - until that condition is satisfied (or explicitly waived/stopped by a human), the rig should remain in active continuation mode
+   - ordinary no-go / falsification evidence is informative but not terminal by itself unless that is what the Ralph condition says
+
+4. **No fake completion while condition remains unmet**
+   - if the rig produces only no-go evidence, it should continue into the next admissible lane
+   - Ralph mode should prevent accidental drift into `verified` / `parked` / `tasks-exhausted-awaiting-acceptance` when the operator-defined Ralph condition still says the mission is open
+
+5. **President-owned refill / escalation**
+   - President should own the higher-level "keep this rig moving" policy
+   - rig-local Mayor still owns the repo-local work decomposition and dispatch details
+   - if the rig becomes under-filled or contradictory, President should recheck / refresh / steer the Mayor until the Ralph policy is satisfied
+
+## Desired operator controls
+
+Please design operator-facing controls for Ralph mode that are simple and explicit.
+
+Likely needs:
+- enable / disable Ralph mode per rig
+- set / edit `concurrency`
+- set / edit `ralph_condition`
+- possibly set policy knobs like:
+  - minimum materially different lanes
+  - whether support-only work counts toward concurrency
+  - under-fill cooldown / refill aggressiveness
+  - whether falsification is terminal or not
+- show current Ralph state in `sgt status` / Web UI / logs
+
+## Suggested semantics
+
+Ralph mode should probably include state like:
+
+- `enabled`
+- `condition_text` (human-readable)
+- optional machine-readable condition fields if available later
+- `target_concurrency`
+- `active_lane_count`
+- `underfilled`
+- `last_refill_at`
+- `last_president_action`
+- `completion_blocked_by_condition`
+
+## PMKB motivating use case
+
+The immediate motivating use case is PMKB.
+
+Example policy:
+- keep PMKB running until it achieves something like:
+  - `1K PNL for 5m btc pipeline`
+- maintain parallel candidate exploration, e.g. `concurrency: 5`
+- do not let the rig park merely because a candidate family was falsified
+- keep generating/admitting the next materially different candidate set until the condition is satisfied or a human says stop
+
+This should be expressible as a generic SGT feature, not a PMKB-only hardcode.
+
+## Guardrails
+
+- Do not treat duplicate/redundant work as useful concurrency.
+- Do not count support-only or cleanup-only lanes as satisfying Ralph-mode parallelism unless explicitly configured.
+- Do not let stale verified acceptance metadata override an active Ralph condition.
+- Preserve human stop/waive authority.
+- Keep observability clear: operator should be able to tell why a rig is still active, what the current Ralph condition is, and why President is refilling it.
+
+## Acceptance expectations
+
+A good implementation should likely include:
+
+1. Ralph mode architecture / config model
+2. President integration
+3. Mayor interplay / refill logic
+4. acceptance/completion override semantics tied to Ralph condition
+5. concurrency accounting rules
+6. `sgt status` / Web UI / logs visibility
+7. proof / latest-main validation with at least one rig example
+
+## Concrete acceptance criteria
+
+The delivered system should make the following true:
+
+- a rig can be explicitly pinned into ongoing work via Ralph mode
+- President keeps the rig topped up toward a configured concurrency target
+- the rig does not drift into false completion while the Ralph condition remains unmet
+- no-go evidence triggers successor continuation rather than accidental stand-down, unless the Ralph condition explicitly allows closure
+- operator can see Ralph mode state and condition in status/logs/UI
+- operator can configure something equivalent to:
+  - `concurrency: 5`
+  - `ralph_condition: "1K PNL for 5m btc pipeline"`
+- latest-main proof demonstrates the behavior end-to-end
+
+## Requested outcome from Mayor
+
+Please create and execute a real repo-local SGT plan for:
+
+**Ralph mode: President-pinned rig continuation with configurable concurrency and explicit completion condition.**
+```
+- 2026-04-01T06:55:48+02:00 — 2026-04-01 operator hotfix brief: preserve PMKB semantics that falsification/no-go is informative not terminal; acceptance stays open until widened-corpus realistic net PnL >= +1000 USDC; keep >=3 materially different live candidate lanes; President/Mayor must proactively refill underfilled rigs. Outstanding SGT structural work beyond the active Ralph-mode plan: (1) create-plan/decomposition must be deterministic across mayor workspace vs canonical repo path and must not fall into wake loops or plan-sync-failed divergence, (2) GraphQL live-state revalidation failures must not block sling/redispatch, merge-in-progress must be fully idempotent/in-flight, and scary merge-failed alerts should be suppressed if later success self-heals, (3) continuation dedupe must not recreate already-completed lanes and should prefer explicit successor mapping over fuzzy recreation, (4) control plane must honor repo-local reopened-plan truth and not drift into fake verified/tasks-exhausted closeout when continuation intent remains open, (5) refill guarantee must key off live polecats not just open issues and must emit an explicit reason when active_count < target_concurrency, (6) web UI deploy path needs a first-class deploy/restart flow or single source of truth, and (7) acceptance-blocker signaling needs severity classes/dedupe so platform incidents are distinguishable from normal candidate no-go churn. Fresh live repro on 2026-04-01 ~06:50 CET: /root/sgt/rigs/pmkb/SGT_PLAN.json still says keep iterating toward >= +1000 USDC with multiple materially different live lanes, but sgt plan tick pmkb returned tasks-exhausted-awaiting-acceptance and PMKB stayed idle with zero live polecats even after wake-mayor + president refresh + mayor refresh/start.
+- 2026-04-01T06:57:46+02:00 — Ralph mode now lives in ~/.sgt/rig-config/<rig>.json under ralph_mode; status/plan-state/cockpit expose active/admissible/backlog lane counts with default policy distinct open sgt-authorized issues excluding duplicate plus support-only labels unless count_support_lanes=true, and plan completion is forced back to pending while an enabled Ralph condition remains unmet.
+- 2026-04-01T07:01:46+02:00 — Acceptance blockers now persist SEVERITY_CLASS plus DEDUPE_KEY. Web cockpit groups unresolved blocker alerts by that key and emits one still-red summary for repeated same-key churn, while control-plane blockers stay visually/severity-distinct from candidate no-go acceptance churn.
+- 2026-04-01T07:03:15+02:00 — 2026-04-01 issue #339 added a first-class live Web UI operator path: use 'sgt web deploy' from the repo checkout to sync repo web/ into /root/sgt/web, restart the live sgt-web tmux session, and verify repo/live tree parity plus HTTP health; use 'sgt web status' or 'sgt web verify' to avoid assuming a merged checkout updated the served UI.
+- 2026-04-01T07:04:39+02:00 — 2026-04-01 issue #337: plan control-plane truth now stays on the canonical rig repo path, not mayor-workspace or default-branch plan cache. plan tick/worker context read repo-local SGT_PLAN.json, mayor briefings call out canonical repo_path/plan_path, and mayor request complete can recover a plan accidentally written under mayor-workspace by copying it into the rig repo before syncing labels/state.
+- 2026-04-01T07:06:36+02:00 — Plan tick now records a durable __continuation__ plan blocker when acceptance is still pending but live lanes fall below policy.max_in_flight; Mayor stranded-rig recovery refills replacement work up to target concurrency, and President treats pending-plan underfill as a stalled-purpose intervention reason instead of idling the rig.
+- 2026-04-01T07:07:27+02:00 — 2026-04-01 issue #338: mayor sling revalidation now fails open only for flaky live GraphQL count reads, redispatch tolerates UNKNOWN/failed source-PR mergeability revalidation, refinery treats merge-in-progress/already-being-merged as in-flight without scary failure noise, and plan tick now binds/reopens lanes from explicit open plan-<task> issue labels before recreating work.
