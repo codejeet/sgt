@@ -393,6 +393,44 @@ if [[ "$(grep -c 'PRESIDENT_INTERVENTION rig=demo action=wake reason=actionable-
   echo "expected hibernated rig to skip durable President actionable-rig-recheck intervention logging" >&2
   exit 1
 fi
+
+# --- Hibernated rig with mayor session ABSENT: President must not start/refresh/wake ---
+absent_refresh_count_before="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+absent_wake_count_before="$(wc -l < "$WAKE_LOG" || true)"
+absent_start_count_before="$(grep -c '^mayor-start:demo$' "$START_LOG" || true)"
+absent_intervention_count_before="$(grep -c 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG" || true)"
+
+_mayor_rig_hibernated() {
+  [[ "${1:-}" == "demo" ]]
+}
+
+tmux() {
+  # mayor session for demo is ABSENT
+  if [[ "${1:-}" == "has-session" && "${2:-}" == "-t" ]]; then
+    return 1
+  fi
+  return 1
+}
+
+_president_supervise_rig_mayor demo manual > "$TMP_ROOT/president-hibernated-absent-manual.out" || true
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-hibernated-absent-periodic.out" || true
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$absent_refresh_count_before" ]]; then
+  echo "expected hibernated rig with absent session to skip President refresh" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$WAKE_LOG" || true)" -ne "$absent_wake_count_before" ]]; then
+  echo "expected hibernated rig with absent session to skip President wake" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^mayor-start:demo$' "$START_LOG" || true)" -ne "$absent_start_count_before" ]]; then
+  echo "expected hibernated rig with absent session to skip President mayor start" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG" || true)" -ne "$absent_intervention_count_before" ]]; then
+  echo "expected hibernated rig with absent session to skip all President intervention logging" >&2
+  exit 1
+fi
 BASH
 
 echo "ALL TESTS PASSED"
