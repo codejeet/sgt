@@ -4331,6 +4331,49 @@ _pr_head_sha() {
   gh pr view "$pr" --repo "$repo" --json headRefOid --jq '.headRefOid // ""' 2>/dev/null || true
 }
 
+_resling_live_issue_state() {
+  local repo="${1:-}" issue_number="${2:-}"
+  local owner_repo issue_state
+  [[ -n "$repo" && -n "$issue_number" ]] || return 1
+
+  issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)"
+  if [[ -n "$issue_state" ]]; then
+    printf '%s\n' "$issue_state"
+    return 0
+  fi
+
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  issue_state="$(gh api "repos/$owner_repo/issues/$issue_number" --jq '(.state // "") | ascii_upcase' 2>/dev/null || true)"
+  [[ -n "$issue_state" ]] || return 1
+  printf '%s\n' "$issue_state"
+}
+
+_resling_live_pr_state_mergeable() {
+  local repo="${1:-}" source_pr="${2:-}"
+  local owner_repo pr_snapshot
+  [[ -n "$repo" && -n "$source_pr" ]] || return 1
+
+  pr_snapshot="$(gh pr view "$source_pr" --repo "$repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)"
+  if [[ -n "$pr_snapshot" && "$pr_snapshot" == *"|"* ]]; then
+    printf '%s\n' "$pr_snapshot"
+    return 0
+  fi
+
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  pr_snapshot="$(
+    gh api "repos/$owner_repo/pulls/$source_pr" \
+      --jq '[
+        (if (.state // "") == "closed" and (.merged // false) then "MERGED" else ((.state // "") | ascii_upcase) end),
+        (if .mergeable == true then "MERGEABLE" elif .mergeable == false then "CONFLICTING" else "" end)
+      ] | join("|")' \
+      2>/dev/null || true
+  )"
+  [[ -n "$pr_snapshot" && "$pr_snapshot" == *"|"* ]] || return 1
+  printf '%s\n' "$pr_snapshot"
+}
+
 _merge_queue_set_field() {
   local queue_file="${1:-}" field="${2:-}" value="${3:-}"
   local safe_value tmp_file line replaced
@@ -5399,7 +5442,7 @@ _resling_pre_dispatch_revalidate() {
     return 1
   fi
 
-  issue_state=$(gh issue view "$issue_number" --repo "$canonical_repo" --json state --jq '.state' 2>/dev/null || true)
+  issue_state="$(_resling_live_issue_state "$canonical_repo" "$issue_number" || true)"
   if [[ -z "$issue_state" ]]; then
     echo "unable to query live issue state for #$issue_number"
     return 1
@@ -5410,7 +5453,7 @@ _resling_pre_dispatch_revalidate() {
   fi
 
   if [[ -n "$source_pr" && "$source_pr" != "0" ]]; then
-    pr_snapshot=$(gh pr view "$source_pr" --repo "$canonical_repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
+    pr_snapshot="$(_resling_live_pr_state_mergeable "$canonical_repo" "$source_pr" || true)"
     if [[ -z "$pr_snapshot" || "$pr_snapshot" != *"|"* ]]; then
       return 0
     fi
