@@ -6559,6 +6559,54 @@ else:
 def one_line(value):
     return str(value or "").replace("\t", " ").replace("\n", " ").strip()
 
+ALLOWED_COMPLETION_STATUS = {"pending", "completed", "verified", "blocked", "waived", "not_declared"}
+TERMINAL_ACCEPTANCE_STATUS = {"completed", "verified", "blocked", "waived"}
+TERMINAL_ACCEPTANCE_FIELDS = ("completed_at", "verified_at", "blocked_at", "waived_at")
+
+def effective_acceptance_doc(raw_acceptance, effective_status, previous_acceptance):
+    if not isinstance(raw_acceptance, dict):
+        raw_acceptance = {}
+    if not isinstance(previous_acceptance, dict):
+        previous_acceptance = {}
+    effective = dict(raw_acceptance)
+    raw_status = str(raw_acceptance.get("status") or "").strip().lower()
+    effective_status = str(effective_status or "").strip().lower()
+    if effective_status not in ALLOWED_COMPLETION_STATUS:
+        effective_status = raw_status or "not_declared"
+
+    if raw_status in TERMINAL_ACCEPTANCE_STATUS and effective_status != raw_status:
+        effective["declared_status"] = raw_status
+        for field in TERMINAL_ACCEPTANCE_FIELDS:
+            declared_key = f"declared_{field}"
+            value = raw_acceptance.get(field)
+            if value is None:
+                value = previous_acceptance.get(declared_key)
+            if value is not None and str(value).strip() != "":
+                effective[declared_key] = value
+        blocked_reason = raw_acceptance.get("blocked_reason")
+        if blocked_reason is None:
+            blocked_reason = previous_acceptance.get("declared_blocked_reason")
+        if blocked_reason is not None and str(blocked_reason).strip() != "":
+            effective["declared_blocked_reason"] = blocked_reason
+    else:
+        for key in list(effective):
+            if key.startswith("declared_"):
+                effective.pop(key, None)
+
+    effective["status"] = effective_status
+    if effective_status != "blocked":
+        effective.pop("blocked_reason", None)
+    for field in TERMINAL_ACCEPTANCE_FIELDS:
+        if field == {
+            "completed": "completed_at",
+            "verified": "verified_at",
+            "blocked": "blocked_at",
+            "waived": "waived_at",
+        }.get(effective_status):
+            continue
+        effective.pop(field, None)
+    return effective
+
 def declared_task_status(value):
     normalized = str(value or "").strip().lower().replace("-", "_")
     if normalized in {"completed", "done", "closed", "verified"}:
@@ -6653,6 +6701,7 @@ completion_details = one_line(acceptance.get("details") or acceptance.get("note"
 blocked_reason = one_line(acceptance.get("blocked_reason") or completion_state.get("blocked_reason"))
 if completion_status != "blocked":
     blocked_reason = ""
+acceptance = effective_acceptance_doc(acceptance, completion_status, completion_state.get("acceptance"))
 
 completion_doc = {
     "declared": bool(completion_condition or acceptance),
@@ -6791,6 +6840,54 @@ import sys
 from datetime import datetime, timezone
 
 state_file, condition, acceptance_json, status, rollup, details, blocked_reason = sys.argv[1:8]
+ALLOWED_COMPLETION_STATUS = {"pending", "completed", "verified", "blocked", "waived", "not_declared"}
+TERMINAL_ACCEPTANCE_STATUS = {"completed", "verified", "blocked", "waived"}
+TERMINAL_ACCEPTANCE_FIELDS = ("completed_at", "verified_at", "blocked_at", "waived_at")
+
+def effective_acceptance_doc(raw_acceptance, effective_status, previous_acceptance):
+    if not isinstance(raw_acceptance, dict):
+        raw_acceptance = {}
+    if not isinstance(previous_acceptance, dict):
+        previous_acceptance = {}
+    effective = dict(raw_acceptance)
+    raw_status = str(raw_acceptance.get("status") or "").strip().lower()
+    effective_status = str(effective_status or "").strip().lower()
+    if effective_status not in ALLOWED_COMPLETION_STATUS:
+        effective_status = raw_status or "not_declared"
+
+    if raw_status in TERMINAL_ACCEPTANCE_STATUS and effective_status != raw_status:
+        effective["declared_status"] = raw_status
+        for field in TERMINAL_ACCEPTANCE_FIELDS:
+            declared_key = f"declared_{field}"
+            value = raw_acceptance.get(field)
+            if value is None:
+                value = previous_acceptance.get(declared_key)
+            if value is not None and str(value).strip() != "":
+                effective[declared_key] = value
+        blocked_reason = raw_acceptance.get("blocked_reason")
+        if blocked_reason is None:
+            blocked_reason = previous_acceptance.get("declared_blocked_reason")
+        if blocked_reason is not None and str(blocked_reason).strip() != "":
+            effective["declared_blocked_reason"] = blocked_reason
+    else:
+        for key in list(effective):
+            if key.startswith("declared_"):
+                effective.pop(key, None)
+
+    effective["status"] = effective_status
+    if effective_status != "blocked":
+        effective.pop("blocked_reason", None)
+    for field in TERMINAL_ACCEPTANCE_FIELDS:
+        if field == {
+            "completed": "completed_at",
+            "verified": "verified_at",
+            "blocked": "blocked_at",
+            "waived": "waived_at",
+        }.get(effective_status):
+            continue
+        effective.pop(field, None)
+    return effective
+
 doc = {}
 if os.path.exists(state_file):
     with open(state_file, "r", encoding="utf-8") as fh:
@@ -6806,6 +6903,7 @@ try:
         acceptance = dict(previous_acceptance)
 except Exception:
     acceptance = dict(previous_acceptance)
+acceptance = effective_acceptance_doc(acceptance, status, previous_acceptance)
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 completion["declared"] = bool(condition.strip() or acceptance)
 completion["condition"] = condition.strip()
