@@ -6635,8 +6635,10 @@ for task in tasks:
         # A materially changed task definition should open fresh work instead
         # of inheriting stale completion bookkeeping from the previous shape.
         current = {"status": "pending"}
+    signature_changed = bool(current_signature and current_signature != task_signature)
     current.setdefault("status", "pending")
     current["task_signature"] = task_signature
+    current["task_signature_changed"] = bool(signature_changed)
     current["reopen_requested"] = bool(reopen_requested)
     normalized[task_id] = current
 
@@ -6734,23 +6736,24 @@ for task in tasks:
             backend,
             str(state_entry.get("task_signature") or ""),
             "1" if state_entry.get("reopen_requested") else "0",
+            "1" if state_entry.get("task_signature_changed") else "0",
         ])
     )
 PY
 }
 
 _plan_state_update_task() {
-  local rig="${1:-}" task_id="${2:-}" status="${3:-}" issue_number="${4:-}" issue_url="${5:-}"
+  local rig="${1:-}" task_id="${2:-}" status="${3:-}" issue_number="${4:-}" issue_url="${5:-}" clear_issue_binding="${6:-0}"
   local state_file
   state_file="$(_plan_state_path "$rig")"
   mkdir -p "$(dirname "$state_file")"
-  python3 - "$state_file" "$task_id" "$status" "$issue_number" "$issue_url" <<'PY'
+  python3 - "$state_file" "$task_id" "$status" "$issue_number" "$issue_url" "$clear_issue_binding" <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timezone
 
-state_file, task_id, status, issue_number, issue_url = sys.argv[1:6]
+state_file, task_id, status, issue_number, issue_url, clear_issue_binding = sys.argv[1:7]
 doc = {}
 if os.path.exists(state_file):
     with open(state_file, "r", encoding="utf-8") as fh:
@@ -6758,6 +6761,9 @@ if os.path.exists(state_file):
 tasks = doc.setdefault("tasks", {})
 entry = tasks.setdefault(task_id, {})
 entry["status"] = status
+if clear_issue_binding in {"1", "true", "yes", "on"}:
+    entry.pop("issue_number", None)
+    entry.pop("issue_url", None)
 if issue_number:
     entry["issue_number"] = issue_number
 if issue_url:
@@ -6985,6 +6991,92 @@ print(f"{number}|{url}")
 PY
 }
 
+_plan_issue_superseded_reason() {
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}"
+  local plan_file canonical_plan_file issue_json
+  canonical_plan_file="$(_plan_file_path "$rig")"
+  [[ -f "$canonical_plan_file" ]] || return 1
+  plan_file="$(_plan_effective_file_path "$rig" 2>/dev/null || true)"
+  [[ -f "$plan_file" ]] || return 1
+  issue_json="$(gh issue view "$issue_number" --repo "$repo" --json title,body,labels 2>/dev/null || true)"
+  [[ -n "$issue_json" ]] || return 1
+  python3 - "$plan_file" "$issue_json" <<'PY'
+import json
+import re
+import sys
+
+plan_file = sys.argv[1]
+issue_json = sys.argv[2]
+
+def one_line(value):
+    return str(value or "").replace("\t", " ").replace("\n", " ").strip()
+
+def norm(value):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+
+def issue_task_text(body, fallback):
+    lines = str(body or "").splitlines()
+    in_task = False
+    for raw in lines:
+        line = raw.strip()
+        if not in_task:
+            if line.lower() == "## task":
+                in_task = True
+            continue
+        if not line:
+            continue
+        if line.startswith("#") or line == "---":
+            break
+        return one_line(line)
+    return one_line(fallback)
+
+try:
+    with open(plan_file, "r", encoding="utf-8") as fh:
+        plan = json.load(fh)
+    issue = json.loads(issue_json)
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(plan, dict) or not isinstance(issue, dict):
+    raise SystemExit(1)
+
+task_id = ""
+for label in issue.get("labels") or []:
+    if not isinstance(label, dict):
+        continue
+    name = str(label.get("name") or "").strip()
+    if name.startswith("plan-") and name != "plan":
+      task_id = name[5:]
+      break
+
+if not task_id:
+    raise SystemExit(1)
+
+task = None
+for item in plan.get("tasks") or []:
+    if not isinstance(item, dict):
+        continue
+    if str(item.get("id") or "").strip() == task_id:
+        task = item
+        break
+
+if not isinstance(task, dict):
+    raise SystemExit(1)
+
+current_title = one_line(task.get("title") or task.get("task") or task_id)
+current_task = one_line(task.get("task") or task.get("title") or task_id)
+issue_title = one_line(issue.get("title") or "")
+issue_task = issue_task_text(issue.get("body") or "", issue_title)
+
+if norm(issue_task) == norm(current_task) or norm(issue_title) == norm(current_title):
+    raise SystemExit(1)
+
+print(
+    f'{task_id}|issue task "{issue_task}" no longer matches current plan task "{current_task}"'
+)
+PY
+}
+
 _plan_find_latest_merged_task_issue() {
   local repo="${1:-}" task_id="${2:-}"
   local issues_json pr_json
@@ -7091,8 +7183,8 @@ _plan_tick_run() {
     "$( [[ "$ralph_underfilled" == "1" ]] && printf 'true' || printf 'false' )" \
     "$( [[ "$ralph_completion_blocked" == "1" ]] && printf 'true' || printf 'false' )")"
   local -a task_ids=()
-  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=() task_signature=() task_reopen_requested=()
-  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11; do
+  local -A task_title=() task_text=() task_deps=() task_status=() task_issue=() task_issue_url=() task_labels=() task_backend=() task_signature=() task_reopen_requested=() task_signature_changed=()
+  while IFS=$'\x1f' read -r record_type c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12; do
     [[ -n "$record_type" ]] || continue
     case "$record_type" in
       CONFIG)
@@ -7117,6 +7209,7 @@ _plan_tick_run() {
         task_backend["$c1"]="$c9"
         task_signature["$c1"]="$c10"
         task_reopen_requested["$c1"]="$c11"
+        task_signature_changed["$c1"]="$c12"
         ;;
     esac
   done < <(_plan_state_snapshot "$rig" "$plan_file" "$canonical_plan_file")
@@ -7138,6 +7231,22 @@ _plan_tick_run() {
   local -A merged_closing_pr_cache=() merged_task_issue_cache=()
   for task_id in "${task_ids[@]}"; do
     issue_number="${task_issue[$task_id]}"
+    if [[ -n "$issue_number" && "${task_signature_changed[$task_id]:-0}" == "1" ]]; then
+      previous_issue_number="$issue_number"
+      issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
+      active_polecat=""
+      if [[ "$issue_state" == "OPEN" ]]; then
+        active_polecat="$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number" 2>/dev/null || true)"
+      fi
+      if [[ "$issue_state" != "OPEN" || -z "$active_polecat" ]]; then
+        _plan_state_update_task "$rig" "$task_id" "pending" "" "" "1"
+        task_status["$task_id"]="pending"
+        task_issue["$task_id"]=""
+        task_issue_url["$task_id"]=""
+        issue_number=""
+        log_event "PLAN_TASK_CLEAR_STALE_ISSUE_BINDING rig=$rig task=$task_id previous_issue=#${previous_issue_number:-unknown} reason_code=material-task-change issue_state=${issue_state:-unknown} source=$tick_source"
+      fi
+    fi
     if [[ "${task_reopen_requested[$task_id]:-0}" != "1" ]]; then
       if [[ -v "merged_task_issue_cache[$task_id]" ]]; then
         merged_task_snapshot="${merged_task_issue_cache[$task_id]}"
@@ -7145,7 +7254,7 @@ _plan_tick_run() {
         merged_task_snapshot="$(_plan_find_latest_merged_task_issue "$repo" "$task_id" 2>/dev/null || true)"
         merged_task_issue_cache["$task_id"]="$merged_task_snapshot"
       fi
-      if [[ -n "$merged_task_snapshot" && "$merged_task_snapshot" == *"|"* ]]; then
+      if [[ "${task_signature_changed[$task_id]:-0}" != "1" && -n "$merged_task_snapshot" && "$merged_task_snapshot" == *"|"* ]]; then
         IFS='|' read -r merged_task_issue_number merged_task_issue_url merged_task_pr_number merged_task_pr_merged_at merged_task_issue_state <<< "$merged_task_snapshot"
         if [[ -n "$merged_task_issue_number" && ( "${task_status[$task_id]}" != "completed" || "$issue_number" != "$merged_task_issue_number" ) ]]; then
           _plan_state_update_task "$rig" "$task_id" "completed" "$merged_task_issue_number" "${merged_task_issue_url:-${task_issue_url[$task_id]}}"
@@ -10200,7 +10309,7 @@ _sweep_watchdog_find_open_pr_for_issue() {
 
 _sweep_watchdog_resling_open_authorized_issues() {
   local rig="${1:-}" repo="${2:-}"
-  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason
+  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason superseded_reason
   local source_event source_event_key
   source_event="sweep-watchdog"
   [[ -n "$rig" && -n "$repo" ]] || return 0
@@ -10221,6 +10330,10 @@ _sweep_watchdog_resling_open_authorized_issues() {
       log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$backend_limited_reason source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
       continue
     fi
+    if superseded_reason="$(_plan_issue_superseded_reason "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$superseded_reason" ]]; then
+      log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=superseded-plan-task-issue source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" detail=\"$(_escape_quotes "$superseded_reason")\""
+      continue
+    fi
     open_pr="$(_sweep_watchdog_find_open_pr_for_issue "$repo" "$issue_number" || true)"
     if [[ -n "$open_pr" ]]; then
       log_event "SWEEP_WATCHDOG_RESLING_SKIP issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=open-pr-exists pr=#$open_pr source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
@@ -10238,7 +10351,7 @@ _sweep_watchdog_resling_open_authorized_issues() {
 _mayor_recover_stranded_actionable_rig() {
   local rig="${1:-}" repo="${2:-}"
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
-  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason source_event source_event_key
+  local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason superseded_reason source_event source_event_key
   local resling_output blocked_reason_code blocked_detail dispatched_limit resling_log
   local pending_plan_target ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
   local recovery_target recovery_due_to_underfill
@@ -10315,6 +10428,12 @@ _mayor_recover_stranded_actionable_rig() {
       _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|${backend_limited_reason}|backend-limited"$'\n'
       echo "[mayor] stranded rig $rig leaving issue #$issue_number blocked ($backend_limited_reason)"
       log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$backend_limited_reason source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+      continue
+    fi
+    if superseded_reason="$(_plan_issue_superseded_reason "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$superseded_reason" ]]; then
+      _MAYOR_STRANDED_RECOVERY_BLOCKED=$((_MAYOR_STRANDED_RECOVERY_BLOCKED + 1))
+      _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|superseded-plan-task-issue|${superseded_reason}"$'\n'
+      log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=superseded-plan-task-issue source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" detail=\"$(_escape_quotes "$superseded_reason")\""
       continue
     fi
 
@@ -11155,6 +11274,13 @@ _resling_existing_issue() {
   if existing_issue_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number"); then
     echo "[resling] issue #$issue_number already has active polecat $existing_issue_polecat — skipping duplicate re-sling"
     log_event "RESLING_SKIP_DUPLICATE_ACTIVE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} existing_polecat=$existing_issue_polecat skip_reason=\"active polecat already exists for issue\""
+    return 1
+  fi
+
+  local superseded_reason=""
+  if superseded_reason="$(_plan_issue_superseded_reason "$rig" "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$superseded_reason" ]]; then
+    echo "[resling] issue #$issue_number is superseded by current repo-local plan task — skipping"
+    log_event "RESLING_SKIP_SUPERSEDED issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} reason_code=superseded-plan-task-issue detail=\"$(_escape_quotes "$superseded_reason")\""
     return 1
   fi
 
