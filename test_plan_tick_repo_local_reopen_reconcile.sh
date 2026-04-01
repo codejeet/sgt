@@ -161,7 +161,7 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
   "rig": "demo",
   "policy": { "max_in_flight": 1 },
   "tasks": [
-    { "id": "ACC2", "title": "Repo-local continuation reopened", "status": "planned" }
+    { "id": "ACC2", "title": "Repo-local continuation reopened", "status": "reopened" }
   ]
 }
 JSON
