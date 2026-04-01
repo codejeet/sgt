@@ -267,6 +267,7 @@ printf 'STATE=%q\nREPO=%q\nTITLE=%q\n' \
   'https://github.com/acme/demo' \
   'Implement the feature' \
   > "$TMP_HOME/state/issues/2.env"
+rm -f "$TMP_HOME/sgt/.sgt/polecats"/* || true
 
 env -i "${COMMON_ENV[@]}" bash --noprofile --norc -c 'sgt plan tick demo > "$HOME/third-plan-tick.out" 2>&1'
 
@@ -281,8 +282,20 @@ assert completion["rollup"] == "tasks-exhausted-awaiting-acceptance", completion
 assert completion["condition"] == "Run the feature end-to-end on latest main from a fresh state path.", completion
 PY
 
-grep -q 'completion=tasks-exhausted-awaiting-acceptance status=pending' "$TMP_HOME/third-plan-tick.out" || {
-  echo "expected final plan tick summary to include tasks-exhausted acceptance rollup" >&2
+BLOCKER_FILE="$TMP_HOME/sgt/.sgt/plan-blockers/demo--__continuation__.env"
+[[ -f "$BLOCKER_FILE" ]] || {
+  echo "expected continuation blocker when acceptance remains pending but no actionable work remains" >&2
+  exit 1
+}
+
+grep -q '^REASON_CODE=underfilled-below-target-concurrency$' "$BLOCKER_FILE" || {
+  echo "expected continuation blocker reason code in blocker file" >&2
+  cat "$BLOCKER_FILE" >&2
+  exit 1
+}
+
+grep -q 'completion=tasks-exhausted-awaiting-acceptance status=pending blocker=underfilled-below-target-concurrency' "$TMP_HOME/third-plan-tick.out" || {
+  echo "expected final plan tick summary to include explicit continuation blocker" >&2
   exit 1
 }
 

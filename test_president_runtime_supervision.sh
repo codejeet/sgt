@@ -41,6 +41,7 @@ eval "$(extract_fn _president_operator_notify_enabled)"
 eval "$(extract_fn _president_operator_dedupe_key)"
 eval "$(extract_fn _president_operator_overlap_key)"
 eval "$(extract_fn _president_operator_log_event)"
+eval "$(extract_fn _plan_target_concurrency)"
 eval "$(extract_fn _deacon_supervise_president)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
@@ -121,6 +122,23 @@ _mayor_rig_activity_snapshot() {
 _mayor_rig_activity_state_read() {
   printf 'active|open_issues=1|2026-03-31T00:00:00Z|1774915200|none|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|periodic\n'
 }
+
+_plan_effective_file_path() {
+  printf '%s\n' "$TMP_ROOT/plan.json"
+}
+
+_plan_file_path() {
+  printf '%s\n' "$TMP_ROOT/plan.json"
+}
+
+cat > "$TMP_ROOT/plan.json" <<'JSON'
+{
+  "version": 1,
+  "rig": "demo",
+  "policy": { "max_in_flight": 0 },
+  "tasks": []
+}
+JSON
 
 tmux() {
   if [[ "${1:-}" == "has-session" && "${2:-}" == "-t" ]]; then
@@ -204,6 +222,38 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info 
 fi
 if [[ "$(wc -l < "$EVENT_STATE")" -lt 3 ]]; then
   echo "expected president operator event history to retain intervened and suppressed entries" >&2
+  exit 1
+fi
+
+cat > "$TMP_ROOT/plan.json" <<'JSON'
+{
+  "version": 1,
+  "rig": "demo",
+  "policy": { "max_in_flight": 2 },
+  "tasks": []
+}
+JSON
+
+_mayor_rig_activity_snapshot() {
+  printf 'active|plan_rollup=tasks-exhausted-awaiting-acceptance plan_status=pending with no live work|0|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
+}
+
+_mayor_rig_activity_state_read() {
+  printf 'active|plan-only|2026-03-31T00:00:00Z|1774915200|none|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|periodic\n'
+}
+
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-underfill.out"
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG")" -lt 2 ]]; then
+  echo "expected president to refresh an underfilled continuation rig with no live work" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_INTERVENTION rig=demo action=refresh reason=target-concurrency-underfilled' "$EVENT_LOG"; then
+  echo "expected durable president intervention event for target concurrency underfill" >&2
+  exit 1
+fi
+if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=stalled-purpose severity=warning notify=1 dedupe_key=president:demo:stalled-purpose:target-concurrency-underfilled:refresh overlap_key=rig-incident:demo:actionable-no-forward-motion action=refresh reason=target-concurrency-underfilled outcome=intervened' "$EVENT_LOG"; then
+  echo "expected President operator event for target concurrency underfill" >&2
   exit 1
 fi
 BASH

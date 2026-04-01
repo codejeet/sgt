@@ -2058,12 +2058,18 @@ PY
   actionable=0
   if (( open_prs > 0 || open_authorized > 0 || active_polecats > 0 || merge_queue > 0 || pending_plan_requests > 0 )); then
     actionable=1
+  elif [[ "$plan_status" == "pending" && "$plan_rollup" != "not_declared" ]]; then
+    actionable=1
   fi
   state="idle"
   reason="no actionable work"
   if (( actionable > 0 )); then
     state="active"
-    reason="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} pending_plan_requests=${pending_plan_requests}"
+    if (( open_prs > 0 || open_authorized > 0 || active_polecats > 0 || merge_queue > 0 || pending_plan_requests > 0 )); then
+      reason="open_issues=${open_authorized} open_prs=${open_prs} active_polecats=${active_polecats} merge_queue=${merge_queue} pending_plan_requests=${pending_plan_requests}"
+    else
+      reason="plan_rollup=${plan_rollup} plan_status=${plan_status} with no live work"
+    fi
   elif [[ "$plan_rollup" == "blocked-pending-external" ]]; then
     reason="blocked pending external condition"
   fi
@@ -6324,6 +6330,41 @@ os.replace(tmp, path)
 PY
 }
 
+_plan_target_concurrency() {
+  local rig="${1:-}" plan_file
+  [[ -n "$rig" ]] || return 0
+  plan_file="$(_plan_effective_file_path "$rig")"
+  if [[ ! -f "$plan_file" ]]; then
+    plan_file="$(_plan_file_path "$rig")"
+  fi
+  [[ -f "$plan_file" ]] || {
+    printf '0\n'
+    return 0
+  }
+  python3 - "$plan_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        plan = json.load(fh)
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+policy = plan.get("policy")
+if not isinstance(policy, dict):
+    print("0")
+    raise SystemExit(0)
+
+value = policy.get("max_in_flight", 0)
+if isinstance(value, int) and value > 0:
+    print(str(value))
+else:
+    print("0")
+PY
+}
+
 _mayor_rig_actionable_work_counts() {
   local rig="${1:-}" repo="${2:-}"
   local open_prs open_authorized open_polecats pending_plan_requests
@@ -6755,9 +6796,10 @@ _plan_tick_run() {
   fi
 
   local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0 dispatch_failures=0 pending_ready=0 pending_blocked=0 last_failure_reason_code="" last_failure_detail=""
-  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at
+  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at lane_live
   local -A merged_closing_pr_cache=()
   for task_id in "${task_ids[@]}"; do
+    lane_live=0
     issue_number="${task_issue[$task_id]}"
     if [[ -n "$issue_number" ]]; then
       issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
@@ -6785,6 +6827,9 @@ _plan_tick_run() {
         elif [[ -n "$active_polecat" && "${task_status[$task_id]}" != "in_progress" ]]; then
           _plan_state_update_task "$rig" "$task_id" "in_progress" "$issue_number" "${task_issue_url[$task_id]}"
           task_status["$task_id"]="in_progress"
+          lane_live=1
+        elif [[ -n "$active_polecat" ]]; then
+          lane_live=1
         elif [[ -z "$active_polecat" && "${task_status[$task_id]}" == "pending" ]]; then
           _plan_state_update_task "$rig" "$task_id" "dispatched" "$issue_number" "${task_issue_url[$task_id]}"
           task_status["$task_id"]="dispatched"
@@ -6793,7 +6838,11 @@ _plan_tick_run() {
     fi
     case "${task_status[$task_id]}" in
       completed) completed=$((completed + 1)) ;;
-      dispatched|in_progress) inflight=$((inflight + 1)) ;;
+      dispatched|in_progress)
+        if (( lane_live > 0 )); then
+          inflight=$((inflight + 1))
+        fi
+        ;;
     esac
   done
 
@@ -6915,6 +6964,48 @@ _plan_tick_run() {
       plan_completion_rollup="not_declared"
       ;;
   esac
+
+  if [[ "$plan_completion_status" == "pending" && "$plan_completion_rollup" == "tasks-exhausted-awaiting-acceptance" ]]; then
+    local continuation_open_prs continuation_open_authorized continuation_open_polecats continuation_pending_plan_requests continuation_merge_queue continuation_active_count continuation_target continuation_reason continuation_blocker_id
+    IFS='|' read -r continuation_open_prs continuation_open_authorized continuation_open_polecats continuation_pending_plan_requests <<< "$(_mayor_rig_actionable_work_counts "$rig" "$repo")"
+    continuation_merge_queue="$(_merge_queue_count_for_rig "$rig" 2>/dev/null || true)"
+    [[ "$continuation_open_prs" =~ ^[0-9]+$ ]] || continuation_open_prs=0
+    [[ "$continuation_open_authorized" =~ ^[0-9]+$ ]] || continuation_open_authorized=0
+    [[ "$continuation_open_polecats" =~ ^[0-9]+$ ]] || continuation_open_polecats=0
+    [[ "$continuation_pending_plan_requests" =~ ^[0-9]+$ ]] || continuation_pending_plan_requests=0
+    [[ "$continuation_merge_queue" =~ ^[0-9]+$ ]] || continuation_merge_queue=0
+    continuation_target="$max_in_flight"
+    continuation_active_count="$continuation_open_polecats"
+    if (( continuation_open_prs > continuation_active_count )); then
+      continuation_active_count="$continuation_open_prs"
+    fi
+    if (( continuation_merge_queue > continuation_active_count )); then
+      continuation_active_count="$continuation_merge_queue"
+    fi
+    if (( continuation_target <= 0 )); then
+      continuation_target=1
+    fi
+
+    if (( continuation_active_count < continuation_target )); then
+      continuation_reason="completion is still pending but live refill drift left the rig under target concurrency: target_concurrency=${continuation_target} active_count=${continuation_active_count} open_issues=${continuation_open_authorized} open_prs=${continuation_open_prs} open_polecats=${continuation_open_polecats} merge_queue=${continuation_merge_queue} pending_plan_requests=${continuation_pending_plan_requests}"
+      if (( continuation_open_authorized == 0 && continuation_open_prs == 0 && continuation_open_polecats == 0 && continuation_merge_queue == 0 && continuation_pending_plan_requests == 0 )); then
+        last_failure_reason_code="continuation-open-no-actionable-work"
+      else
+        last_failure_reason_code="underfilled-below-target-concurrency"
+      fi
+      last_failure_detail="$continuation_reason"
+      continuation_blocker_id="$(_plan_blocker_record "$rig" "__continuation__" "Continuation refill gap" "$last_failure_reason_code" "$continuation_reason" "$tick_source" 2>/dev/null || true)"
+      log_event "PLAN_MOVEMENT_BLOCKER rig=$rig task=__continuation__ blocker_id=${continuation_blocker_id:-unavailable} reason_code=$last_failure_reason_code source=$tick_source reason=\"$(_escape_quotes "$continuation_reason")\""
+      if [[ "$tick_source" == "mayor" ]]; then
+        _mayor_record_decision "PLAN MOVEMENT BLOCKER rig=$rig task=__continuation__ blocker_id=${continuation_blocker_id:-unavailable} reason_code=$last_failure_reason_code retry=next-mayor-cycle reason=\"$(_escape_quotes "$continuation_reason")\"" "plan-movement-blocker" "$SGT_ROOT" || true
+      fi
+      dispatch_failures=$((dispatch_failures + 1))
+    else
+      _plan_blocker_resolve "$rig" "__continuation__" || true
+    fi
+  else
+    _plan_blocker_resolve "$rig" "__continuation__" || true
+  fi
 
   _plan_state_update_completion \
     "$rig" \
@@ -7108,10 +7199,14 @@ cmd_plan_tick() {
   [[ -n "$rig" ]] || die "usage: sgt plan tick <rig>"
   ensure_init
   ensure_rig "$rig"
-  local summary total completed inflight dispatched source completion_rollup completion_status
+  local summary total completed inflight dispatched source completion_rollup completion_status last_failure_reason
   summary="$(_plan_tick_run "$rig" "manual" | grep '^PLAN_TICK|' | tail -n 1)"
-  IFS='|' read -r _ _ total completed inflight dispatched source completion_rollup completion_status _ _ _ <<< "$summary"
-  info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched completion=$completion_rollup status=$completion_status)"
+  IFS='|' read -r _ _ total completed inflight dispatched source completion_rollup completion_status _ _ _ _ _ _ last_failure_reason <<< "$summary"
+  if [[ -n "${last_failure_reason:-}" ]]; then
+    info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched completion=$completion_rollup status=$completion_status blocker=$last_failure_reason)"
+  else
+    info "plan tick complete for $rig (total=$total completed=$completed inflight=$inflight dispatched_now=$dispatched completion=$completion_rollup status=$completion_status)"
+  fi
 }
 
 # ─── Per-rig notification config ──────────────────────────────────────
@@ -9236,7 +9331,7 @@ _mayor_recover_stranded_actionable_rig() {
   local rig="${1:-}" repo="${2:-}"
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local issue_rows issue_number issue_title existing_polecat open_pr backend_limited_reason source_event source_event_key
-  local resling_output blocked_reason_code blocked_detail dispatched_limit resling_log
+  local resling_output blocked_reason_code blocked_detail dispatched_limit resling_log target_concurrency live_count
 
   _MAYOR_STRANDED_RECOVERY_DISPATCHED=0
   _MAYOR_STRANDED_RECOVERY_BLOCKED=0
@@ -9259,7 +9354,23 @@ _mayor_recover_stranded_actionable_rig() {
   fi
 
   source_event="mayor-zero-worker-recovery"
-  dispatched_limit=1
+  target_concurrency="$(_plan_target_concurrency "$rig" 2>/dev/null || true)"
+  [[ "$target_concurrency" =~ ^[0-9]+$ ]] || target_concurrency=1
+  (( target_concurrency <= 0 )) && target_concurrency=1
+  live_count="$active_polecats"
+  if (( open_prs > live_count )); then
+    live_count="$open_prs"
+  fi
+  if (( merge_queue > live_count )); then
+    live_count="$merge_queue"
+  fi
+  dispatched_limit=$((target_concurrency - live_count))
+  if (( dispatched_limit <= 0 )); then
+    dispatched_limit=1
+  fi
+  if (( dispatched_limit > open_authorized )); then
+    dispatched_limit="$open_authorized"
+  fi
   issue_rows="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --limit 100 --json number,title --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)"
   [[ -n "$issue_rows" ]] || return 0
 
@@ -11412,7 +11523,7 @@ _president_operator_event_kind() {
     drift*|*drift*)
       echo "drift"
       ;;
-    actionable-no-forward-motion|stalled-purpose*|*stalled-purpose*)
+    actionable-no-forward-motion|target-concurrency-underfilled|stalled-purpose*|*stalled-purpose*)
       echo "stalled-purpose"
       ;;
     contradiction*|*contradict*)
@@ -11483,7 +11594,7 @@ _president_operator_dedupe_key() {
 _president_operator_overlap_key() {
   local rig="${1:-}" kind="${2:-unknown}" reason="${3:-unknown}"
   case "$reason" in
-    actionable-no-forward-motion|actionable-rig-recheck)
+    actionable-no-forward-motion|actionable-rig-recheck|target-concurrency-underfilled)
       printf 'rig-incident:%s:actionable-no-forward-motion\n' "${rig:-unknown}"
       ;;
     mayor-session-missing|mayor-heartbeat-*)
@@ -11517,7 +11628,7 @@ _president_supervise_rig_mayor() {
   local mayor_session mayor_hb_age mayor_hb_ts mayor_hb_state mayor_hb_pid mayor_hb_phase mayor_hb_cycle mayor_hb_trigger mayor_hb_stale mayor_hb_health
   local snapshot snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status
   local activity changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason
-  local now_epoch action reason detail last_meaningful_age
+  local now_epoch action reason detail last_meaningful_age target_concurrency active_lane_count
 
   [[ -n "$rig" ]] || return 1
   now_epoch="$(date +%s)"
@@ -11535,6 +11646,15 @@ _president_supervise_rig_mayor() {
   reason=""
   detail=""
   last_meaningful_age=""
+  target_concurrency="$(_plan_target_concurrency "$rig" 2>/dev/null || true)"
+  [[ "$target_concurrency" =~ ^[0-9]+$ ]] || target_concurrency=0
+  active_lane_count="$active_polecats"
+  if [[ "$open_prs" =~ ^[0-9]+$ && "$open_prs" -gt "$active_lane_count" ]]; then
+    active_lane_count="$open_prs"
+  fi
+  if [[ "$merge_queue" =~ ^[0-9]+$ && "$merge_queue" -gt "$active_lane_count" ]]; then
+    active_lane_count="$merge_queue"
+  fi
   if [[ "$mayor_session" != "on" ]]; then
     action="start"
     reason="mayor-session-missing"
@@ -11547,6 +11667,23 @@ _president_supervise_rig_mayor() {
     action="refresh"
     reason="mayor-heartbeat-stale"
     detail="heartbeat_age=${mayor_hb_age}s threshold=${mayor_hb_stale}s"
+  elif [[ "$plan_status" == "pending" && "$target_concurrency" =~ ^[0-9]+$ ]] \
+    && (( target_concurrency > 0 )) \
+    && [[ "$active_lane_count" =~ ^[0-9]+$ ]] \
+    && (( active_lane_count < target_concurrency )); then
+    if [[ "$meaningful_epoch" =~ ^[0-9]+$ ]]; then
+      last_meaningful_age=$((now_epoch - meaningful_epoch))
+      (( last_meaningful_age < 0 )) && last_meaningful_age=0
+    fi
+    if [[ ! "$last_meaningful_age" =~ ^[0-9]+$ || "$last_meaningful_age" -gt "${SGT_PRESIDENT_INTERVENTION_STALE_SECS:-900}" ]]; then
+      action="refresh"
+      reason="target-concurrency-underfilled"
+      detail="target_concurrency=${target_concurrency} active_count=${active_lane_count} open_issues=${open_authorized} open_prs=${open_prs} merge_queue=${merge_queue} plan_rollup=${plan_rollup:-not_declared} last_meaningful_age=${last_meaningful_age:-unknown}s"
+    else
+      action="wake"
+      reason="target-concurrency-underfilled"
+      detail="target_concurrency=${target_concurrency} active_count=${active_lane_count} open_issues=${open_authorized} open_prs=${open_prs} merge_queue=${merge_queue} plan_rollup=${plan_rollup:-not_declared}"
+    fi
   elif [[ "$open_authorized" =~ ^[0-9]+$ && "$open_prs" =~ ^[0-9]+$ && "$active_polecats" =~ ^[0-9]+$ && "$merge_queue" =~ ^[0-9]+$ ]] \
     && (( open_authorized > 0 )) && (( open_prs == 0 )) && (( active_polecats == 0 )) && (( merge_queue == 0 )); then
     if [[ "$meaningful_epoch" =~ ^[0-9]+$ ]]; then
