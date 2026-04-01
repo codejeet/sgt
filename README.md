@@ -234,6 +234,7 @@ Current model:
 - Ralph runtime state is computed from rig config plus live rig work and is also persisted into `~/.sgt/plan-state/<rig>.json` under `ralph`.
 - While Ralph is enabled and `condition_status` is not `met` or `waived`, plan completion is forced back to a non-terminal pending rollup (`ralph-condition-unmet` or `ralph-underfilled`) even if stale acceptance metadata says `verified` or `waived`.
 - `sgt status`, `sgt status --json`, and the Web cockpit expose Ralph state, condition, target concurrency, active lane count, admissible lane count, underfill state, and the latest President action for that rig.
+- President treats Ralph underfill with existing admissible backlog as a bounded refill wake, but upgrades idle, fake-complete, or no-refillable-backlog Ralph states into a stronger refresh/contradiction intervention so the rig does not silently drift.
 
 Concurrency accounting policy:
 - A Ralph lane is a distinct open `sgt-authorized` issue number on that rig.
