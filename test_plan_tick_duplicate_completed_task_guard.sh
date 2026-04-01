@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: default plan "pending" status must not reopen a task already completed by merged lineage.
+# Regression: default plan "pending" status must not reopen Ralph tasks already completed by merged lineage.
 
 set -euo pipefail
 
@@ -123,6 +123,30 @@ case "$command:$subcommand" in
   }
 ]
 JSON
+    elif [[ "$label" == "plan-SGT56" && "$state_filter" == "all" ]]; then
+      cat <<'JSON'
+[
+  {
+    "number": 349,
+    "url": "https://github.com/acme/demo/issues/349",
+    "state": "CLOSED",
+    "closedAt": "2026-04-01T05:17:41Z",
+    "createdAt": "2026-04-01T05:03:00Z"
+  }
+]
+JSON
+    elif [[ "$label" == "plan-SGT57" && "$state_filter" == "all" ]]; then
+      cat <<'JSON'
+[
+  {
+    "number": 350,
+    "url": "https://github.com/acme/demo/issues/350",
+    "state": "CLOSED",
+    "closedAt": "2026-04-01T05:25:41Z",
+    "createdAt": "2026-04-01T05:09:00Z"
+  }
+]
+JSON
     elif [[ "$label" == "plan-SGT55" && "$state_filter" == "open" ]]; then
       cat <<'JSON'
 [
@@ -153,6 +177,8 @@ JSON
     done
     case "$issue_number:$json_fields" in
       335:state) echo "CLOSED" ;;
+      349:state) echo "CLOSED" ;;
+      350:state) echo "CLOSED" ;;
       361:state) echo "CLOSED" ;;
       364:state) echo "OPEN" ;;
       *) echo "" ;;
@@ -165,6 +191,16 @@ JSON
     "number": 341,
     "body": "Closes #335",
     "mergedAt": "2026-04-01T04:59:02Z"
+  },
+  {
+    "number": 351,
+    "body": "Closes #349",
+    "mergedAt": "2026-04-01T05:17:40Z"
+  },
+  {
+    "number": 352,
+    "body": "Closes #350",
+    "mergedAt": "2026-04-01T05:25:40Z"
   },
   {
     "number": 362,
@@ -204,7 +240,9 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
   "rig": "demo",
   "policy": { "max_in_flight": 1 },
   "tasks": [
-    { "id": "SGT55", "title": "Define Ralph mode config, state model, and concurrency accounting rules", "status": "pending" }
+    { "id": "SGT55", "title": "Define Ralph mode config, state model, and concurrency accounting rules", "status": "pending" },
+    { "id": "SGT56", "title": "Teach President to refill Ralph rigs toward target concurrency", "status": "pending" },
+    { "id": "SGT57", "title": "Force Ralph rigs back to pending while the condition remains unmet", "status": "pending" }
   ]
 }
 JSON
@@ -216,6 +254,18 @@ cat > "$HOME/sgt/.sgt/plan-state/demo.json" <<'JSON'
       "issue_url": "https://github.com/acme/demo/issues/364",
       "status": "dispatched",
       "updated_at": "2026-04-01T06:41:56Z"
+    },
+    "SGT56": {
+      "issue_number": "349",
+      "issue_url": "https://github.com/acme/demo/issues/349",
+      "status": "pending",
+      "updated_at": "2026-04-01T05:18:00Z"
+    },
+    "SGT57": {
+      "issue_number": "350",
+      "issue_url": "https://github.com/acme/demo/issues/350",
+      "status": "pending",
+      "updated_at": "2026-04-01T05:26:00Z"
     }
   }
 }
@@ -233,15 +283,33 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
-task = data["tasks"]["SGT55"]
-assert task["status"] == "completed", task
-assert str(task.get("issue_number")) == "361", task
-assert "completed_at" in task, task
-assert task.get("reopen_requested") is False, task
+expected = {
+    "SGT55": "361",
+    "SGT56": "349",
+    "SGT57": "350",
+}
+for task_id, issue_number in expected.items():
+    task = data["tasks"][task_id]
+    assert task["status"] == "completed", (task_id, task)
+    assert str(task.get("issue_number")) == issue_number, (task_id, task)
+    assert "completed_at" in task, (task_id, task)
+    assert task.get("reopen_requested") is False, (task_id, task)
 PY
 
 grep -q 'PLAN_TASK_RETAIN_MERGED_LINEAGE rig=demo task=SGT55 issue=#361 pr=#362 merged_at=2026-04-01T06:26:21Z source=manual' "$TMP_HOME/sgt/sgt.log" || {
   echo "expected merged-lineage retention log entry" >&2
+  cat "$TMP_HOME/sgt/sgt.log" >&2
+  exit 1
+}
+
+grep -q 'PLAN_TASK_RETAIN_MERGED_LINEAGE rig=demo task=SGT56 issue=#349 pr=#351 merged_at=2026-04-01T05:17:40Z source=manual' "$TMP_HOME/sgt/sgt.log" || {
+  echo "expected SGT56 merged-lineage retention log entry" >&2
+  cat "$TMP_HOME/sgt/sgt.log" >&2
+  exit 1
+}
+
+grep -q 'PLAN_TASK_RETAIN_MERGED_LINEAGE rig=demo task=SGT57 issue=#350 pr=#352 merged_at=2026-04-01T05:25:40Z source=manual' "$TMP_HOME/sgt/sgt.log" || {
+  echo "expected SGT57 merged-lineage retention log entry" >&2
   cat "$TMP_HOME/sgt/sgt.log" >&2
   exit 1
 }
