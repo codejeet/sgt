@@ -5916,6 +5916,31 @@ _acceptance_blocker_title() {
   printf '%.120s' "$title"
 }
 
+_acceptance_blocker_severity_class() {
+  local requester="${1:-}" source="${2:-}" title="${3:-}" evidence="${4:-}" haystack
+  haystack="$(printf '%s\n%s\n%s\n%s\n' "$requester" "$source" "$title" "$evidence" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$haystack" == *"witness-stalled"* || "$haystack" == *"replacement work required after stalled polecat"* || "$haystack" == *"control-plane"* ]]; then
+    echo "control-plane"
+    return 0
+  fi
+  if [[ "$haystack" == *"usage limit"* || "$haystack" == *"usage_limit"* || "$haystack" == *"backend-limited"* || "$haystack" == *"quota"* || "$haystack" == *"candidate no-go"* || "$haystack" == *"no-go"* ]]; then
+    echo "candidate-no-go"
+    return 0
+  fi
+  echo "acceptance-red"
+}
+
+_acceptance_blocker_dedupe_key() {
+  local rig="${1:-}" severity_class="${2:-}" title="${3:-}" normalized_rig normalized_class normalized_title
+  normalized_rig="$(_normalize_label "$rig")"
+  normalized_class="$(_normalize_label "$severity_class")"
+  normalized_title="$(_normalize_label "$title")"
+  [[ -n "$normalized_rig" ]] || normalized_rig="unknown-rig"
+  [[ -n "$normalized_class" ]] || normalized_class="unknown-class"
+  [[ -n "$normalized_title" ]] || normalized_title="verified-acceptance-blocker"
+  printf 'acceptance-blocker:%s:%s:%s\n' "$normalized_rig" "$normalized_class" "$normalized_title"
+}
+
 _plan_request_dir() {
   local request_id="${1:-}"
   echo "$(_plan_requests_dir)/$request_id"
@@ -6095,13 +6120,15 @@ EOF
 
 _acceptance_blocker_write() {
   local rig="${1:-}" evidence="${2:-}" requester="${3:-}" source="${4:-argv}"
-  local blocker_id blocker_dir meta_path evidence_path created_at title
+  local blocker_id blocker_dir meta_path evidence_path created_at title severity_class dedupe_key
   blocker_id="$(_acceptance_blocker_id "$rig")"
   blocker_dir="$(_acceptance_blocker_dir "$blocker_id")"
   meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
   evidence_path="$(_acceptance_blocker_evidence_path "$blocker_id")"
   created_at="$(date -Iseconds)"
   title="$(_acceptance_blocker_title "$evidence")"
+  severity_class="$(_acceptance_blocker_severity_class "$requester" "$source" "$title" "$evidence")"
+  dedupe_key="$(_acceptance_blocker_dedupe_key "$rig" "$severity_class" "$title")"
   mkdir -p "$blocker_dir"
   printf '%s\n' "$evidence" > "$evidence_path"
   {
@@ -6112,6 +6139,8 @@ _acceptance_blocker_write() {
     printf 'REQUESTING_AGENT_ID=%q\n' "$requester"
     printf 'SOURCE=%q\n' "$source"
     printf 'TITLE=%q\n' "$title"
+    printf 'SEVERITY_CLASS=%q\n' "$severity_class"
+    printf 'DEDUPE_KEY=%q\n' "$dedupe_key"
     printf 'EVIDENCE_FILE=%q\n' "$evidence_path"
     printf 'LAST_UPDATED_AT=%q\n' "$created_at"
   } > "$meta_path"
@@ -6174,7 +6203,9 @@ _acceptance_blocker_list_active() {
             "${CREATED_AT:-}" \
             "${REQUESTING_AGENT_ID:-unknown}" \
             "${TITLE:-Verified acceptance blocker}" \
-            "${EVIDENCE_FILE:-}"
+            "${EVIDENCE_FILE:-}" \
+            "${SEVERITY_CLASS:-acceptance-red}" \
+            "${DEDUPE_KEY:-$(_acceptance_blocker_dedupe_key "${RIG:-}" "${SEVERITY_CLASS:-acceptance-red}" "${TITLE:-Verified acceptance blocker}")}"
           ;;
       esac
     )
@@ -7186,32 +7217,43 @@ cmd_create_blocker() {
   evidence="$(printf '%s' "$evidence" | sed 's/[[:space:]]*$//')"
   [[ -n "$evidence" ]] || die "no blocker evidence provided"
 
-  local requester blocker_id title
+  local requester blocker_id title severity_class dedupe_key meta_path
   requester="$(_resolve_requesting_openclaw_agent_id "$explicit_agent")"
   title="$(_acceptance_blocker_title "$evidence")"
   _ensure_context_file "$rig" >/dev/null
   blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$evidence_source")"
+  meta_path="$(_acceptance_blocker_meta_path "$blocker_id")"
+  severity_class=""
+  dedupe_key=""
+  if [[ -f "$meta_path" ]]; then
+    # shellcheck disable=SC1090
+    source "$meta_path"
+    severity_class="${SEVERITY_CLASS:-acceptance-red}"
+    dedupe_key="${DEDUPE_KEY:-}"
+  fi
   _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence"
   if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
     _context_index_build "$rig" >/dev/null 2>&1 || true
   fi
   _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
-  log_event "ACCEPTANCE_BLOCKER_CREATE rig=$rig blocker_id=$blocker_id requester=$requester source=$evidence_source title=\"$(_escape_quotes "$title")\""
+  log_event "ACCEPTANCE_BLOCKER_CREATE rig=$rig blocker_id=$blocker_id requester=$requester source=$evidence_source severity_class=$severity_class dedupe_key=$dedupe_key title=\"$(_escape_quotes "$title")\""
   info "acceptance blocker recorded: $blocker_id"
   info "title: $title"
+  info "class: ${severity_class:-acceptance-red}"
   info "context updated: $(_context_file_path "$rig")"
   info "mayor notified: acceptance-blocker:${rig}:${blocker_id}"
 }
 
 cmd_blocker_list() {
-  local rig="${1:-}" blocker_count=0 blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title
+  local rig="${1:-}" blocker_count=0 blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title blocker_evidence blocker_class blocker_dedupe_key
   ensure_init
-  while IFS='|' read -r blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title _; do
+  while IFS='|' read -r blocker_id blocker_rig blocker_status blocker_created blocker_requester blocker_title blocker_evidence blocker_class blocker_dedupe_key; do
     [[ -n "$blocker_id" ]] || continue
     blocker_count=$((blocker_count + 1))
     echo "$blocker_id [$blocker_status]"
     echo "  rig:       $blocker_rig"
     echo "  title:     $blocker_title"
+    echo "  class:     ${blocker_class:-acceptance-red}"
     echo "  reporter:  $blocker_requester"
     echo "  created:   $blocker_created"
   done < <(_acceptance_blocker_list_active "$rig")

@@ -54,12 +54,15 @@ context_file="$TMP_HOME/sgt/rigs/demo/SGT_CONTEXT.md"
 
 grep -q '^STATUS=open$' "$meta_file" || { echo "expected blocker status=open" >&2; exit 1; }
 grep -q '^REQUESTING_AGENT_ID=verifier-7$' "$meta_file" || { echo "expected reporter id in blocker env" >&2; exit 1; }
+grep -q '^SEVERITY_CLASS=acceptance-red$' "$meta_file" || { echo "expected default blocker severity class" >&2; exit 1; }
+grep -q '^DEDUPE_KEY=acceptance-blocker:demo:acceptance-red:verified-acceptance-still-red-on-latest-master$' "$meta_file" || { echo "expected stable blocker dedupe key" >&2; exit 1; }
 meta_title="$(bash --noprofile --norc -c "source '$meta_file'; printf '%s' \"\$TITLE\"")"
 [[ "$meta_title" == "Verified acceptance still red on latest master" ]] || { echo "expected blocker title in blocker env" >&2; exit 1; }
 grep -q 'Selected wallets remain empty after fresh ingest\.' "$evidence_file" || { echo "expected blocker evidence to be stored verbatim" >&2; exit 1; }
 grep -q "Acceptance Blocker $blocker_id" "$context_file" || { echo "expected blocker section in SGT_CONTEXT.md" >&2; exit 1; }
 grep -q 'verifier-7' "$context_file" || { echo "expected reporter id in SGT_CONTEXT.md" >&2; exit 1; }
 grep -q "$blocker_id \[open\]" "$OUT_FILE" || { echo "expected blocker list to show open blocker" >&2; exit 1; }
+grep -q 'class:     acceptance-red' "$OUT_FILE" || { echo "expected blocker list to show blocker class" >&2; exit 1; }
 
 env -i \
   HOME="$TMP_HOME" \

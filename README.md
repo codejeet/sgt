@@ -86,6 +86,7 @@ cat verification.md | sgt create blocker <rig> -
 What happens:
 - the blocker evidence is appended to the rig’s shared `SGT_CONTEXT.md`
 - a durable blocker record is created under `~/sgt/.sgt/acceptance-blockers/`
+- blocker records now carry a stable `SEVERITY_CLASS` plus `DEDUPE_KEY` so operator surfaces can separate control-plane incidents from normal still-red candidate churn and collapse repeated same-key pulses into one summary
 - the Mayor is woken immediately to re-create actionable work if the rig is otherwise idle
 - periodic mayor cycles will no longer treat an empty issue/PR board as success while the blocker remains open
 

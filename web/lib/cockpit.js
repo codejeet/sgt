@@ -184,6 +184,17 @@ function readAcceptanceBlockers(configDir) {
       try {
         evidence = fs.readFileSync(path.join(blockerDir, 'evidence.md'), 'utf8').trim();
       } catch {}
+      const severityClass = meta.SEVERITY_CLASS || classifyBlockerSeverityClass({
+        source: meta.SOURCE || '',
+        requester: meta.REQUESTING_AGENT_ID || '',
+        title: meta.TITLE || '',
+        evidence,
+      });
+      const dedupeKey = meta.DEDUPE_KEY || blockerDedupeKey({
+        rig: meta.RIG || '',
+        severityClass,
+        title: meta.TITLE || 'Verified acceptance blocker',
+      });
       return {
         id: meta.BLOCKER_ID || blockerId,
         rig: meta.RIG || '',
@@ -192,6 +203,9 @@ function readAcceptanceBlockers(configDir) {
         requester: meta.REQUESTING_AGENT_ID || 'unknown',
         createdAt: meta.CREATED_AT || '',
         updatedAt: meta.LAST_UPDATED_AT || meta.CREATED_AT || '',
+        severityClass,
+        dedupeKey,
+        source: meta.SOURCE || '',
         evidence,
       };
     })
@@ -208,6 +222,37 @@ function mapById(items = []) {
   return mapped;
 }
 
+function normalizeBlockerToken(value = '') {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'unknown';
+}
+
+function classifyBlockerSeverityClass({ source = '', requester = '', title = '', evidence = '' } = {}) {
+  const haystack = `${requester}\n${source}\n${title}\n${evidence}`.toLowerCase();
+  if (haystack.includes('witness-stalled') || haystack.includes('replacement work required after stalled polecat') || haystack.includes('control-plane')) {
+    return 'control-plane';
+  }
+  if (haystack.includes('usage limit') || haystack.includes('usage_limit') || haystack.includes('backend-limited') || haystack.includes('quota') || haystack.includes('candidate no-go') || haystack.includes('no-go')) {
+    return 'candidate-no-go';
+  }
+  return 'acceptance-red';
+}
+
+function blockerDedupeKey({ rig = '', severityClass = '', title = '' } = {}) {
+  return `acceptance-blocker:${normalizeBlockerToken(rig)}:${normalizeBlockerToken(severityClass)}:${normalizeBlockerToken(title || 'verified acceptance blocker')}`;
+}
+
+function blockerSeverity(blocker = {}, { repeated = false } = {}) {
+  if (repeated) return blocker.severityClass === 'control-plane' ? 'critical' : 'warning';
+  if (blocker.severityClass === 'control-plane') return 'critical';
+  if (blocker.status === 'needs-followup') return 'warning';
+  return 'warning';
+}
+
 function blockerAlertMessage(kind, blocker, context = {}) {
   const rig = blocker.rig || 'unknown rig';
   if (kind === 'blocker-opened') {
@@ -215,6 +260,13 @@ function blockerAlertMessage(kind, blocker, context = {}) {
   }
   if (kind === 'blocker-followup') {
     return `${rig} blocker needs follow-up: ${blocker.title}`;
+  }
+  if (kind === 'blocker-still-red') {
+    const similarCount = Number(context.similarCount || 0);
+    if (similarCount > 1) {
+      return `${rig} blocker still red (${similarCount} similar reports): ${blocker.title}`;
+    }
+    return `${rig} blocker still red: ${blocker.title}`;
   }
   if (kind === 'blocker-resolved') {
     if (context.remainingRigBlockers === 0 && context.remainingTotalBlockers === 0) {
@@ -350,7 +402,7 @@ function parseTimestampMs(value) {
 }
 
 function isUnresolvedBlockerAlert(alert = {}) {
-  return (alert.kind === 'blocker-opened' || alert.kind === 'blocker-followup')
+  return (alert.kind === 'blocker-opened' || alert.kind === 'blocker-followup' || alert.kind === 'blocker-still-red')
     && (alert.status === 'open' || alert.status === 'needs-followup');
 }
 
@@ -388,13 +440,16 @@ function dedupeBlockerAlerts(alerts = []) {
   const passthrough = [];
   for (const alert of alerts) {
     if (!alert) continue;
-    if (!alert.blockerId) {
+    const dedupeGroup = isUnresolvedBlockerAlert(alert)
+      ? (alert.dedupeKey || alert.blockerId || alert.id)
+      : (alert.blockerId || alert.id);
+    if (!dedupeGroup) {
       passthrough.push(alert);
       continue;
     }
-    const existing = latestByBlocker.get(alert.blockerId);
+    const existing = latestByBlocker.get(dedupeGroup);
     if (!existing || String(alert.createdAt || '').localeCompare(String(existing.createdAt || '')) > 0) {
-      latestByBlocker.set(alert.blockerId, alert);
+      latestByBlocker.set(dedupeGroup, alert);
     }
   }
   return [...passthrough, ...Array.from(latestByBlocker.values())];
@@ -448,21 +503,33 @@ class BlockerAlertTracker {
     const createdAt = this.now();
     const createdMs = Date.parse(createdAt) || Date.now();
     const rigCounts = new Map();
+    const dedupeCounts = new Map();
+    const previousDedupeCounts = new Map();
     for (const blocker of blockers) {
       const key = blocker.rig || '';
       rigCounts.set(key, (rigCounts.get(key) || 0) + 1);
+      const dedupeKey = blocker.dedupeKey || blockerDedupeKey(blocker);
+      dedupeCounts.set(dedupeKey, (dedupeCounts.get(dedupeKey) || 0) + 1);
+    }
+    for (const blocker of this.previousBlockers.values()) {
+      const dedupeKey = blocker.dedupeKey || blockerDedupeKey(blocker);
+      previousDedupeCounts.set(dedupeKey, (previousDedupeCounts.get(dedupeKey) || 0) + 1);
     }
 
     for (const [id, blocker] of nextBlockers.entries()) {
       const previous = this.previousBlockers.get(id);
+      const dedupeKey = blocker.dedupeKey || blockerDedupeKey(blocker);
+      const repeated = (previousDedupeCounts.get(dedupeKey) || 0) > 0;
       if (!previous) {
         this.pushEvent({
           id: `alert:${id}:opened:${createdAt}`,
           blockerId: id,
-          kind: 'blocker-opened',
-          severity: 'critical',
+          dedupeKey,
+          kind: repeated ? 'blocker-still-red' : 'blocker-opened',
+          severity: blockerSeverity(blocker, { repeated }),
           createdAt,
           blocker,
+          similarCount: dedupeCounts.get(dedupeKey) || 1,
           remainingRigBlockers: rigCounts.get(blocker.rig || '') || 0,
           remainingTotalBlockers: blockers.length,
         }, createdMs);
@@ -472,10 +539,12 @@ class BlockerAlertTracker {
         this.pushEvent({
           id: `alert:${id}:status:${createdAt}`,
           blockerId: id,
+          dedupeKey,
           kind: blocker.status === 'needs-followup' ? 'blocker-followup' : 'blocker-opened',
-          severity: blocker.status === 'needs-followup' ? 'warning' : 'critical',
+          severity: blockerSeverity(blocker),
           createdAt,
           blocker,
+          similarCount: dedupeCounts.get(dedupeKey) || 1,
           remainingRigBlockers: rigCounts.get(blocker.rig || '') || 0,
           remainingTotalBlockers: blockers.length,
         }, createdMs);
@@ -487,6 +556,7 @@ class BlockerAlertTracker {
       this.pushEvent({
         id: `alert:${id}:resolved:${createdAt}`,
         blockerId: id,
+        dedupeKey: blocker.dedupeKey || blockerDedupeKey(blocker),
         kind: 'blocker-resolved',
         severity: 'good',
         createdAt,
@@ -508,12 +578,14 @@ class BlockerAlertTracker {
     this.events.unshift({
       id: event.id,
       blockerId: event.blockerId,
+      dedupeKey: event.dedupeKey || event.blocker.dedupeKey || blockerDedupeKey(event.blocker),
       kind: event.kind,
       severity: event.severity,
       createdAt: event.createdAt,
       rig: event.blocker.rig || '',
       title: event.blocker.title || 'Verified acceptance blocker',
       status: event.blocker.status || '',
+      severityClass: event.blocker.severityClass || classifyBlockerSeverityClass(event.blocker),
       requester: event.blocker.requester || 'unknown',
       message: blockerAlertMessage(event.kind, event.blocker, event),
       evidence: event.blocker.evidence || '',

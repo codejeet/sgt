@@ -188,21 +188,49 @@ test('BlockerAlertTracker records blocker opens and resolutions with voice gatin
     },
   });
 
-  assert.equal(tracker.observe([{ id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger' }]).length, 0);
+  assert.equal(tracker.observe([{ id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger', severityClass: 'acceptance-red', dedupeKey: 'acceptance-blocker:sgt:acceptance-red:acceptance-still-red' }]).length, 0);
 
   const eventsAfterOpen = tracker.observe([
-    { id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger' },
-    { id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness' },
+    { id: 'b1', rig: 'sgt', title: 'Acceptance still red', status: 'open', requester: 'rigger', severityClass: 'acceptance-red', dedupeKey: 'acceptance-blocker:sgt:acceptance-red:acceptance-still-red' },
+    { id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness', severityClass: 'control-plane', dedupeKey: 'acceptance-blocker:pmkb:control-plane:smoke-test-blocked' },
   ]);
   assert.equal(eventsAfterOpen[0].kind, 'blocker-opened');
   assert.equal(eventsAfterOpen[0].voice.eligible, false);
   assert.equal(eventsAfterOpen[0].voice.reason, 'event-disabled');
+  assert.equal(eventsAfterOpen[0].severity, 'critical');
 
-  const eventsAfterResolve = tracker.observe([{ id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness' }]);
+  const eventsAfterResolve = tracker.observe([{ id: 'b2', rig: 'pmkb', title: 'Smoke test blocked', status: 'open', requester: 'witness', severityClass: 'control-plane', dedupeKey: 'acceptance-blocker:pmkb:control-plane:smoke-test-blocked' }]);
   assert.equal(eventsAfterResolve[0].kind, 'blocker-resolved');
   assert.equal(eventsAfterResolve[0].rig, 'sgt');
   assert.equal(eventsAfterResolve[0].voice.eligible, true);
   assert.match(eventsAfterResolve[0].voice.text, /No open blockers remain on this rig|All acceptance blockers are clear/);
+});
+
+test('BlockerAlertTracker emits consolidated still-red summaries for repeated same-key blocker churn', () => {
+  const tracker = new BlockerAlertTracker({
+    now: (() => {
+      const stamps = [
+        '2026-03-30T06:00:00Z',
+        '2026-03-30T06:01:00Z',
+      ];
+      let index = 0;
+      return () => stamps[index++] || stamps[stamps.length - 1];
+    })(),
+  });
+
+  tracker.observe([
+    { id: 'b1', rig: 'sgt', title: 'Acceptance still red on candidate lane', status: 'open', requester: 'rigger', severityClass: 'candidate-no-go', dedupeKey: 'acceptance-blocker:sgt:candidate-no-go:acceptance-still-red-on-candidate-lane' },
+  ]);
+
+  const events = tracker.observe([
+    { id: 'b1', rig: 'sgt', title: 'Acceptance still red on candidate lane', status: 'open', requester: 'rigger', severityClass: 'candidate-no-go', dedupeKey: 'acceptance-blocker:sgt:candidate-no-go:acceptance-still-red-on-candidate-lane' },
+    { id: 'b2', rig: 'sgt', title: 'Acceptance still red on candidate lane', status: 'open', requester: 'rigger', severityClass: 'candidate-no-go', dedupeKey: 'acceptance-blocker:sgt:candidate-no-go:acceptance-still-red-on-candidate-lane' },
+  ]);
+
+  assert.equal(events[0].kind, 'blocker-still-red');
+  assert.equal(events[0].severity, 'warning');
+  assert.equal(events[0].dedupeKey, 'acceptance-blocker:sgt:candidate-no-go:acceptance-still-red-on-candidate-lane');
+  assert.match(events[0].message, /still red \(2 similar reports\)/);
 });
 
 test('parsePresidentOperatorEvents keeps only the latest actionable President incident per overlap key', () => {
@@ -264,8 +292,9 @@ test('buildCockpitAlerts defaults to recent and actionable items instead of stal
       {
         id: 'alert:blocker:open-old',
         blockerId: 'b-open',
+        dedupeKey: 'acceptance-blocker:pmkb:acceptance-red:open-blocker-still-needs-operator-attention',
         kind: 'blocker-opened',
-        severity: 'critical',
+        severity: 'warning',
         createdAt: '2026-03-29T23:00:00Z',
         rig: 'pmkb',
         title: 'Open blocker still needs operator attention',
@@ -276,6 +305,7 @@ test('buildCockpitAlerts defaults to recent and actionable items instead of stal
       {
         id: 'alert:blocker:followup-newer',
         blockerId: 'b-open',
+        dedupeKey: 'acceptance-blocker:pmkb:acceptance-red:open-blocker-still-needs-operator-attention',
         kind: 'blocker-followup',
         severity: 'warning',
         createdAt: '2026-03-31T22:06:00Z',
