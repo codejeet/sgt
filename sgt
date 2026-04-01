@@ -12619,6 +12619,10 @@ _president_supervise_rig_mayor() {
   snapshot="$(_mayor_rig_activity_snapshot "$rig")"
   IFS='|' read -r snapshot_state snapshot_reason open_authorized open_prs active_polecats merge_queue pending_plan_requests plan_rollup plan_status <<< "$snapshot"
   IFS='|' read -r activity snapshot_reason changed_at changed_epoch mode meaningful_at meaningful_epoch meaningful_reason wake_at wake_reason <<< "$(_mayor_rig_activity_state_read "$rig")"
+  if [[ "$activity" == "hibernated" && -n "$mode" && "$mode" != "none" ]]; then
+    _mayor_scope_apply "$prior_scope_rig"
+    return 1
+  fi
   repo="$(rig_repo "$rig" 2>/dev/null || true)"
   IFS='|' read -r ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked _ _ _ _ <<< "$(_ralph_mode_snapshot_fields "$rig" "$repo" 2>/dev/null || true)"
   pending_plan_target="$(_plan_pending_underfill_target "$rig" 2>/dev/null || true)"
