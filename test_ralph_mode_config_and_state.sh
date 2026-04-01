@@ -370,6 +370,63 @@ assert acceptance.get("declared_status") == "waived", acceptance
 assert acceptance.get("declared_waived_at") == "2026-03-31T09:30:00Z", acceptance
 assert "waived_at" not in acceptance, acceptance
 PY
+
+export SGT_TEST_ISSUES_JSON="$TMP_ROOT/issues-third.json"
+cat > "$SGT_ROOT/.sgt/rigs/demo3" <<'STATE'
+https://github.com/acme/demo3
+STATE
+mkdir -p "$SGT_ROOT/rigs/demo3"
+cat > "$SGT_ROOT/.sgt/polecats/demo3-worker" <<'STATE'
+RIG=demo3
+REPO=https://github.com/acme/demo3
+ISSUE=31
+BRANCH=sgt/demo3-worker
+WORKTREE=/tmp/demo3-worker
+SESSION=sgt-demo-worker
+STATE
+
+cat > "$SGT_ROOT/rigs/demo3/SGT_PLAN.json" <<'JSON'
+{
+  "version": 1,
+  "rig": "demo3",
+  "policy": { "max_in_flight": 1 },
+  "completion_condition": "Fresh-state proof passes.",
+  "acceptance": {
+    "status": "blocked",
+    "details": "Prior proof run is blocked on a stale operator note.",
+    "blocked_at": "2026-03-31T10:45:00Z",
+    "blocked_reason": "waiting for operator signoff"
+  },
+  "tasks": []
+}
+JSON
+
+sgt config ralph demo3 --enable --condition "Keep a live lane running until the new proof lands" --target 1 >/dev/null
+sgt plan tick demo3 >/dev/null 2>&1
+sgt status --json > "$SGT_ROOT/status-third.json"
+sgt plan tick demo3 >/dev/null 2>&1
+
+python3 - "$SGT_ROOT/.sgt/plan-state/demo3.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    plan_state = json.load(fh)
+
+completion = plan_state.get("completion") or {}
+assert completion.get("status") == "pending", completion
+assert completion.get("rollup") == "ralph-underfilled", completion
+assert completion.get("blocked_reason") == "ralph condition unmet: Keep a live lane running until the new proof lands", completion
+assert "Ralph mode remains active" in completion.get("details", ""), completion
+acceptance = completion.get("acceptance") or {}
+assert acceptance.get("status") == "pending", acceptance
+assert acceptance.get("details") == "Prior proof run is blocked on a stale operator note.", acceptance
+assert acceptance.get("declared_status") == "blocked", acceptance
+assert acceptance.get("declared_blocked_at") == "2026-03-31T10:45:00Z", acceptance
+assert acceptance.get("declared_blocked_reason") == "waiting for operator signoff", acceptance
+assert "blocked_at" not in acceptance, acceptance
+assert "blocked_reason" not in acceptance, acceptance
+PY
 BASH
 
 echo "ALL TESTS PASSED"
