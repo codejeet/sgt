@@ -6806,6 +6806,32 @@ try:
         acceptance = dict(previous_acceptance)
 except Exception:
     acceptance = dict(previous_acceptance)
+
+acceptance = dict(acceptance)
+for key in list(acceptance):
+    if str(key).startswith("declared_"):
+        acceptance.pop(key, None)
+
+declared_status = str(acceptance.get("status") or "").strip().lower()
+declared_terminal_fields = ("completed_at", "verified_at", "blocked_at", "blocked_reason", "waived_at")
+if declared_status and declared_status != status:
+    acceptance["declared_status"] = declared_status
+    for field in declared_terminal_fields:
+        value = acceptance.get(field)
+        if value not in (None, ""):
+            acceptance[f"declared_{field}"] = value
+
+acceptance["status"] = status
+if status != "completed":
+    acceptance.pop("completed_at", None)
+if status != "verified":
+    acceptance.pop("verified_at", None)
+if status != "blocked":
+    acceptance.pop("blocked_at", None)
+    acceptance.pop("blocked_reason", None)
+if status != "waived":
+    acceptance.pop("waived_at", None)
+
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 completion["declared"] = bool(condition.strip() or acceptance)
 completion["condition"] = condition.strip()
