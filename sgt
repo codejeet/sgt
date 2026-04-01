@@ -4282,6 +4282,18 @@ _mayor_pre_dispatch_revalidate() {
   return 0
 }
 
+_mayor_pre_dispatch_fail_open_allowed() {
+  local reason_code="${1:-}"
+  case "$reason_code" in
+    live-query-failed|invalid-live-counts)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 _pr_head_sha() {
   local repo="${1:-}" pr="${2:-}"
   [[ -n "$repo" && -n "$pr" ]] || return 1
@@ -5243,6 +5255,8 @@ _refinery_merge_error_class() {
   lc="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
   if [[ "$lc" =~ secondary[[:space:]-]*rate[[:space:]-]*limit|abuse[[:space:]]+detection ]]; then
     echo "secondary-rate-limit"
+  elif [[ "$lc" =~ merge[[:space:]-]*in[[:space:]-]*progress|being[[:space:]]+merged|already[[:space:]]+being[[:space:]]+merged|already[[:space:]]+merged ]]; then
+    echo "merge-in-progress"
   elif [[ "$lc" =~ timed?[[:space:]-]*out|timeout|deadline[[:space:]]+exceeded ]]; then
     echo "timeout"
   elif [[ "$lc" =~ (^|[^0-9])5[0-9][0-9]([^0-9]|$)|http[[:space:]]*5[0-9][0-9]|server[[:space:]]+error|bad[[:space:]]+gateway|service[[:space:]]+unavailable|gateway[[:space:]]+timeout ]]; then
@@ -5366,18 +5380,25 @@ _resling_pre_dispatch_revalidate() {
   if [[ -n "$source_pr" && "$source_pr" != "0" ]]; then
     pr_snapshot=$(gh pr view "$source_pr" --repo "$canonical_repo" --json state,mergeable --jq '.state + "|" + (.mergeable // "")' 2>/dev/null || true)
     if [[ -z "$pr_snapshot" || "$pr_snapshot" != *"|"* ]]; then
-      echo "unable to query live PR state for #$source_pr"
-      return 1
+      return 0
     fi
     IFS='|' read -r pr_state pr_mergeable <<< "$pr_snapshot"
     if [[ "$pr_state" != "OPEN" ]]; then
       echo "source PR #$source_pr state=$pr_state"
       return 1
     fi
-    if [[ "$pr_mergeable" != "MERGEABLE" ]]; then
-      echo "source PR #$source_pr mergeable=${pr_mergeable:-unknown}"
-      return 1
-    fi
+    case "${pr_mergeable:-}" in
+      ""|MERGEABLE)
+        ;;
+      CONFLICTING)
+        echo "source PR #$source_pr mergeable=${pr_mergeable:-unknown}"
+        return 1
+        ;;
+      *)
+        # GraphQL mergeability can temporarily flake to UNKNOWN/UNSTABLE/etc.
+        # Allow issue-based redispatch unless GitHub gave a definitive conflict.
+        ;;
+    esac
   fi
 }
 
@@ -6616,6 +6637,8 @@ if status in ("dispatched", "in_progress") and "dispatched_at" not in entry:
     entry["dispatched_at"] = now
 if status == "completed":
     entry["completed_at"] = now
+else:
+    entry.pop("completed_at", None)
 doc["updated_at"] = now
 tmp = state_file + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -6785,6 +6808,52 @@ print(f"{best[1]}|{best[2]}")
 PY
 }
 
+_plan_find_open_task_issue() {
+  local repo="${1:-}" task_id="${2:-}" current_issue="${3:-}"
+  local issues_json
+  [[ -n "$repo" && -n "$task_id" ]] || return 1
+  issues_json="$(gh issue list --repo "$repo" --state open --label "plan-$task_id" --limit 100 --json number,url,updatedAt,createdAt 2>/dev/null || true)"
+  [[ -n "$issues_json" ]] || return 1
+  python3 - "$current_issue" "$issues_json" <<'PY'
+import json
+import sys
+
+current_issue = str(sys.argv[1] or "").strip()
+try:
+    issues = json.loads(sys.argv[2])
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(issues, list) or not issues:
+    raise SystemExit(1)
+
+normalized = []
+for issue in issues:
+    if not isinstance(issue, dict):
+        continue
+    number = str(issue.get("number") or "").strip()
+    url = str(issue.get("url") or "").strip()
+    updated_at = str(issue.get("updatedAt") or "").strip()
+    created_at = str(issue.get("createdAt") or "").strip()
+    if not number or not url:
+        continue
+    normalized.append((number, url, updated_at, created_at))
+
+if not normalized:
+    raise SystemExit(1)
+
+if current_issue:
+    for number, url, _updated_at, _created_at in normalized:
+        if number == current_issue:
+            print(f"{number}|{url}")
+            raise SystemExit(0)
+
+normalized.sort(key=lambda item: (item[2], item[3], item[0]))
+number, url, _updated_at, _created_at = normalized[-1]
+print(f"{number}|{url}")
+PY
+}
+
 _plan_tick_run() {
   local rig="${1:-}" tick_source="${2:-manual}"
   local canonical_plan_file plan_file repo snapshot_line
@@ -6862,10 +6931,26 @@ _plan_tick_run() {
   fi
 
   local inflight=0 completed=0 total="${#task_ids[@]}" dispatched_count=0 dispatch_failures=0 pending_ready=0 pending_blocked=0 last_failure_reason_code="" last_failure_detail=""
-  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at
+  local task_id issue_number issue_state active_polecat merged_pr_snapshot merged_pr_number merged_pr_merged_at explicit_issue_snapshot explicit_issue_number explicit_issue_url previous_issue_number previous_task_status
   local -A merged_closing_pr_cache=()
   for task_id in "${task_ids[@]}"; do
     issue_number="${task_issue[$task_id]}"
+    explicit_issue_snapshot="$(_plan_find_open_task_issue "$repo" "$task_id" "$issue_number" 2>/dev/null || true)"
+    if [[ -n "$explicit_issue_snapshot" && "$explicit_issue_snapshot" == *"|"* ]]; then
+      IFS='|' read -r explicit_issue_number explicit_issue_url <<< "$explicit_issue_snapshot"
+      if [[ -n "$explicit_issue_number" && ( "$issue_number" != "$explicit_issue_number" || "${task_status[$task_id]}" == "completed" ) ]]; then
+        previous_issue_number="${task_issue[$task_id]:-}"
+        previous_task_status="${task_status[$task_id]}"
+        issue_number="$explicit_issue_number"
+        task_issue["$task_id"]="$explicit_issue_number"
+        task_issue_url["$task_id"]="${explicit_issue_url:-${task_issue_url[$task_id]}}"
+        if [[ "${task_status[$task_id]}" == "completed" ]]; then
+          task_status["$task_id"]="pending"
+        fi
+        _plan_state_update_task "$rig" "$task_id" "${task_status[$task_id]}" "$issue_number" "${task_issue_url[$task_id]}"
+        log_event "PLAN_TASK_CANONICAL_ISSUE_BIND rig=$rig task=$task_id issue=#$issue_number previous_issue=#${previous_issue_number:-none} previous_status=${previous_task_status:-pending} source=$tick_source"
+      fi
+    fi
     if [[ -n "$issue_number" ]]; then
       issue_state="$(gh issue view "$issue_number" --repo "$repo" --json state --jq '.state // ""' 2>/dev/null || true)"
       if [[ "$issue_state" == "CLOSED" && "${task_status[$task_id]}" != "completed" ]]; then
@@ -8497,34 +8582,40 @@ cmd_sling() {
       mismatch_categories="${_MAYOR_PRE_DISPATCH_MISMATCH_CATEGORIES:-}"
       snapshot_summary="${_MAYOR_PRE_DISPATCH_SNAPSHOT_SUMMARY:-unavailable}"
       live_summary="${_MAYOR_PRE_DISPATCH_LIVE_SUMMARY:-unavailable}"
-      skip_context="dispatch-skip-stale"
-      skip_header="MAYOR DISPATCH SKIP (stale-state)"
-      skip_event="MAYOR_DISPATCH_SKIP_STALE"
-      if [[ "$reason_code" == "parallel-budget-exhausted" ]]; then
-        skip_context="dispatch-skip-budget"
-        skip_header="MAYOR DISPATCH SKIP (parallel-budget)"
-        skip_event="MAYOR_DISPATCH_SKIP_BUDGET"
-      elif [[ "$reason_code" == "consistency-mismatch" ]]; then
-        skip_context="dispatch-skip-consistency"
-        skip_header="MAYOR DISPATCH SKIP (consistency-mismatch)"
-        skip_event="MAYOR_DISPATCH_SKIP_CONSISTENCY"
+      if _mayor_pre_dispatch_fail_open_allowed "$reason_code"; then
+        echo "[mayor] dispatch live revalidation flaked on $rig - $revalidation_reason (fail-open)"
+        _mayor_record_decision "MAYOR DISPATCH REVALIDATE FAIL-OPEN rig=$rig reason_code=$reason_code reason=$revalidation_reason live_summary=$live_summary task=\"$(_escape_quotes "$task")\"" "dispatch-revalidate-fail-open" "$SGT_ROOT" || true
+        log_event "MAYOR_DISPATCH_REVALIDATE_FAIL_OPEN reason_code=$reason_code rig=$rig live=\"$(_escape_quotes "$live_summary")\" reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\""
+      else
+        skip_context="dispatch-skip-stale"
+        skip_header="MAYOR DISPATCH SKIP (stale-state)"
+        skip_event="MAYOR_DISPATCH_SKIP_STALE"
+        if [[ "$reason_code" == "parallel-budget-exhausted" ]]; then
+          skip_context="dispatch-skip-budget"
+          skip_header="MAYOR DISPATCH SKIP (parallel-budget)"
+          skip_event="MAYOR_DISPATCH_SKIP_BUDGET"
+        elif [[ "$reason_code" == "consistency-mismatch" ]]; then
+          skip_context="dispatch-skip-consistency"
+          skip_header="MAYOR DISPATCH SKIP (consistency-mismatch)"
+          skip_event="MAYOR_DISPATCH_SKIP_CONSISTENCY"
+        fi
+        echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
+        local stale_entry=""
+        stale_entry+="$skip_header"$'\n'
+        stale_entry+="  rig=$rig"$'\n'
+        stale_entry+="  reason_code=$reason_code"$'\n'
+        stale_entry+="  reason=$revalidation_reason"$'\n'
+        if [[ "$reason_code" == "consistency-mismatch" ]]; then
+          stale_entry+="  mismatch_categories=${mismatch_categories:-unknown}"$'\n'
+          stale_entry+="  snapshot_summary=$snapshot_summary"$'\n'
+          stale_entry+="  live_summary=$live_summary"$'\n'
+          stale_entry+="  retry=next-mayor-cycle"$'\n'
+        fi
+        stale_entry+="  task=\"$(_escape_quotes "$task")\""
+        _mayor_record_decision "$stale_entry" "$skip_context" "$SGT_ROOT" || true
+        log_event "$skip_event reason_code=$reason_code rig=$rig mismatch_categories=\"${mismatch_categories:-}\" snapshot=\"$(_escape_quotes "$snapshot_summary")\" live=\"$(_escape_quotes "$live_summary")\" reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\" retry=next-mayor-cycle"
+        return 0
       fi
-      echo "[mayor] dispatch skipped on $rig - $revalidation_reason"
-      local stale_entry=""
-      stale_entry+="$skip_header"$'\n'
-      stale_entry+="  rig=$rig"$'\n'
-      stale_entry+="  reason_code=$reason_code"$'\n'
-      stale_entry+="  reason=$revalidation_reason"$'\n'
-      if [[ "$reason_code" == "consistency-mismatch" ]]; then
-        stale_entry+="  mismatch_categories=${mismatch_categories:-unknown}"$'\n'
-        stale_entry+="  snapshot_summary=$snapshot_summary"$'\n'
-        stale_entry+="  live_summary=$live_summary"$'\n'
-        stale_entry+="  retry=next-mayor-cycle"$'\n'
-      fi
-      stale_entry+="  task=\"$(_escape_quotes "$task")\""
-      _mayor_record_decision "$stale_entry" "$skip_context" "$SGT_ROOT" || true
-      log_event "$skip_event reason_code=$reason_code rig=$rig mismatch_categories=\"${mismatch_categories:-}\" snapshot=\"$(_escape_quotes "$snapshot_summary")\" live=\"$(_escape_quotes "$live_summary")\" reason=\"$(_escape_quotes "$revalidation_reason")\" title=\"$(_escape_quotes "$task")\" retry=next-mayor-cycle"
-      return 0
     fi
   fi
 
@@ -11766,6 +11857,18 @@ _refinery_loop() {
 
         if [[ "$merge_skip_reason" != "" ]]; then
           continue
+        fi
+
+        if [[ "$merge_success" != "true" && "$merge_error_class" == "merge-in-progress" ]]; then
+          if _refinery_post_merge_verify_and_receipt "$rig" "$mq_repo" "$mq_pr" "$mq_issue" "$mq_branch" "$claimed_attempt_key" "$merge_expected_head_sha"; then
+            merge_success=true
+            merge_expected_head_sha="${_REFINERY_MERGE_RECEIPT_MERGED_SHA:-$merge_expected_head_sha}"
+          else
+            echo "[refinery/$rig] PR #$mq_pr merge already in flight — awaiting live confirmation"
+            log_event "REFINERY_MERGE_IN_FLIGHT pr=#$mq_pr issue=#$mq_issue class=$merge_error_class retry=await-live-confirmation error=\"$(_escape_quotes "$merge_result")\""
+            _refinery_merge_attempt_release "$claimed_attempt_file"
+            continue
+          fi
         fi
 
         if [[ "$merge_success" == "true" ]]; then
