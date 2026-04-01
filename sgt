@@ -6518,6 +6518,10 @@ completion_state = state.get("completion")
 if not isinstance(completion_state, dict):
     completion_state = {}
 
+state_acceptance = completion_state.get("acceptance")
+if not isinstance(state_acceptance, dict):
+    state_acceptance = {}
+
 ralph_state = state.get("ralph")
 if not isinstance(ralph_state, dict):
     ralph_state = {}
@@ -6544,10 +6548,23 @@ acceptance = plan.get("acceptance")
 if not isinstance(acceptance, dict):
     acceptance = {}
 
+state_completion_rollup = str(completion_state.get("rollup") or "").strip().lower()
+ralph_pending_override = (
+    str(completion_state.get("status") or "").strip().lower() == "pending"
+    and (
+        bool(ralph_state.get("completion_blocked_by_condition"))
+        or state_completion_rollup.startswith("ralph-")
+    )
+)
+if ralph_pending_override and state_acceptance:
+    acceptance = dict(state_acceptance)
+
 allowed_completion_status = {"pending", "completed", "verified", "blocked", "waived"}
 plan_completion_status = str(acceptance.get("status") or "").strip().lower()
 state_completion_status = str(completion_state.get("status") or "").strip().lower()
-if plan_completion_status in allowed_completion_status:
+if ralph_pending_override:
+    completion_status = "pending"
+elif plan_completion_status in allowed_completion_status:
     completion_status = plan_completion_status
 elif state_completion_status in allowed_completion_status:
     completion_status = state_completion_status

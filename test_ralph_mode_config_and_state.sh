@@ -236,6 +236,28 @@ assert plan_ralph.get("target_concurrency") == 2, plan_ralph
 assert plan_ralph.get("active_lane_count") == 1, plan_ralph
 PY
 
+LIB_SCRIPT="$HOME/sgt-lib.sh"
+sed '$d' "$HOME/.local/bin/sgt" > "$LIB_SCRIPT"
+source "$LIB_SCRIPT"
+_plan_state_snapshot "demo" "$SGT_ROOT/rigs/demo/SGT_PLAN.json" "$SGT_ROOT/rigs/demo/SGT_PLAN.json" >/dev/null
+
+python3 - "$SGT_ROOT/.sgt/plan-state/demo.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    plan_state = json.load(fh)
+
+completion = plan_state.get("completion") or {}
+assert completion.get("status") == "pending", completion
+assert completion.get("rollup") == "ralph-underfilled", completion
+acceptance = completion.get("acceptance") or {}
+assert acceptance.get("status") == "pending", acceptance
+assert acceptance.get("declared_status") == "verified", acceptance
+assert acceptance.get("declared_verified_at") == "2026-03-31T08:15:00Z", acceptance
+assert "verified_at" not in acceptance, acceptance
+PY
+
 sgt config ralph demo --count-support yes >/dev/null
 sgt status --json > "$SGT_ROOT/status-after.json"
 
