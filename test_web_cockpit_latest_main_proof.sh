@@ -9,6 +9,6 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 npm --prefix "$REPO_ROOT/web" ci
 npm --prefix "$REPO_ROOT/web" test
-"$REPO_ROOT/web/scripts/sync-live-copy.sh" --dry-run "$TMP_DIR/live"
+SGT_WEB_REPO_DIR="$REPO_ROOT" SGT_WEB_LIVE_DIR="$TMP_DIR/live" "$REPO_ROOT/sgt" web deploy --dry-run
 
 echo "WEB COCKPIT LATEST-MAIN PROOF PASSED"

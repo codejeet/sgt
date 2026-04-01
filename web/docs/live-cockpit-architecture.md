@@ -173,10 +173,18 @@ Default local deployment target:
 Use the repo-owned helper:
 
 ```bash
+sgt web deploy
+```
+
+That first-class flow treats the current repo checkout as canonical, syncs repo `web/` into the live target, restarts the live `sgt-web` tmux session, and verifies that the served copy matches the repo plus passes HTTP health.
+
+Low-level helper:
+
+```bash
 web/scripts/sync-live-copy.sh
 ```
 
-That script syncs repo `web/` into the live target, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, copies the repo-tracked `package-lock.json`, and runs `npm ci` in the live directory so the served copy reflects the repo source.
+That helper preserves runtime-only artifacts such as `node_modules/` and `webui.log`, copies the repo-tracked `package-lock.json`, and runs `npm ci` in the live directory so the served copy reflects the repo source.
 
 ## Latest-main proof path
 
@@ -189,7 +197,7 @@ Run this on a fresh checkout of the latest `master`/mainline commit when you wan
 This proof path is intentionally narrow:
 
 - `npm --prefix web ci && npm --prefix web test` verifies a fresh-checkout install plus the normalized cockpit snapshot/topology contracts, operator-shell UI structure, and the docs/deploy-helper assertions for the canonical repo copy
-- `web/scripts/sync-live-copy.sh --dry-run <tempdir>` exercises the documented repo `web/` to live-copy deployment helper without mutating `/root/sgt/web`
+- `sgt web deploy --dry-run` against a temp live dir exercises the documented repo `web/` to live-copy deployment flow without mutating `/root/sgt/web`
 
 ## Guardrails For Follow-on Work
 

@@ -12,6 +12,7 @@ The repo includes a minimal Web UI for realtime monitoring and dispatch:
 
 - Docs / quick start: [`web/README.md`](web/README.md)
 - Default URL: `http://localhost:4747`
+- First-class deploy path: `sgt web deploy` from the repo checkout, then `sgt web status` / `sgt web verify` to confirm the live served tree really matches the repo source
 - Latest-main cockpit proof: `./test_web_cockpit_latest_main_proof.sh`
 
 ## Why SGT exists (short)

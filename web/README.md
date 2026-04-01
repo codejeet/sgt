@@ -19,23 +19,34 @@ npm start
 
 The repo-tracked `web/` directory is the only canonical source for the cockpit.
 The default live served copy on a rig host lives at `/root/sgt/web`, and the default URL is `http://localhost:4747` when you run it locally or `http://<tailscale-host>:4747` on the rig host.
+Code landing in a rig checkout does not update the served UI by itself; the live tree stays stale until you deploy it explicitly.
 
-Sync the repo copy into the live target with:
+Use the first-class SGT deploy flow from the repo checkout:
+
+```bash
+sgt web deploy
+```
+
+That command treats the current checkout's `web/` tree as the source of truth, syncs it into `/root/sgt/web`, restarts the live `sgt-web` tmux session, and verifies both tree parity and HTTP health before reporting success.
+
+Check live truth explicitly:
+
+```bash
+sgt web status
+sgt web verify
+```
+
+Dry-run the deploy first if needed:
+
+```bash
+SGT_WEB_LIVE_DIR=/srv/sgt/web sgt web deploy --dry-run
+```
+
+The lower-level helper still exists underneath that flow:
 
 ```bash
 web/scripts/sync-live-copy.sh
-```
-
-Dry-run the sync first if needed:
-
-```bash
 web/scripts/sync-live-copy.sh --dry-run
-```
-
-Override the live target without editing the script:
-
-```bash
-SGT_WEB_LIVE_DIR=/srv/sgt/web web/scripts/sync-live-copy.sh
 ```
 
 `web/scripts/sync-live-copy.sh` uses `rsync --delete`, preserves runtime-only artifacts such as `node_modules/` and `webui.log`, copies the repo-tracked `package-lock.json`, and runs `npm ci` in the live target so `/root/sgt/web` stays a served deployment copy rather than a second source tree.
@@ -60,6 +71,9 @@ Deploy-helper environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SGT_WEB_LIVE_DIR` | `/root/sgt/web` | Alternate live sync target used by `web/scripts/sync-live-copy.sh` |
+| `SGT_WEB_REPO_DIR` | current git root | Override the repo checkout used by `sgt web deploy/status/verify` as the canonical source |
+| `SGT_WEB_SESSION_NAME` | `sgt-web` | tmux session name used by `sgt web start/stop/restart` |
+| `SGT_WEB_VERIFY_URL` | `http://127.0.0.1:$SGT_WEB_PORT/api/status` | Override the HTTP health check used by `sgt web verify` |
 
 Behavior notes:
 
@@ -78,7 +92,7 @@ Run this on a fresh checkout of the latest `master`/mainline commit when you wan
 That proof path bundles:
 
 - `npm --prefix web ci && npm --prefix web test` for a fresh-checkout dependency install plus the cockpit snapshot/topology/blocker alert contracts, operator-shell UI, and docs/deploy-helper assertions
-- `web/scripts/sync-live-copy.sh --dry-run <tempdir>` so the canonical repo `web/` to live-copy sync path is exercised without touching `/root/sgt/web`
+- `sgt web deploy --dry-run` against a temp live dir so the first-class repo `web/` to live-copy deploy path is exercised without touching `/root/sgt/web`
 
 If you want the full President operator-surface proof instead of the web-only proof, run:
 
@@ -138,7 +152,7 @@ Stored under `web/docs/screenshots/`:
 
 - **WebSocket shows Disconnected / stale timestamps**
   - The UI will reconnect automatically with backoff.
-  - If the server is down, restart it: `npm start`.
+  - If the live server is down, restart it: `sgt web restart`.
 
 - **Missing SGT binary / wrong SGT_ROOT**
   - Set `SGT_ROOT` and/or `SGT_BIN` explicitly, e.g.:
@@ -172,6 +186,7 @@ The goal is higher reliability, a simpler mental model, and easier ops.
 - **Real-time**: WebSocket pushes status and log deltas; includes heartbeat + reconnect/backoff.
 - **Topology rendering**: browser-side force simulation with a WebGL node/edge pass when supported; overlay labels and fallback rendering remain canvas-based so the panel still works without GPU support.
 - **Canonical source**: repo `web/` is the source of truth; `/root/sgt/web` is a deployment target.
+- **Live truth check**: `sgt web status` and `sgt web verify` tell you whether the live served tree actually matches the current repo checkout.
 
 ## API Endpoints
 
