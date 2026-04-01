@@ -44,6 +44,14 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
           state: 'active',
           reason: 'open_issues=1 open_prs=0 active_polecats=1 merge_queue=0 pending_plan_requests=0',
           hibernation_mode: 'none',
+          ralph: {
+            enabled: true,
+            state: 'underfilled',
+            condition: '1K PNL for 5m btc pipeline',
+            target_concurrency: 5,
+            active_lane_count: 1,
+            admissible_lane_count: 3,
+          },
         },
       ],
       polecats: [
@@ -113,6 +121,8 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.rigs.length, 1);
   assert.equal(snapshot.rigs[0].blockers, 1);
   assert.equal(snapshot.rigs[0].activeWorkers, 1);
+  assert.equal(snapshot.rigs[0].ralph.enabled, true);
+  assert.equal(snapshot.rigs[0].ralph.target_concurrency, 5);
   assert.equal(snapshot.workers[0].stream.target, 'sgt-34784812');
   assert.equal(snapshot.workers[0].runtime.classification, 'busy-long-running');
   assert.equal(snapshot.workers[0].runtime.busy_comm, 'python3');

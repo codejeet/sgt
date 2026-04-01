@@ -535,6 +535,8 @@ function renderRigs() {
         <span>${rig.blockers || 0} blockers</span>
         <span>${rig.mergeQueue || 0} queue</span>
       </div>
+      ${rig.ralph && rig.ralph.enabled ? `<div class="subtle">Ralph ${esc(rig.ralph.state || "enabled")} · target ${esc(String(rig.ralph.target_concurrency || 1))} · active ${esc(String(rig.ralph.active_lane_count || 0))}/${esc(String(rig.ralph.target_concurrency || 1))} · admissible ${esc(String(rig.ralph.admissible_lane_count || 0))}</div>` : ""}
+      ${rig.ralph && rig.ralph.enabled && rig.ralph.condition ? `<div class="subtle">${esc(snippet(rig.ralph.condition, 160))}</div>` : ""}
       <div class="subtle">${esc(rig.reason || "No rig-local mayor detail available.")}</div>
     </article>
   `).join("");

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added per-rig Ralph mode config via `sgt config ralph`, with a normalized Ralph state model in status/plan-state/cockpit output and explicit concurrency-accounting rules for admissible vs support-only vs duplicate lanes.
+- President and rig-activity logic now treat an enabled unmet Ralph condition as active work, emit dedicated Ralph underfill/idle intervention reasons, and keep stale `verified` / `waived` acceptance metadata from falsely terminating plan completion while Ralph remains unmet.
 - Mayor now auto-refreshes at runtime when the estimated AI prompt exceeds `SGT_MAYOR_AUTO_REFRESH_TOKENS` (default `150000`), using the same handoff/archive path as `sgt mayor refresh` plus a cooldown guard.
 - `sgt status` and `sgt status --json` now expose the latest Mayor prompt-budget estimate and last automatic refresh metadata.
 - `sgt context index` now writes through unique fsynced temp files before `os.replace`, avoiding concurrent rebuild corruption of `~/.sgt/context/<rig>/index.json`.
