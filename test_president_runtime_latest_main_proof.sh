@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 bash "$REPO_ROOT/test_mayor_per_rig_architecture.sh"
 bash "$REPO_ROOT/test_hierarchy_cutover_guardrails.sh"
+bash "$REPO_ROOT/test_mayor_helper_state_preservation.sh"
 bash "$REPO_ROOT/test_president_runtime_supervision.sh"
 bash "$REPO_ROOT/test_peek_mayor_log_fallback.sh"
 bash "$REPO_ROOT/test_web_cockpit_control_plane_hierarchy.sh"
