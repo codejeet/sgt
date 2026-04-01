@@ -44,6 +44,8 @@ eval "$(extract_fn _president_operator_log_event)"
 eval "$(extract_fn _plan_state_path)"
 eval "$(extract_fn _plan_pending_underfill_target)"
 eval "$(extract_fn _deacon_supervise_president)"
+eval "$(extract_fn _mayor_rig_activity_enabled)"
+eval "$(extract_fn _mayor_rig_hibernated)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
 TMP_ROOT="$(mktemp -d)"
@@ -291,6 +293,44 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info 
 fi
 if [[ "$(wc -l < "$EVENT_STATE")" -lt 3 ]]; then
   echo "expected president operator event history to retain intervened and suppressed entries" >&2
+  exit 1
+fi
+
+hibernated_refresh_count_before="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+hibernated_wake_count_before="$(grep -c '^president:demo:actionable-rig-recheck$' "$WAKE_LOG" || true)"
+hibernated_start_count_before="$(grep -c '^mayor-start:demo$' "$START_LOG" || true)"
+hibernated_actionable_recheck_count_before="$(grep -c 'PRESIDENT_INTERVENTION rig=demo action=wake reason=actionable-rig-recheck' "$EVENT_LOG" || true)"
+
+_mayor_rig_hibernated() {
+  [[ "${1:-}" == "demo" ]]
+}
+
+tmux() {
+  if [[ "${1:-}" == "has-session" && "${2:-}" == "-t" ]]; then
+    case "${3:-}" in
+      sgt-mayor-demo) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+_president_supervise_rig_mayor demo manual > "$TMP_ROOT/president-hibernated-wake.out" || true
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-hibernated-refresh.out" || true
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$hibernated_refresh_count_before" ]]; then
+  echo "expected hibernated rig to skip President refresh intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^president:demo:actionable-rig-recheck$' "$WAKE_LOG" || true)" -ne "$hibernated_wake_count_before" ]]; then
+  echo "expected hibernated rig to skip President wake intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^mayor-start:demo$' "$START_LOG" || true)" -ne "$hibernated_start_count_before" ]]; then
+  echo "expected hibernated rig to skip President mayor start intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c 'PRESIDENT_INTERVENTION rig=demo action=wake reason=actionable-rig-recheck' "$EVENT_LOG" || true)" -ne "$hibernated_actionable_recheck_count_before" ]]; then
+  echo "expected hibernated rig to skip durable President actionable-rig-recheck intervention logging" >&2
   exit 1
 fi
 BASH

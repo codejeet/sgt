@@ -12601,6 +12601,10 @@ _president_supervise_rig_mayor() {
   [[ "$ralph_active_lanes" =~ ^[0-9]+$ ]] || ralph_active_lanes=0
   [[ "$ralph_admissible_lanes" =~ ^[0-9]+$ ]] || ralph_admissible_lanes=0
   [[ "$ralph_backlog_lanes" =~ ^[0-9]+$ ]] || ralph_backlog_lanes=0
+  if _mayor_rig_hibernated "$rig"; then
+    _mayor_scope_apply "$prior_scope_rig"
+    return 1
+  fi
   case "${plan_rollup:-}" in
     acceptance-completed|acceptance-verified|acceptance-waived|blocked-pending-external)
       plan_terminal_rollup=1
