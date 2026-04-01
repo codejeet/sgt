@@ -341,4 +341,58 @@ case "$rig_handoff" in
     ;;
 esac
 
+grep -q 'MAYOR_REFRESH scope=alpha' "$RIG_HOME/sgt/sgt.log" || {
+  echo "expected per-rig refresh log scope to stay on alpha" >&2
+  exit 1
+}
+if grep -q 'MAYOR_REFRESH scope=shared' "$RIG_HOME/sgt/sgt.log"; then
+  echo "did not expect shared refresh scope in per-rig refresh log" >&2
+  exit 1
+fi
+
+echo "=== president-mode refresh without caller env ==="
+PRESIDENT_HOME="$TMP_ROOT/president-mode-home"
+PRESIDENT_SESSIONS="$TMP_ROOT/president-mode-sessions"
+mkdir -p "$PRESIDENT_HOME/.local/bin"
+cp "$SGT_SCRIPT" "$PRESIDENT_HOME/.local/bin/sgt"
+chmod +x "$PRESIDENT_HOME/.local/bin/sgt"
+printf 'sgt-president\nsgt-mayor-alpha\nsgt-mayor-beta\n' > "$PRESIDENT_SESSIONS"
+
+run_env "$PRESIDENT_HOME" "$PRESIDENT_SESSIONS" bash --noprofile --norc -c '
+set -euo pipefail
+sgt init >/dev/null
+mkdir -p "$SGT_ROOT/.sgt/rigs" "$SGT_ROOT/rigs/alpha" "$SGT_ROOT/rigs/beta"
+printf "https://github.com/acme/alpha\n" > "$SGT_ROOT/.sgt/rigs/alpha"
+printf "https://github.com/acme/beta\n" > "$SGT_ROOT/.sgt/rigs/beta"
+mkdir -p "$SGT_ROOT/.sgt/president" "$SGT_ROOT/.sgt/mayors/alpha/mayor-workspace" "$SGT_ROOT/.sgt/mayors/beta/mayor-workspace"
+printf "alpha briefing\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-briefing.md"
+printf "beta briefing\n" > "$SGT_ROOT/.sgt/mayors/beta/mayor-briefing.md"
+printf "alpha notes\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-workspace/CLAUDE.md"
+printf "beta notes\n" > "$SGT_ROOT/.sgt/mayors/beta/mayor-workspace/CLAUDE.md"
+printf "alpha decision\n" > "$SGT_ROOT/.sgt/mayors/alpha/mayor-decisions.log"
+printf "beta decision\n" > "$SGT_ROOT/.sgt/mayors/beta/mayor-decisions.log"
+'
+
+PRESIDENT_OUT="$TMP_ROOT/president-mode-refresh.out"
+run_env "$PRESIDENT_HOME" "$PRESIDENT_SESSIONS" bash --noprofile --norc -c 'set -euo pipefail; timeout 15 sgt mayor refresh alpha' > "$PRESIDENT_OUT"
+president_handoff="$(tail -n 1 "$PRESIDENT_OUT")"
+assert_file "$president_handoff"
+case "$president_handoff" in
+  *"/mayors/alpha/handoffs/"*) ;;
+  *)
+    echo "expected president-mode refresh to infer alpha per-rig scope" >&2
+    exit 1
+    ;;
+esac
+assert_file "$PRESIDENT_HOME/sgt/.sgt/mayors/beta/mayor-briefing.md"
+assert_file "$PRESIDENT_HOME/sgt/.sgt/mayors/beta/mayor-workspace/CLAUDE.md"
+grep -q 'MAYOR_REFRESH scope=alpha' "$PRESIDENT_HOME/sgt/sgt.log" || {
+  echo "expected president-mode refresh log scope to stay on alpha" >&2
+  exit 1
+}
+if grep -q 'MAYOR_REFRESH scope=shared' "$PRESIDENT_HOME/sgt/sgt.log"; then
+  echo "did not expect shared refresh scope under live president mode" >&2
+  exit 1
+fi
+
 echo "ALL TESTS PASSED"
