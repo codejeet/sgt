@@ -9,8 +9,14 @@ test('web docs cover deploy path, config, and latest-main proof entrypoint', () 
   const packageLock = fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8');
 
   assert.match(readme, /\/root\/sgt\/web/);
+  assert.match(readme, /sgt web deploy/);
+  assert.match(readme, /sgt web status/);
+  assert.match(readme, /sgt web verify/);
   assert.match(readme, /web\/scripts\/sync-live-copy\.sh/);
   assert.match(readme, /SGT_WEB_LIVE_DIR/);
+  assert.match(readme, /SGT_WEB_REPO_DIR/);
+  assert.match(readme, /SGT_WEB_SESSION_NAME/);
+  assert.match(readme, /SGT_WEB_VERIFY_URL/);
   assert.match(readme, /SGT_WEB_PORT/);
   assert.match(readme, /SGT_WEB_ELEVENLABS_API_KEY/);
   assert.match(readme, /SGT_WEB_VOICE_RATE_LIMIT_SECS/);
@@ -21,6 +27,7 @@ test('web docs cover deploy path, config, and latest-main proof entrypoint', () 
   assert.match(readme, /president-operator-surface-contract\.md/);
   assert.match(readme, /President Activity/);
   assert.match(readme, /human-dashboard-redesign-rules\.md/);
+  assert.match(readme, /Code landing in a rig checkout does not update the served UI by itself/);
   assert.match(packageLock, /"name": "sgt-web"/);
   assert.match(packageLock, /"lockfileVersion": 3/);
 
