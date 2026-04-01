@@ -8215,6 +8215,32 @@ _mayor_notify_rigger() {
   return 1
 }
 
+_mayor_notify_rigger_fail_open() {
+  local message="${1:-}"
+  local suppress_decision_log="${2:-0}"
+  local notify_rig="${3:-${SGT_MAYOR_SCOPE_RIG:-}}"
+  local now_epoch
+  if _mayor_notify_rigger "$message" "$suppress_decision_log" "$notify_rig"; then
+    _mayor_notify_alert_state_clear || true
+    return 0
+  fi
+
+  now_epoch="$(date +%s)"
+  _mayor_notify_alert_state_write \
+    "$now_epoch" \
+    "${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger}" \
+    "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}" \
+    "${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown}" \
+    "${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0}" \
+    "${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed}" \
+    "${_MAYOR_NOTIFY_RESULT_REASON:-unknown}" \
+    "${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown}" \
+    "true" || true
+  log_event "MAYOR_NOTIFY_FAIL_OPEN channel=${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger} target=\"$(_escape_quotes "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}")\" message_key=${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown} attempt=${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0} outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown} escalated=${_MAYOR_NOTIFY_RESULT_ESCALATED:-0} action=retain-warning-continue"
+  echo "[mayor] notify warning retained without failing command (outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown})"
+  return 0
+}
+
 # Wake the mayor via FIFO (non-blocking, fire-and-forget)
 _wake_mayor() {
   local reason="${1:-unknown}"
@@ -14714,7 +14740,7 @@ _mayor_loop() {
 
       # Notify Rigger of significant actions via OpenClaw
       if [[ -n "$notify_rigger" ]]; then
-        _mayor_notify_rigger "$notify_rigger"
+        _mayor_notify_rigger_fail_open "$notify_rigger" "0" "${SGT_MAYOR_SCOPE_RIG:-}"
       fi
     fi
 
@@ -14845,27 +14871,7 @@ MAYORMD
 # Public command: sgt mayor notify "<message>" — lets AI mayor report to Rigger
 cmd_mayor_notify() {
   local message="${1:?usage: sgt mayor notify \"<message>\"}"
-  local rc now_epoch
-  if _mayor_notify_rigger "$message" "0" "${SGT_MAYOR_SCOPE_RIG:-}"; then
-    _mayor_notify_alert_state_clear || true
-    return 0
-  fi
-  rc=$?
-
-  now_epoch="$(date +%s)"
-  _mayor_notify_alert_state_write \
-    "$now_epoch" \
-    "${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger}" \
-    "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}" \
-    "${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown}" \
-    "${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0}" \
-    "${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed}" \
-    "${_MAYOR_NOTIFY_RESULT_REASON:-unknown}" \
-    "${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown}" \
-    "true" || true
-  log_event "MAYOR_NOTIFY_FAIL_OPEN channel=${_MAYOR_NOTIFY_RESULT_CHANNEL:-rigger} target=\"$(_escape_quotes "${_MAYOR_NOTIFY_RESULT_TARGET:-rigger}")\" message_key=${_MAYOR_NOTIFY_RESULT_MESSAGE_KEY:-unknown} attempt=${_MAYOR_NOTIFY_RESULT_ATTEMPT:-0} outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown} escalated=${_MAYOR_NOTIFY_RESULT_ESCALATED:-0} action=retain-warning-continue"
-  echo "[mayor] notify warning retained without failing command (outcome=${_MAYOR_NOTIFY_RESULT_OUTCOME:-failed} reason=${_MAYOR_NOTIFY_RESULT_REASON:-unknown} matcher=${_MAYOR_NOTIFY_RESULT_MATCHER:-unknown})"
-  return 0
+  _mayor_notify_rigger_fail_open "$message" "0" "${SGT_MAYOR_SCOPE_RIG:-}"
 }
 
 cmd_mayor_request_list() {
