@@ -43,6 +43,7 @@ eval "$(extract_fn _president_operator_overlap_key)"
 eval "$(extract_fn _president_operator_log_event)"
 eval "$(extract_fn _plan_state_path)"
 eval "$(extract_fn _plan_pending_underfill_target)"
+eval "$(extract_fn _mayor_rig_hibernated)"
 eval "$(extract_fn _deacon_supervise_president)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
@@ -61,6 +62,7 @@ export SGT_ROOT SGT_CONFIG SGT_PLAN_STATE_DIR EVENT_LOG EVENT_STATE START_LOG RE
 export SGT_PRESIDENT_INTERVAL=60
 export SGT_PRESIDENT_INTERVENTION_STALE_SECS=900
 export SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS=600
+TEST_HIBERNATED=0
 
 log_event() {
   echo "$*" >> "$EVENT_LOG"
@@ -117,12 +119,24 @@ _mayor_heartbeat_health() {
   echo healthy
 }
 
+_mayor_rig_activity_enabled() {
+  return 0
+}
+
 _mayor_rig_activity_snapshot() {
   printf 'active|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
 }
 
 _mayor_rig_activity_state_read() {
   printf 'active|open_issues=1|2026-03-31T00:00:00Z|1774915200|none|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|periodic\n'
+}
+
+_mayor_rig_hibernation_mode() {
+  if [[ "${TEST_HIBERNATED:-0}" == "1" ]]; then
+    echo "manual"
+  else
+    echo "none"
+  fi
 }
 
 _ralph_mode_snapshot_fields() {
@@ -291,6 +305,30 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info 
 fi
 if [[ "$(wc -l < "$EVENT_STATE")" -lt 3 ]]; then
   echo "expected president operator event history to retain intervened and suppressed entries" >&2
+  exit 1
+fi
+
+TEST_HIBERNATED=1
+refresh_count_before_hibernated="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+wake_count_before_hibernated="$(grep -c '^president:demo:actionable-rig-recheck$' "$WAKE_LOG" || true)"
+event_count_before_hibernated="$(grep -c '^PRESIDENT_INTERVENTION rig=demo ' "$EVENT_LOG" || true)"
+
+_mayor_rig_activity_state_read() {
+  printf 'hibernated|open_issues=1|2026-03-31T00:00:00Z|1774915200|manual|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|manual-stop\n'
+}
+
+_president_supervise_rig_mayor demo manual >/dev/null || true
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$refresh_count_before_hibernated" ]]; then
+  echo "expected hibernated rig to skip President refresh intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^president:demo:actionable-rig-recheck$' "$WAKE_LOG" || true)" -ne "$wake_count_before_hibernated" ]]; then
+  echo "expected hibernated rig to skip President wake recheck intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^PRESIDENT_INTERVENTION rig=demo ' "$EVENT_LOG" || true)" -ne "$event_count_before_hibernated" ]]; then
+  echo "expected hibernated rig to avoid logging new President interventions" >&2
   exit 1
 fi
 BASH
