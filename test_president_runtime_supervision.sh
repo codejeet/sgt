@@ -58,6 +58,7 @@ START_LOG="$TMP_ROOT/start.log"
 REFRESH_LOG="$TMP_ROOT/refresh.log"
 WAKE_LOG="$TMP_ROOT/wake.log"
 export SGT_ROOT SGT_CONFIG SGT_PLAN_STATE_DIR EVENT_LOG EVENT_STATE START_LOG REFRESH_LOG WAKE_LOG
+touch "$EVENT_LOG" "$EVENT_STATE" "$START_LOG" "$REFRESH_LOG" "$WAKE_LOG"
 export SGT_PRESIDENT_INTERVAL=60
 export SGT_PRESIDENT_INTERVENTION_STALE_SECS=900
 export SGT_PRESIDENT_INTERVENTION_COOLDOWN_SECS=600
@@ -160,6 +161,39 @@ tmux() {
     return 0
   fi
   return 1
+}
+
+_mayor_rig_activity_snapshot() {
+  printf 'hibernated|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
+}
+
+_mayor_rig_activity_state_read() {
+  printf 'hibernated|manual-stop|2026-03-31T00:00:00Z|1774915200|manual|2026-03-31T00:00:00Z|1774915200|manual-stop|2026-03-31T00:00:00Z|manual\n'
+}
+
+refresh_count_before_hibernated="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+wake_count_before_hibernated="$(wc -l < "$WAKE_LOG" || true)"
+_president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-hibernated.out" || true
+
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$refresh_count_before_hibernated" ]]; then
+  echo "expected President to skip refreshes for hibernated rigs" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$WAKE_LOG" || true)" -ne "$wake_count_before_hibernated" ]]; then
+  echo "expected President to skip wakes for hibernated rigs" >&2
+  exit 1
+fi
+if grep -q 'PRESIDENT_INTERVENTION rig=demo' "$EVENT_LOG"; then
+  echo "expected no President intervention event for hibernated rig" >&2
+  exit 1
+fi
+
+_mayor_rig_activity_snapshot() {
+  printf 'active|open_issues=1 open_prs=0 active_polecats=0 merge_queue=0 pending_plan_requests=0|1|0|0|0|0|tasks-exhausted-awaiting-acceptance|pending\n'
+}
+
+_mayor_rig_activity_state_read() {
+  printf 'active|open_issues=1|2026-03-31T00:00:00Z|1774915200|none|2026-03-31T00:00:00Z|1774915200|plan-pending|2026-03-31T00:00:00Z|periodic\n'
 }
 
 _president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president.out"
