@@ -51,6 +51,11 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
             target_concurrency: 5,
             active_lane_count: 1,
             admissible_lane_count: 3,
+            last_president_action: {
+              action: 'wake',
+              reason: 'ralph-underfilled',
+              outcome: 'intervened',
+            },
           },
         },
       ],
@@ -123,6 +128,7 @@ test('buildCockpitSnapshot shapes normalized rig, worker, blocker, and topology 
   assert.equal(snapshot.rigs[0].activeWorkers, 1);
   assert.equal(snapshot.rigs[0].ralph.enabled, true);
   assert.equal(snapshot.rigs[0].ralph.target_concurrency, 5);
+  assert.equal(snapshot.rigs[0].ralph.last_president_action.reason, 'ralph-underfilled');
   assert.equal(snapshot.workers[0].stream.target, 'sgt-34784812');
   assert.equal(snapshot.workers[0].runtime.classification, 'busy-long-running');
   assert.equal(snapshot.workers[0].runtime.busy_comm, 'python3');

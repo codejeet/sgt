@@ -368,6 +368,39 @@ app.post('/api/sling-dog', async (req, res) => {
   }
 });
 
+app.post('/api/ralph/:rig', async (req, res) => {
+  const rig = String(req.params.rig || '').trim();
+  if (!rig) {
+    res.status(400).json({ error: 'rig is required' });
+    return;
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const args = ['config', 'ralph', rig];
+  const enabled = body.enabled;
+  const condition = typeof body.condition === 'string' ? body.condition.trim() : '';
+  const conditionStatus = typeof body.conditionStatus === 'string' ? body.conditionStatus.trim().toLowerCase() : '';
+  const targetRaw = body.targetConcurrency;
+  const countSupport = body.countSupportLanes;
+
+  if (enabled === true) args.push('--enable');
+  if (enabled === false) args.push('--disable');
+  if (condition) args.push('--condition', condition);
+  if (conditionStatus) args.push('--condition-status', conditionStatus);
+  if (targetRaw !== undefined && targetRaw !== null && String(targetRaw).trim() !== '') {
+    args.push('--target', String(targetRaw).trim());
+  }
+  if (countSupport === true) args.push('--count-support', 'yes');
+  if (countSupport === false) args.push('--count-support', 'no');
+
+  try {
+    const output = await runSgt(args);
+    res.json({ output });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/logs', (req, res) => {
   const lines = Number.parseInt(req.query.lines, 10) || 100;
   res.json({ lines: readRecentLogLines(SGT_LOG, lines) });

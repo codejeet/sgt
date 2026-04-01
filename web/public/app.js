@@ -535,11 +535,75 @@ function renderRigs() {
         <span>${rig.blockers || 0} blockers</span>
         <span>${rig.mergeQueue || 0} queue</span>
       </div>
-      ${rig.ralph && rig.ralph.enabled ? `<div class="subtle">Ralph ${esc(rig.ralph.state || "enabled")} · target ${esc(String(rig.ralph.target_concurrency || 1))} · active ${esc(String(rig.ralph.active_lane_count || 0))}/${esc(String(rig.ralph.target_concurrency || 1))} · admissible ${esc(String(rig.ralph.admissible_lane_count || 0))}</div>` : ""}
-      ${rig.ralph && rig.ralph.enabled && rig.ralph.condition ? `<div class="subtle">${esc(snippet(rig.ralph.condition, 160))}</div>` : ""}
+      ${renderRigRalph(rig)}
       <div class="subtle">${esc(rig.reason || "No rig-local mayor detail available.")}</div>
     </article>
   `).join("");
+
+  refs.rigMatrix.querySelectorAll("[data-ralph-form]").forEach((form) => {
+    form.addEventListener("submit", handleRalphSubmit);
+  });
+  refs.rigMatrix.querySelectorAll("[data-ralph-disable]").forEach((button) => {
+    button.addEventListener("click", handleRalphDisable);
+  });
+}
+
+function renderRigRalph(rig) {
+  const ralph = rig.ralph || {};
+  const enabled = Boolean(ralph.enabled);
+  const target = Number.parseInt(ralph.target_concurrency, 10) > 0 ? Number.parseInt(ralph.target_concurrency, 10) : 1;
+  const conditionStatus = ralph.condition_status || "unmet";
+  const lastAction = ralph.last_president_action || {};
+  const lastActionSummary = lastAction.action || lastAction.reason || lastAction.outcome
+    ? `President ${lastAction.action || "observed"} ${lastAction.reason || "ralph"} (${lastAction.outcome || "unknown"})`
+    : "";
+
+  return `
+    <div class="ralph-panel">
+      <div class="subtle">
+        Ralph ${esc(ralph.state || (enabled ? "enabled" : "disabled"))}
+        · target ${esc(String(target))}
+        · active ${esc(String(ralph.active_lane_count || 0))}/${esc(String(target))}
+        · admissible ${esc(String(ralph.admissible_lane_count || 0))}
+        · backlog ${esc(String(ralph.backlog_lane_count || 0))}
+        · underfilled ${esc(String(ralph.underfilled ? 1 : 0))}
+        · condition ${esc(conditionStatus)}
+      </div>
+      ${ralph.condition ? `<div class="subtle">${esc(snippet(ralph.condition, 160))}</div>` : ""}
+      ${ralph.reason ? `<div class="subtle">${esc(ralph.reason)}</div>` : ""}
+      ${lastActionSummary ? `<div class="subtle">${esc(lastActionSummary)}</div>` : ""}
+      <form class="ralph-form" data-ralph-form="${escAttr(rig.name)}">
+        <div class="ralph-grid">
+          <label class="ralph-check">
+            <input type="checkbox" name="enabled" ${enabled ? "checked" : ""}>
+            <span>Ralph enabled</span>
+          </label>
+          <label>
+            Condition
+            <input type="text" name="condition" value="${escAttr(ralph.condition || "")}" placeholder="Operator-owned Ralph condition">
+          </label>
+          <label>
+            Target Concurrency
+            <input type="number" name="targetConcurrency" min="1" step="1" value="${escAttr(String(target))}">
+          </label>
+          <label>
+            Condition Status
+            <select name="conditionStatus">
+              ${["unmet", "met", "waived"].map((value) => `<option value="${escAttr(value)}" ${conditionStatus === value ? "selected" : ""}>${esc(value)}</option>`).join("")}
+            </select>
+          </label>
+          <label class="ralph-check">
+            <input type="checkbox" name="countSupportLanes" ${ralph.count_support_lanes ? "checked" : ""}>
+            <span>Count support-only lanes</span>
+          </label>
+        </div>
+        <div class="ralph-actions">
+          <button class="btn tiny" type="submit">Save Ralph</button>
+          <button class="btn tiny ghost" type="button" data-ralph-disable="${escAttr(rig.name)}">Disable</button>
+        </div>
+      </form>
+    </div>
+  `;
 }
 
 function renderBlockers() {
@@ -890,6 +954,18 @@ async function loadRigs() {
   } catch {}
 }
 
+async function loadCockpitSnapshot() {
+  const response = await fetch("/api/cockpit");
+  const snapshot = await response.json();
+  if (!response.ok) {
+    throw new Error(snapshot.error || "Snapshot refresh failed");
+  }
+  appState.cockpit = snapshot;
+  appState.lastSnapshotAt = Date.now();
+  syncStreamTargets();
+  renderAll();
+}
+
 function populateRigSelects() {
   const options = appState.rigs.map((rig) => `<option value="${escAttr(rig.name)}">${esc(rig.name)}</option>`).join("");
   const placeholder = `<option value="">Select a rig...</option>`;
@@ -949,6 +1025,75 @@ async function handleDogSubmit(event) {
     refs.dogBtn.disabled = false;
     refs.dogBtn.textContent = "Dispatch Dog";
     populateRigSelects();
+  }
+}
+
+function setRalphFormPending(form, pending, submitLabel = "Save Ralph") {
+  form.querySelectorAll("input, select, button").forEach((control) => {
+    control.disabled = pending;
+  });
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) {
+    submit.textContent = pending ? "Saving..." : submitLabel;
+  }
+}
+
+async function handleRalphSubmit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const rig = form.dataset.ralphForm;
+  if (!rig) return;
+
+  const formData = new FormData(form);
+  const targetRaw = String(formData.get("targetConcurrency") || "").trim();
+  const targetConcurrency = Number.parseInt(targetRaw, 10);
+  const payload = {
+    enabled: formData.get("enabled") === "on",
+    condition: String(formData.get("condition") || "").trim(),
+    conditionStatus: String(formData.get("conditionStatus") || "unmet").trim(),
+    targetConcurrency: Number.isFinite(targetConcurrency) && targetConcurrency > 0 ? targetConcurrency : 1,
+    countSupportLanes: formData.get("countSupportLanes") === "on",
+  };
+
+  setRalphFormPending(form, true);
+  try {
+    const response = await fetch(`/api/ralph/${encodeURIComponent(rig)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Ralph update failed");
+    toast(`Ralph updated for ${rig}.`, "success");
+    await loadCockpitSnapshot();
+    await loadRigs();
+  } catch (error) {
+    toast(error.message, "error");
+    setRalphFormPending(form, false);
+  }
+}
+
+async function handleRalphDisable(event) {
+  const button = event.currentTarget;
+  const rig = button.dataset.ralphDisable;
+  const form = button.closest("[data-ralph-form]");
+  if (!rig || !form) return;
+  setRalphFormPending(form, true, "Save Ralph");
+
+  try {
+    const response = await fetch(`/api/ralph/${encodeURIComponent(rig)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Ralph disable failed");
+    toast(`Ralph disabled for ${rig}.`, "success");
+    await loadCockpitSnapshot();
+    await loadRigs();
+  } catch (error) {
+    toast(error.message, "error");
+    setRalphFormPending(form, false);
   }
 }
 

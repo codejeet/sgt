@@ -159,11 +159,27 @@ JSON
 
 sgt config ralph demo --enable --condition "1K PNL for 5m btc pipeline" --target 2 >/dev/null
 sgt plan tick demo >/dev/null 2>&1
+sgt status > "$SGT_ROOT/status-before.txt"
 sgt status --json > "$SGT_ROOT/status-before.json"
 
 BLOCKER_FILE="$SGT_ROOT/.sgt/plan-blockers/demo--__continuation__.env"
 [[ -f "$BLOCKER_FILE" ]] || {
   echo "expected Ralph continuation blocker to be recorded while live lanes stay below target" >&2
+  exit 1
+}
+
+grep -q 'ralph: state=underfilled target=2 active_lanes=1 admissible=1 backlog=0 support_excluded=1 duplicate_excluded=1 underfilled=1 condition_status=unmet' "$SGT_ROOT/status-before.txt" || {
+  echo "expected human status to show Ralph live state" >&2
+  exit 1
+}
+
+grep -q 'ralph condition: 1K PNL for 5m btc pipeline' "$SGT_ROOT/status-before.txt" || {
+  echo "expected human status to show Ralph condition text" >&2
+  exit 1
+}
+
+grep -q 'RIG_RALPH_MODE_SET rig=demo enabled=true condition_status=unmet target=2 count_support_lanes=false' "$SGT_ROOT/sgt.log" || {
+  echo "expected Ralph config changes to be written to the durable event log" >&2
   exit 1
 }
 
@@ -215,6 +231,11 @@ PY
 
 sgt config ralph demo --count-support yes >/dev/null
 sgt status --json > "$SGT_ROOT/status-after.json"
+
+grep -q 'RIG_RALPH_MODE_SET rig=demo enabled=true condition_status=unmet target=2 count_support_lanes=true' "$SGT_ROOT/sgt.log" || {
+  echo "expected Ralph support-lane changes to be written to the durable event log" >&2
+  exit 1
+}
 
 python3 - "$SGT_ROOT/status-after.json" <<'PY'
 import json

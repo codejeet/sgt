@@ -26,6 +26,8 @@ test('web docs cover deploy path, config, and latest-main proof entrypoint', () 
   assert.match(readme, /npm --prefix web ci && npm --prefix web test/);
   assert.match(readme, /president-operator-surface-contract\.md/);
   assert.match(readme, /President Activity/);
+  assert.match(readme, /Ralph controls per rig/);
+  assert.match(readme, /POST \| `\/api\/ralph\/:rig` \| Update Ralph mode config/);
   assert.match(readme, /human-dashboard-redesign-rules\.md/);
   assert.match(readme, /Code landing in a rig checkout does not update the served UI by itself/);
   assert.match(packageLock, /"name": "sgt-web"/);
