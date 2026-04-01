@@ -118,11 +118,41 @@ cat > "$TMP_ROOT/issues.json" <<'JSON'
 ]
 JSON
 
+cat > "$TMP_ROOT/issues-second.json" <<'JSON'
+[
+  {
+    "number": 21,
+    "title": "Primary active lane",
+    "labels": [
+      {"name": "sgt-authorized"},
+      {"name": "research"}
+    ]
+  },
+  {
+    "number": 22,
+    "title": "Queued backlog lane",
+    "labels": [
+      {"name": "sgt-authorized"},
+      {"name": "research"}
+    ]
+  },
+  {
+    "number": 23,
+    "title": "Support lane",
+    "labels": [
+      {"name": "sgt-authorized"},
+      {"name": "support-only"}
+    ]
+  }
+]
+JSON
+
 ENV_PREFIX=(
   env -i
   HOME="$HOME_DIR"
   PATH="$MOCK_BIN:$HOME_DIR/.local/bin:/usr/local/bin:/usr/bin:/bin"
   TERM=dumb
+  TMP_ROOT="$TMP_ROOT"
   SGT_ROOT="$HOME_DIR/sgt"
   SGT_TEST_ISSUES_JSON="$TMP_ROOT/issues.json"
   SGT_TEST_ACTIVE_SESSION="sgt-demo-worker"
@@ -213,6 +243,10 @@ assert ralph.get("admissible_lane_count") == 1, ralph
 assert ralph.get("support_lane_count") == 1, ralph
 assert ralph.get("duplicate_lane_count") == 1, ralph
 assert ralph.get("underfilled") is True, ralph
+assert ralph.get("active_issue_numbers") == ["11"], ralph
+assert ralph.get("backlog_issue_numbers") == [], ralph
+assert ralph.get("support_issue_numbers") == ["12"], ralph
+assert ralph.get("duplicate_issue_numbers") == ["13"], ralph
 
 completion = plan_state.get("completion") or {}
 assert completion.get("status") == "pending", completion
@@ -260,6 +294,81 @@ assert ralph.get("admissible_lane_count") == 2, ralph
 assert ralph.get("support_lane_count") == 0, ralph
 assert ralph.get("duplicate_lane_count") == 1, ralph
 assert ralph.get("backlog_lane_count") == 1, ralph
+assert ralph.get("active_issue_numbers") == ["11"], ralph
+assert ralph.get("backlog_issue_numbers") == ["12"], ralph
+assert ralph.get("support_issue_numbers") == [], ralph
+assert ralph.get("duplicate_issue_numbers") == ["13"], ralph
+PY
+
+export SGT_TEST_ISSUES_JSON="$TMP_ROOT/issues-second.json"
+cat > "$SGT_ROOT/.sgt/rigs/demo2" <<'STATE'
+https://github.com/acme/demo2
+STATE
+mkdir -p "$SGT_ROOT/rigs/demo2"
+cat > "$SGT_ROOT/.sgt/polecats/demo2-worker" <<'STATE'
+RIG=demo2
+REPO=https://github.com/acme/demo2
+ISSUE=21
+BRANCH=sgt/demo2-worker
+WORKTREE=/tmp/demo2-worker
+SESSION=sgt-demo-worker
+STATE
+
+cat > "$SGT_ROOT/rigs/demo2/SGT_PLAN.json" <<'JSON'
+{
+  "version": 1,
+  "rig": "demo2",
+  "policy": { "max_in_flight": 1 },
+  "completion_condition": "Fresh-state proof passes.",
+  "acceptance": {
+    "status": "waived",
+    "details": "Human waived the previous proof run.",
+    "waived_at": "2026-03-31T09:30:00Z"
+  },
+  "tasks": []
+}
+JSON
+
+sgt config ralph demo2 --enable --condition "Keep exploring live candidate lanes" --target 1 >/dev/null
+sgt plan tick demo2 >/dev/null 2>&1
+sgt status --json > "$SGT_ROOT/status-second.json"
+
+python3 - "$SGT_ROOT/status-second.json" "$SGT_ROOT/.sgt/plan-state/demo2.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    status = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    plan_state = json.load(fh)
+
+mayor_rigs = status.get("mayor_rigs") or []
+demo2 = next((item for item in mayor_rigs if item.get("rig") == "demo2"), None)
+assert demo2 is not None, mayor_rigs
+ralph = demo2.get("ralph") or {}
+assert ralph.get("state") == "active", ralph
+assert ralph.get("underfilled") is False, ralph
+assert ralph.get("target_concurrency") == 1, ralph
+assert ralph.get("active_lane_count") == 1, ralph
+assert ralph.get("admissible_lane_count") == 2, ralph
+assert ralph.get("backlog_lane_count") == 1, ralph
+assert ralph.get("support_lane_count") == 1, ralph
+assert ralph.get("active_issue_numbers") == ["21"], ralph
+assert ralph.get("backlog_issue_numbers") == ["22"], ralph
+assert ralph.get("support_issue_numbers") == ["23"], ralph
+assert ralph.get("completion_blocked_by_condition") is True, ralph
+
+completion = plan_state.get("completion") or {}
+assert completion.get("status") == "pending", completion
+assert completion.get("rollup") == "ralph-condition-unmet", completion
+assert completion.get("blocked_reason") == "ralph condition unmet: Keep exploring live candidate lanes", completion
+assert "Ralph mode remains active" in completion.get("details", ""), completion
+acceptance = completion.get("acceptance") or {}
+assert acceptance.get("status") == "pending", acceptance
+assert acceptance.get("details") == "Human waived the previous proof run.", acceptance
+assert acceptance.get("declared_status") == "waived", acceptance
+assert acceptance.get("declared_waived_at") == "2026-03-31T09:30:00Z", acceptance
+assert "waived_at" not in acceptance, acceptance
 PY
 BASH
 
