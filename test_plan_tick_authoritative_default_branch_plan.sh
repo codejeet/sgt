@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression: plan tick should reconcile against the authoritative default-branch plan when the rig checkout is dirty or off-branch.
+# Regression: plan tick should honor repo-local canonical plan truth even when the rig checkout is dirty or off-branch.
 
 set -euo pipefail
 
@@ -118,10 +118,10 @@ cat > "$TMP_HOME/remote-plan.json" <<'JSON'
 {
   "version": 1,
   "rig": "demo",
-  "completion_condition": "Close out acceptance from the merged default-branch plan.",
+  "completion_condition": "Old default-branch plan that should not override the repo-local checkout.",
   "acceptance": {
     "status": "verified",
-    "details": "The final acceptance PR merged on the default branch.",
+    "details": "This stale remote plan incorrectly looks done.",
     "verified_at": "2026-03-31T10:52:10Z"
   },
   "tasks": [
@@ -141,13 +141,13 @@ cat > "$HOME/sgt/rigs/demo/SGT_PLAN.json" <<'JSON'
 {
   "version": 1,
   "rig": "demo",
-  "completion_condition": "Local stale plan that should not win.",
+  "completion_condition": "Repo-local reopened plan that should stay authoritative.",
   "acceptance": {
-    "status": "planned",
-    "details": "This stale local checkout still thinks acceptance is unresolved."
+    "status": "pending",
+    "details": "Keep dispatching work from the repo-local reopened plan."
   },
   "tasks": [
-    { "id": "ACC1", "title": "Resolve acceptance", "depends_on": [] }
+    { "id": "ACC2", "title": "Reopen continuation lane", "depends_on": [] }
   ]
 }
 JSON
@@ -163,14 +163,12 @@ cat > "$HOME/sgt/.sgt/plan-state/demo.json" <<'JSON'
     }
   },
   "completion": {
-    "status": "pending",
-    "rollup": "tasks-exhausted-awaiting-acceptance",
-    "details": "Stale pending completion carried over from the dirty local plan."
+    "status": "verified",
+    "rollup": "acceptance-verified",
+    "details": "Stale verified completion carried over from an old plan snapshot."
   }
 }
 JSON
-
-printf 'STATE=%q\n' 'CLOSED' > "$HOME/state/issues/1018.env"
 
 sgt plan tick demo > "$HOME/plan-tick.out" 2>&1
 BASH
@@ -181,6 +179,7 @@ CACHE_PLAN="$TMP_HOME/sgt/.sgt/plan-cache/demo.json"
 
 python3 - "$STATE_FILE" "$LOCAL_PLAN" "$CACHE_PLAN" <<'PY'
 import json
+import os
 import sys
 
 state_file, local_plan_file, cache_plan_file = sys.argv[1:4]
@@ -189,22 +188,21 @@ with open(state_file, "r", encoding="utf-8") as fh:
     state = json.load(fh)
 with open(local_plan_file, "r", encoding="utf-8") as fh:
     local_plan = json.load(fh)
-with open(cache_plan_file, "r", encoding="utf-8") as fh:
-    cache_plan = json.load(fh)
 
 completion = state["completion"]
-assert completion["status"] == "verified", completion
-assert completion["rollup"] == "acceptance-verified", completion
-assert completion["details"] == "The final acceptance PR merged on the default branch.", completion
-assert completion["acceptance"]["status"] == "verified", completion
+assert completion["status"] == "pending", completion
+assert completion["rollup"] == "tasks-in-progress", completion
+assert completion["details"] == "Keep dispatching work from the repo-local reopened plan.", completion
+assert completion["acceptance"]["status"] == "pending", completion
 assert state["plan_file"].endswith("/sgt/rigs/demo/SGT_PLAN.json"), state["plan_file"]
-
-assert local_plan["acceptance"]["status"] == "planned", local_plan
-assert cache_plan["acceptance"]["status"] == "verified", cache_plan
+assert sorted(state["tasks"].keys()) == ["ACC2"], state["tasks"]
+assert state["tasks"]["ACC2"]["status"] == "pending", state["tasks"]["ACC2"]
+assert local_plan["acceptance"]["status"] == "pending", local_plan
+assert not os.path.exists(cache_plan_file), cache_plan_file
 PY
 
-grep -q 'completion=acceptance-verified status=verified' "$TMP_HOME/plan-tick.out" || {
-  echo "expected plan tick summary to report verified acceptance from the authoritative default-branch plan" >&2
+grep -q 'completion=tasks-in-progress status=pending' "$TMP_HOME/plan-tick.out" || {
+  echo "expected plan tick summary to report pending completion from the repo-local reopened plan" >&2
   cat "$TMP_HOME/plan-tick.out" >&2
   exit 1
 }
