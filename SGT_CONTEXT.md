@@ -1292,3 +1292,61 @@ Please create and execute a real repo-local SGT plan for:
 - 2026-04-01T07:06:36+02:00 — Plan tick now records a durable __continuation__ plan blocker when acceptance is still pending but live lanes fall below policy.max_in_flight; Mayor stranded-rig recovery refills replacement work up to target concurrency, and President treats pending-plan underfill as a stalled-purpose intervention reason instead of idling the rig.
 - 2026-04-01T07:07:27+02:00 — 2026-04-01 issue #338: mayor sling revalidation now fails open only for flaky live GraphQL count reads, redispatch tolerates UNKNOWN/failed source-PR mergeability revalidation, refinery treats merge-in-progress/already-being-merged as in-flight without scary failure noise, and plan tick now binds/reopens lanes from explicit open plan-<task> issue labels before recreating work.
 - 2026-04-01T07:14:22+02:00 — 2026-04-01: plan tick now records a durable __continuation__ plan blocker when acceptance is still pending but tasks are exhausted and live polecats are below policy.max_in_flight; mayor activity snapshot and President treat that pending-plan underfill as active stalled-purpose state so rigs do not idle-green while continuation intent remains open.
+- 2026-04-01T07:25:23+02:00 — 2026-04-01 issue #349: President Ralph supervision now distinguishes bounded refill from contradiction. If Ralph is underfilled but admissible backlog exists, President uses a wake (reason=ralph-underfilled) to refill. If Ralph is still unmet but the rig looks fake-complete or has no refillable backlog toward target concurrency, President upgrades to refresh with reason=ralph-contradiction so operators can see that the rig needs stronger intervention instead of silently drifting.
+- 2026-04-01T07:26:01+02:00 — 2026-04-01 issue #350: plan tick now treats an unmet Ralph target_concurrency as continuation underfill when recording the durable __continuation__ blocker, and Mayor stranded-rig recovery refills underfilled Ralph/pending-plan rigs up to the live polecat gap instead of only recovering zero-worker rigs one lane at a time.
+- 2026-04-01T07:26:09+02:00 — 2026-04-01 issue #348: plan-state reconciliation now treats explicit repo-local task.status values like planned/pending as authoritative reopen signals, clearing stale completed issue linkage so continuation lanes can refill; mayor refresh also infers live President/per-rig topology from running president or scoped mayor sessions so 'sgt mayor refresh <rig>' stays per-rig even when the caller shell lacks SGT_MAYOR_ARCHITECTURE=per-rig.
+- 2026-04-01T07:38:10+02:00 — 2026-04-01 issue #354: mayor loop wake-summary notifications now use the same fail-open helper as 'sgt mayor notify', so OpenClaw transport/current-session channel failures still persist MAYOR_NOTIFY_FAIL_OPEN warning state but no longer exit per-rig mayors under set -e or block stranded-rig refill progress.
+- 2026-04-01T07:45:57+02:00 — 2026-04-01: President rig-local supervision must skip hibernated rigs entirely; otherwise actionable-no-forward-motion can trigger manual-refresh|rig=<rig> and restart a per-rig mayor despite manual-stop/hibernation. Regression coverage lives in test_president_runtime_supervision.sh.
+- 2026-04-01T07:47:03+02:00 — Acceptance blocker sgt-acceptance-1775022423-817268fb reported by witness: Replacement work required after stalled polecat for issue #357
+
+### Acceptance Blocker sgt-acceptance-1775022423-817268fb
+
+- Reported at: 2026-04-01T07:47:03+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #357
+
+```markdown
+Replacement work required after stalled polecat for issue #357
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #357
+- Issue URL: https://github.com/codejeet/sgt/issues/357
+- Issue title: unknown
+- Polecat: sgt-bb313303
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T07:50:48+02:00 — 2026-04-01 issue #356: plan tick now records duplicate-closeout lineage per task in plan-state, fences immediate redispatch of the same task signature after a duplicate-closing PR, clears the stale closed issue binding when the task materially changes, and only allows refill to resume once an explicit open successor exists or the task payload changes.
+- 2026-04-01T07:51:44+02:00 — Acceptance blocker sgt-acceptance-1775022704-d829bc00 reported by witness: Replacement work required after stalled polecat for issue #356
+
+### Acceptance Blocker sgt-acceptance-1775022704-d829bc00
+
+- Reported at: 2026-04-01T07:51:44+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #356
+
+```markdown
+Replacement work required after stalled polecat for issue #356
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #356
+- Issue URL: https://github.com/codejeet/sgt/issues/356
+- Issue title: unknown
+- Polecat: sgt-28f69197
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
