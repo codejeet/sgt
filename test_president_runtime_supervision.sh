@@ -43,6 +43,8 @@ eval "$(extract_fn _president_operator_overlap_key)"
 eval "$(extract_fn _president_operator_log_event)"
 eval "$(extract_fn _plan_state_path)"
 eval "$(extract_fn _plan_pending_underfill_target)"
+eval "$(extract_fn _mayor_rig_activity_enabled)"
+eval "$(extract_fn _mayor_rig_hibernated)"
 eval "$(extract_fn _deacon_supervise_president)"
 eval "$(extract_fn _president_supervise_rig_mayor)"
 
@@ -291,6 +293,31 @@ if ! grep -q 'PRESIDENT_OPERATOR_EVENT rig=demo kind=intervention severity=info 
 fi
 if [[ "$(wc -l < "$EVENT_STATE")" -lt 3 ]]; then
   echo "expected president operator event history to retain intervened and suppressed entries" >&2
+  exit 1
+fi
+
+_mayor_rig_activity_state_read() {
+  printf 'hibernated|quiet window|2026-03-31T00:00:00Z|1774915200|manual|2026-03-31T00:00:00Z|1774915200|manual-stop|2026-03-31T00:00:00Z|manual\n'
+}
+
+refresh_count_before_hibernated="$(grep -c '^demo$' "$REFRESH_LOG" || true)"
+wake_count_before_hibernated="$(grep -c '^president:demo:' "$WAKE_LOG" || true)"
+event_count_before_hibernated="$(wc -l < "$EVENT_LOG")"
+
+if _president_supervise_rig_mayor demo periodic > "$TMP_ROOT/president-hibernated.out"; then
+  echo "expected hibernated rig supervision to skip intervention" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^demo$' "$REFRESH_LOG" || true)" -ne "$refresh_count_before_hibernated" ]]; then
+  echo "expected president not to refresh a hibernated rig-local mayor" >&2
+  exit 1
+fi
+if [[ "$(grep -c '^president:demo:' "$WAKE_LOG" || true)" -ne "$wake_count_before_hibernated" ]]; then
+  echo "expected president not to wake a hibernated rig-local mayor" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$EVENT_LOG")" -ne "$event_count_before_hibernated" ]]; then
+  echo "expected hibernated rig supervision to avoid new intervention events" >&2
   exit 1
 fi
 BASH

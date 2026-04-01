@@ -12418,6 +12418,10 @@ _president_supervise_rig_mayor() {
   [[ -n "$rig" ]] || return 1
   now_epoch="$(date +%s)"
   _mayor_scope_apply "$rig"
+  if _mayor_rig_hibernated "$rig"; then
+    _mayor_scope_apply ""
+    return 1
+  fi
   mayor_session="off"
   tmux has-session -t "$(_mayor_scope_session_name "$rig")" 2>/dev/null && mayor_session="on"
   mayor_hb_stale="$(_mayor_heartbeat_stale_secs)"
