@@ -248,15 +248,41 @@ Example:
 - Issue `#102` labeled `support-only` does not count unless support lanes are enabled.
 - Issue `#103` labeled `duplicate` never counts.
 
+### Realistic rig example
+
+PMKB is the motivating shape for Ralph mode: the rig should stay active until widened-corpus trading evidence reaches the operator-owned threshold, even if individual candidate lanes go no-go or stale acceptance metadata says the last proof run was green.
+
+Example operator intent:
+
+```bash
+sgt config ralph pmkb \
+  --enable \
+  --condition "Sustain net +1000 USDC on widened corpus with >=3 materially different live candidate lanes" \
+  --target 3
+```
+
+Example board state:
+- Issue `#701` is a live BTC 5m candidate lane with an active polecat.
+- Issue `#702` is a live ETH 15m candidate lane with an active polecat.
+- Issue `#703` is an open SOL follow-up lane with no live polecat yet.
+- Issue `#704` is labeled `support-only` and does not count by default.
+- Issue `#705` is labeled `duplicate` and never counts.
+
+Expected Ralph result:
+- `active_lane_count=2`, `admissible_lane_count=3`, and `backlog_lane_count=1`, so Ralph stays `underfilled`.
+- Plan completion stays pending with a Ralph-specific rollup even if `SGT_PLAN.json` still says acceptance was previously `verified`.
+- President can treat this as a bounded refill case because there is still admissible backlog toward the target.
+
 ### Ralph latest-main proof path
 
-Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that Ralph mode configuration, state exposure, concurrency accounting, and bounded refill behavior still work end to end:
+Run this on a fresh checkout of the latest `master`/mainline commit when you want repo-owned proof that Ralph mode configuration, a realistic PMKB-style rig example, state exposure, concurrency accounting, and bounded refill behavior still work end to end:
 
 ```bash
 ./test_ralph_mode_latest_main_proof.sh
 ```
 
 That proof path bundles the checks that matter for Ralph mode:
+- `test_ralph_mode_realistic_rig_example.sh` proves the README's PMKB-style example stays underfilled, blocks false completion, and exposes the expected lane accounting on a latest-main checkout.
 - `test_ralph_mode_config_and_state.sh` proves per-rig Ralph config, normalized state output, anti-false-completion semantics, and admissible/support/duplicate lane accounting.
 - `test_president_runtime_supervision.sh` proves President distinguishes Ralph underfill, idle, and contradiction states and picks the expected bounded intervention.
 - `test_mayor_stranded_zero_worker_recovery.sh` proves controller-side refill logic can top an actionable rig back up toward target live concurrency instead of leaving it quietly idle.

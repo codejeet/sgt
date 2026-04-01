@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+bash "$REPO_ROOT/test_ralph_mode_realistic_rig_example.sh"
 bash "$REPO_ROOT/test_ralph_mode_config_and_state.sh"
 bash "$REPO_ROOT/test_president_runtime_supervision.sh"
 bash "$REPO_ROOT/test_mayor_stranded_zero_worker_recovery.sh"
