@@ -1670,3 +1670,67 @@ Required follow-up:
 
 ```
 - 2026-04-01T13:28:48+02:00 — 2026-04-01 issue #392: regression coverage now pins Ralph lane issue-number accounting, the non-underfilled anti-false-completion override (declared acceptance waived/verified still forced back to pending while condition is unmet), and President's ralph-idle branch as refresh-not-wake distinct from ralph-underfilled refill wakes.
+- 2026-04-01T13:34:17+02:00 — 2026-04-01 issue #394: README now includes a realistic PMKB-style Ralph-mode walkthrough (target=3, active=2, backlog=1, support-only excluded, duplicate excluded) and test_ralph_mode_latest_main_proof.sh now runs test_ralph_mode_realistic_rig_example.sh so latest-main proof covers documented operator-plausible Ralph behavior, anti-false-completion, and refillable underfill state.
+- 2026-04-01T13:42:59+02:00 — Acceptance blocker sgt-acceptance-1775041349-4cbdb7d1 resolved.
+- 2026-04-01T13:42:59+02:00 — Acceptance blocker sgt-acceptance-1775039964-1c53354b resolved.
+- 2026-04-01T13:48:51+02:00 — 2026-04-01 issue #359: President hibernation regression coverage must exercise the missing-session path too; the earlier runtime test proved no refresh/wake on hibernated rigs but did not explicitly prove that a hibernated rig with mayor/<rig> already absent still skips President start/restart intervention.
+- 2026-04-01T13:49:34+02:00 — 2026-04-01 issue #379: _plan_state_snapshot must preserve the live Ralph pending override from plan-state when completion is in a ralph-* rollup or Ralph still blocks completion; otherwise status/plan resync can rehydrate stale blocked or verified acceptance from SGT_PLAN.json. _plan_state_update_completion now also preserves existing completion.acceptance.declared_* forensic fields across repeated pending rewrites. Regression coverage in test_ralph_mode_config_and_state.sh exercises stale blocked metadata across status snapshot plus retick.
+- 2026-04-01T13:50:19+02:00 — Acceptance blocker sgt-acceptance-1775044219-ceb68ca5 reported by witness: Replacement work required after stalled polecat for issue #379
+
+### Acceptance Blocker sgt-acceptance-1775044219-ceb68ca5
+
+- Reported at: 2026-04-01T13:50:19+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #379
+
+```markdown
+Replacement work required after stalled polecat for issue #379
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #379
+- Issue URL: https://github.com/codejeet/sgt/issues/379
+- Issue title: unknown
+- Polecat: sgt-d2f4f4a3
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T13:50:32+02:00 — Acceptance blocker sgt-acceptance-1775044232-db30880b reported by witness: Replacement work required after stalled polecat for issue #359
+
+### Acceptance Blocker sgt-acceptance-1775044232-db30880b
+
+- Reported at: 2026-04-01T13:50:32+02:00
+- Reported by: witness
+- Title: Replacement work required after stalled polecat for issue #359
+
+```markdown
+Replacement work required after stalled polecat for issue #359
+
+Stalled polecat recovery did not produce replacement work.
+
+- Rig: sgt
+- Repo: codejeet/sgt
+- Issue: #359
+- Issue URL: https://github.com/codejeet/sgt/issues/359
+- Issue title: unknown
+- Polecat: sgt-e083b7bf
+- Failure reason: witness-stalled-issue-title-unavailable
+
+Required follow-up:
+- create replacement work (new PR or re-dispatched polecat) before closing the incident
+- re-investigate why the worker exited without producing a PR
+
+```
+- 2026-04-01T13:56:24+02:00 — Acceptance blocker sgt-acceptance-1775044219-ceb68ca5 resolved.
+- 2026-04-01T13:56:24+02:00 — Acceptance blocker sgt-acceptance-1775044232-db30880b resolved.
+- 2026-04-01T14:01:46+02:00 — 2026-04-01 issue #379: _plan_state_snapshot must preserve the live Ralph pending override from plan-state when completion is in a ralph-* rollup or Ralph still blocks completion; otherwise status/plan resync can rehydrate stale blocked or verified acceptance from SGT_PLAN.json. _plan_state_update_completion now also preserves existing completion.acceptance.declared_* forensic fields across repeated pending rewrites. Regression coverage in test_ralph_mode_config_and_state.sh exercises stale blocked metadata across status snapshot plus retick.
+- 2026-04-01T14:01:49+02:00 — 2026-04-01 issue #359: President hibernation-guard regression now covers the missing-session path — when a hibernated rig has no mayor tmux session, President skips start/restart/refresh/wake intervention. PR #399.
+
+## 2026-04-02
+- 2026-04-02T05:26:50+02:00 — 2026-04-02 live Ralph/PMKB repro: repeated PMKB recovery is no longer just false-exhaustion. Direct refill/materialization is creating successor issues, but the newly attached polecats die within minutes with dead-session-missing-worktree, which drops active_polecats back below target and sends President/Mayor into the same pending-plan-underfilled refresh/wake loop. Concrete live sequence from trail: RESLING #1304 at 04:52:50, #1305 at 04:53:04, #1306 at 04:53:16; all three reached active-output, then #1306 auto-pruned dead-session-missing-worktree at 04:56:44, #1304 at 04:57:34, #1305 at 04:59:59; plan tick still reports tasks-exhausted-awaiting-acceptance while acceptance remains pending and continuation intent open.

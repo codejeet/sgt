@@ -18,6 +18,7 @@ extract_fn() {
 }
 
 eval "$(extract_fn _witness_record_stalled_followup)"
+eval "$(extract_fn _polecat_issue_title)"
 eval "$(extract_fn _polecat_output_log_path)"
 eval "$(extract_fn _witness_dead_polecat_backend_limit)"
 eval "$(extract_fn _witness_pr_meta)"
@@ -99,6 +100,7 @@ _pr_head_sha() { echo "deadbeef"; }
 _merge_queue_enqueue_polecat() { return 1; }
 _ai_backend_default() { echo "codex"; }
 _resling_existing_issue() { return 1; }
+_plan_task_issue_matches_current_plan() { return 0; }
 
 tmux() {
   if [[ "${1:-}" == "has-session" ]]; then
@@ -157,12 +159,14 @@ run_witness_once() {
 make_polecat() {
   local name="$1"
   local branch="$2"
+  local issue_title="${3:-}"
   local worktree="$TMP_ROOT/worktrees/$name"
   mkdir -p "$worktree"
   cat > "$SGT_POLECATS/$name" <<STATE
 SESSION=sgt-$name
 BRANCH=$branch
 ISSUE=177
+ISSUE_TITLE=$(printf '%q' "$issue_title")
 WORKTREE=$worktree
 CREATED=2026-03-10T00:00:00Z
 REPO=https://github.com/acme/demo
@@ -201,6 +205,44 @@ fi
 if ! grep -q 'Do not close this incident without replacement work item/PR' "$GH_COMMENT_FILE"; then
   echo "expected issue comment to block silent closure without replacement work" >&2
   cat "$GH_COMMENT_FILE" >&2
+  exit 1
+fi
+
+echo "=== witness reuses cached issue title when GitHub reload fails ==="
+gh() {
+  local args=" $* "
+  if [[ "$args" == *" pr list "* ]]; then
+    echo ""
+    return 0
+  fi
+  if [[ "$args" == *" issue comment "* ]]; then
+    printf '%s\n' "$args" >> "$GH_COMMENT_FILE"
+    return 0
+  fi
+  if [[ "$args" == *" issue view "* ]]; then
+    return 1
+  fi
+  echo "mock gh unsupported: $*" >&2
+  return 1
+}
+_RESLING_LAST_FAILURE_REASON_CODE=""
+_RESLING_LAST_FAILURE_DETAIL=""
+_resling_existing_issue() {
+  printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" > "$TMP_ROOT/resling-call"
+  return 0
+}
+
+make_polecat "rig-one-cached" "sgt/rig-one-cached" "Cached title"
+echo "0" > "$TMUX_ACTIVE_FILE"
+run_witness_once
+
+if [[ ! -f "$TMP_ROOT/resling-call" ]]; then
+  echo "expected stalled worker to re-sling using cached issue title" >&2
+  exit 1
+fi
+if ! grep -q '^rig-one|177|Cached title|https://github.com/acme/demo$' "$TMP_ROOT/resling-call"; then
+  echo "expected cached issue title to be reused for re-sling" >&2
+  cat "$TMP_ROOT/resling-call" >&2
   exit 1
 fi
 
