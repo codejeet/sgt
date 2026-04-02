@@ -2984,6 +2984,58 @@ _cleanup_failed_polecat_dispatch() {
   fi
 }
 
+_polecat_issue_title() {
+  local cached_title="${1:-}" repo="${2:-}" issue="${3:-}"
+  local live_title=""
+  if [[ -n "$cached_title" ]]; then
+    printf '%s\n' "$cached_title"
+    return 0
+  fi
+  [[ -n "$repo" && "$issue" =~ ^[0-9]+$ && "$issue" != "0" ]] || return 1
+  live_title="$(gh issue view "$issue" --repo "$repo" --json title --jq '.title // ""' 2>/dev/null || true)"
+  [[ -n "$live_title" ]] || return 1
+  printf '%s\n' "$live_title"
+}
+
+_record_refill_attach_blocker() {
+  local rig="${1:-}" repo="${2:-}" issue_number="${3:-}" issue_title="${4:-}" source_event="${5:-unknown}" reason_code="${6:-dispatch-failed}" detail="${7:-dispatch failed}"
+  local requester title evidence blocker_id owner_repo issue_url comment_body
+
+  [[ -n "$rig" && -n "$repo" && "$issue_number" =~ ^[0-9]+$ && "$issue_number" != "0" ]] || return 1
+
+  requester="witness"
+  owner_repo="$(_repo_owner_repo "$repo")"
+  issue_url="$(_repo_issue_url "$repo" "$issue_number")"
+  title="Refill could not attach replacement polecat for issue #$issue_number"
+  printf -v evidence '%s\n\nSGT could not attach a replacement polecat during refill/recovery.\n\n- Rig: %s\n- Repo: %s\n- Issue: #%s\n- Issue URL: %s\n- Issue title: %s\n- Source event: %s\n- Failure reason: %s\n- Detail: %s\n\nRequired follow-up:\n- investigate the spawn/worktree failure before repeating wake/refresh churn\n- do not treat the rig as healthy until a replacement polecat attaches successfully\n' \
+    "$title" \
+    "$rig" \
+    "${owner_repo:-$repo}" \
+    "$issue_number" \
+    "${issue_url:-unknown}" \
+    "${issue_title:-unknown}" \
+    "${source_event:-unknown}" \
+    "${reason_code:-unknown}" \
+    "${detail:-unknown}"
+
+  blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
+  if [[ -n "$blocker_id" ]]; then
+    _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence" || true
+    if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+      _context_index_build "$rig" >/dev/null 2>&1 || true
+    fi
+    _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
+    log_event "REFILL_ATTACH_BLOCKER rig=$rig issue=#$issue_number blocker_id=$blocker_id source_event=$source_event reason_code=$reason_code detail=\"$(_escape_quotes "${detail:-unknown}")\""
+    comment_body="[sgt] Refill could not attach a replacement polecat for issue #$issue_number. Recorded acceptance blocker \`$blocker_id\` with reason \`$reason_code\`: ${detail:-unknown}"
+  else
+    _wake_mayor "refill-attach-failed:${rig}:#${issue_number}"
+    log_event "REFILL_ATTACH_BLOCKER rig=$rig issue=#$issue_number blocker_id=unavailable source_event=$source_event reason_code=$reason_code detail=\"$(_escape_quotes "${detail:-unknown}")\""
+    comment_body="[sgt] Refill could not attach a replacement polecat for issue #$issue_number. Mayor has been notified. Reason \`$reason_code\`: ${detail:-unknown}"
+  fi
+  gh issue comment "$issue_number" --repo "$repo" --body "$comment_body" 2>/dev/null || true
+  return 0
+}
+
 _mayor_cleanup_stale_polecat() {
   local pfile="${1:-}" pname="${2:-}" rig="${3:-}" repo="${4:-}" issue="${5:-}" branch="${6:-}" session="${7:-}" worktree="${8:-}" reason_code="${9:-}" issue_state="${10:-}" pr_number="${11:-}" pr_state="${12:-}"
   local owner_repo key key_id fence_dir cleanup_marker decision_marker action
@@ -9163,8 +9215,15 @@ cmd_sling() {
 
   local worktree="$SGT_ROOT/polecats/$pname"
   mkdir -p "$SGT_ROOT/polecats"
-  git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
-    || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
+  local worktree_error=""
+  if ! worktree_error="$(
+    git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>&1 \
+      || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch" 2>&1
+  )"; then
+    _cleanup_failed_polecat_dispatch "$SGT_POLECATS/$pname" "$pname" "$rig" "$branch" "$session_name" "$worktree"
+    log_event "SLING_SPAWN_FAILED polecat=$pname rig=$rig issue=#$issue_number branch=$branch reason_code=worktree-attach-failed detail=\"$(_escape_quotes "${worktree_error:-git worktree add returned non-zero exit status}")\""
+    die "failed to attach worktree for polecat '$pname': ${worktree_error:-git worktree add returned non-zero exit status}"
+  fi
 
   _ensure_context_file "$rig" >/dev/null
   if [[ -f "$rpath/CLAUDE.md" ]]; then
@@ -9181,6 +9240,7 @@ RIG=$rig
 REPO=$repo
 ISSUE=$issue_number
 ISSUE_URL=$issue_url
+ISSUE_TITLE=$(printf '%q' "$task")
 BRANCH=$branch
 WORKTREE=$worktree
 OUTPUT_LOG=$worktree/.sgt-agent-output.log
@@ -10569,8 +10629,8 @@ _mayor_recover_stranded_actionable_rig() {
     resling_output="$(cat "$resling_log" 2>/dev/null || true)"
     rm -f "$resling_log"
 
-    blocked_reason_code="dispatch-failed"
-    blocked_detail="$(_one_line "${resling_output:-dispatch failed}")"
+    blocked_reason_code="${_RESLING_LAST_FAILURE_REASON_CODE:-dispatch-failed}"
+    blocked_detail="$(_one_line "${_RESLING_LAST_FAILURE_DETAIL:-${resling_output:-dispatch failed}}")"
     if [[ "$blocked_detail" == *"dispatch-instant gate"* ]]; then
       blocked_reason_code="final-gate"
     elif [[ "$blocked_detail" == *"stale event"* ]]; then
@@ -10586,6 +10646,9 @@ _mayor_recover_stranded_actionable_rig() {
     _MAYOR_STRANDED_RECOVERY_DETAILS+="${issue_number}|${blocked_reason_code}|${blocked_detail}"$'\n'
     echo "[mayor] stranded rig $rig could not recover issue #$issue_number ($blocked_reason_code)"
     log_event "MAYOR_STRANDED_RIG_RECOVERY_BLOCKED issue=#$issue_number rig=$rig repo=$(_repo_owner_repo "$repo") reason_code=$blocked_reason_code detail=\"$(_escape_quotes "$blocked_detail")\" source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
+    if [[ "$blocked_reason_code" == "worktree-attach-failed" || "$blocked_reason_code" == "tmux-new-session-failed" || "$blocked_reason_code" == "command-too-long" ]]; then
+      _record_refill_attach_blocker "$rig" "$repo" "$issue_number" "$issue_title" "$source_event" "$blocked_reason_code" "$blocked_detail" || true
+    fi
   done <<< "$issue_rows"
 }
 
@@ -11041,12 +11104,13 @@ _witness_loop() {
       pname="$(basename "$f")"
 
       # Source in subshell to avoid polluting
-      local p_session p_branch p_issue p_worktree p_created p_repo p_auto_merge p_output_log
+      local p_session p_branch p_issue p_issue_title p_worktree p_created p_repo p_auto_merge p_output_log
       local p_runtime_classification p_runtime_reason_code p_runtime_summary p_runtime_output_age p_runtime_busy_pid p_runtime_busy_comm
-      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND|OUTPUT_LOG|RUNTIME_CLASSIFICATION|RUNTIME_REASON_CODE|RUNTIME_SUMMARY|RUNTIME_OUTPUT_AGE_SECS|RUNTIME_BUSY_PID|RUNTIME_BUSY_COMM)=' "$f")"
+      eval "$(grep -E '^(SESSION|BRANCH|ISSUE|ISSUE_TITLE|WORKTREE|CREATED|REPO|AUTO_MERGE|BACKEND|OUTPUT_LOG|RUNTIME_CLASSIFICATION|RUNTIME_REASON_CODE|RUNTIME_SUMMARY|RUNTIME_OUTPUT_AGE_SECS|RUNTIME_BUSY_PID|RUNTIME_BUSY_COMM)=' "$f")"
       p_session="$SESSION"
       p_branch="$BRANCH"
       p_issue="$ISSUE"
+      p_issue_title="${ISSUE_TITLE:-}"
       p_worktree="$WORKTREE"
       p_created="$CREATED"
       p_repo="$REPO"
@@ -11134,7 +11198,7 @@ _witness_loop() {
             rm -f "$f"
 
             local issue_title
-            issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+            issue_title="$(_polecat_issue_title "$p_issue_title" "$p_repo" "$p_issue" || true)"
             if [[ -n "$issue_title" ]]; then
               if _mayor_rig_manually_hibernated "$rig"; then
                 echo "[witness/$rig] rig manually hibernated — leaving stalled issue #$p_issue parked"
@@ -11150,6 +11214,9 @@ _witness_loop() {
               log_event "WITNESS_RESLING $pname issue=#$p_issue reason_code=$runtime_reason"
               if ! _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled" "witness-stalled:$pname:#$p_issue"; then
                 echo "[witness/$rig] re-sling failed for issue #$p_issue — recording durable follow-up"
+                if [[ "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "worktree-attach-failed" || "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "tmux-new-session-failed" || "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "command-too-long" ]]; then
+                  _record_refill_attach_blocker "$rig" "$p_repo" "$p_issue" "$issue_title" "witness-stalled" "${_RESLING_LAST_FAILURE_REASON_CODE:-dispatch-failed}" "${_RESLING_LAST_FAILURE_DETAIL:-dispatch failed}"
+                fi
                 _witness_record_stalled_followup "$rig" "$p_repo" "$p_issue" "$issue_title" "$pname" "witness-stalled-resling-failed"
               fi
             else
@@ -11215,7 +11282,7 @@ _witness_loop() {
             rm -f "$f"
 
             local issue_title
-            issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+            issue_title="$(_polecat_issue_title "$p_issue_title" "$p_repo" "$p_issue" || true)"
             _witness_record_backend_limit_followup "$rig" "$p_repo" "$p_issue" "$issue_title" "$pname" "${backend_limit_name:-${BACKEND:-unknown}}" "$backend_limit_reason" "$backend_limit_match"
             continue
           fi
@@ -11240,7 +11307,7 @@ _witness_loop() {
 
           # Re-sling: get the issue title and re-dispatch
           local issue_title
-          issue_title=$(gh issue view "$p_issue" --repo "$p_repo" --json title --jq '.title' 2>/dev/null || true)
+          issue_title="$(_polecat_issue_title "$p_issue_title" "$p_repo" "$p_issue" || true)"
           if [[ -n "$issue_title" ]]; then
             if _mayor_rig_manually_hibernated "$rig"; then
               echo "[witness/$rig] rig manually hibernated — leaving stalled issue #$p_issue parked"
@@ -11258,6 +11325,9 @@ _witness_loop() {
             # Re-sling with a new polecat (reuse existing issue — don't create a new one)
             if ! _resling_existing_issue "$rig" "$p_issue" "$issue_title" "$p_repo" "$(_ai_backend_default)" "" "witness-stalled" "witness-stalled:$pname:#$p_issue"; then
               echo "[witness/$rig] re-sling failed for issue #$p_issue — recording durable follow-up"
+              if [[ "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "worktree-attach-failed" || "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "tmux-new-session-failed" || "${_RESLING_LAST_FAILURE_REASON_CODE:-}" == "command-too-long" ]]; then
+                _record_refill_attach_blocker "$rig" "$p_repo" "$p_issue" "$issue_title" "witness-stalled" "${_RESLING_LAST_FAILURE_REASON_CODE:-dispatch-failed}" "${_RESLING_LAST_FAILURE_DETAIL:-dispatch failed}"
+              fi
               _witness_record_stalled_followup "$rig" "$p_repo" "$p_issue" "$issue_title" "$pname" "witness-stalled-resling-failed"
             fi
           else
@@ -11351,9 +11421,13 @@ _resling_existing_issue() {
   local source_event="${7:-unknown}"
   local source_event_key="${8:-$source_event}"
   local canonical_repo resolve_meta resolve_code resolve_reason
+  _RESLING_LAST_FAILURE_REASON_CODE=""
+  _RESLING_LAST_FAILURE_DETAIL=""
   source_event_key="$(_wake_trigger_key "$source_event_key")"
   [[ -n "$source_event_key" ]] || source_event_key="${source_event:-unknown}"
   if _mayor_rig_manually_hibernated "$rig"; then
+    _RESLING_LAST_FAILURE_REASON_CODE="manual-hibernation"
+    _RESLING_LAST_FAILURE_DETAIL="rig $rig is manually hibernated"
     echo "[resling] rig $rig is manually hibernated — skipping issue #$issue_number"
     log_event "RESLING_SKIP_HIBERNATED issue=#$issue_number rig=$rig mode=manual source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\""
     return 1
@@ -11362,6 +11436,8 @@ _resling_existing_issue() {
   if ! canonical_repo="$(_resolve_rig_repo_canonical "resling-dispatch" "$rig" "$repo" "1")"; then
     resolve_meta="$(_rig_repo_resolve_error_unpack "$canonical_repo")"
     IFS='|' read -r resolve_code resolve_reason <<< "$resolve_meta"
+    _RESLING_LAST_FAILURE_REASON_CODE="${resolve_code:-repo-resolve-failed}"
+    _RESLING_LAST_FAILURE_DETAIL="${resolve_reason:-unable to resolve rig repo}"
     echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: ${resolve_reason:-unable to resolve rig repo}"
     log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "${resolve_reason:-unable to resolve rig repo}")\""
     return 1
@@ -11370,6 +11446,8 @@ _resling_existing_issue() {
 
   local stale_reason=""
   if ! stale_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue_number" "$source_pr"); then
+    _RESLING_LAST_FAILURE_REASON_CODE="stale-event"
+    _RESLING_LAST_FAILURE_DETAIL="$stale_reason"
     echo "[resling] stale event ($source_event) for issue #$issue_number — skipping: $stale_reason"
     log_event "RESLING_SKIP_STALE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$stale_reason")\""
     return 1
@@ -11377,11 +11455,15 @@ _resling_existing_issue() {
 
   # Security gate: verify issue has sgt-authorized label
   if ! _has_sgt_authorized "$repo" "$issue_number"; then
+    _RESLING_LAST_FAILURE_REASON_CODE="unauthorized"
+    _RESLING_LAST_FAILURE_DETAIL="issue lacks sgt-authorized label"
     echo "[resling] issue #$issue_number lacks sgt-authorized label — skipping"
     log_event "RESLING_SKIP_UNAUTHORIZED issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" skip_reason=\"issue lacks sgt-authorized\""
     return 1
   fi
   if ! _plan_task_issue_matches_current_plan "$rig" "$repo" "$issue_number" "$task"; then
+    _RESLING_LAST_FAILURE_REASON_CODE="${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch}"
+    _RESLING_LAST_FAILURE_DETAIL="task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown}"
     echo "[resling] issue #$issue_number no longer matches current plan task — skipping"
     log_event "RESLING_SKIP_STALE_PLAN_TASK issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" task_id=${_PLAN_TASK_MISMATCH_TASK_ID:-unknown} reason_code=${_PLAN_TASK_MISMATCH_REASON_CODE:-stale-plan-task-mismatch}"
     return 1
@@ -11389,6 +11471,8 @@ _resling_existing_issue() {
 
   local backend_limited_reason=""
   if backend_limited_reason="$(_issue_backend_dispatch_limited_reason "$repo" "$issue_number" 2>/dev/null || true)" && [[ -n "$backend_limited_reason" ]]; then
+    _RESLING_LAST_FAILURE_REASON_CODE="$backend_limited_reason"
+    _RESLING_LAST_FAILURE_DETAIL="issue is backend-limited"
     echo "[resling] issue #$issue_number is backend-limited — skipping"
     log_event "RESLING_SKIP_BACKEND_LIMIT issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} reason_code=$backend_limited_reason"
     return 1
@@ -11396,6 +11480,8 @@ _resling_existing_issue() {
 
   local existing_issue_polecat=""
   if existing_issue_polecat=$(_resling_find_existing_issue_polecat "$rig" "$repo" "$issue_number"); then
+    _RESLING_LAST_FAILURE_REASON_CODE="active-polecat-existing"
+    _RESLING_LAST_FAILURE_DETAIL="issue #$issue_number already has active polecat $existing_issue_polecat"
     echo "[resling] issue #$issue_number already has active polecat $existing_issue_polecat — skipping duplicate re-sling"
     log_event "RESLING_SKIP_DUPLICATE_ACTIVE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} existing_polecat=$existing_issue_polecat skip_reason=\"active polecat already exists for issue\""
     return 1
@@ -11414,8 +11500,17 @@ _resling_existing_issue() {
 
   local worktree="$SGT_ROOT/polecats/$pname"
   mkdir -p "$SGT_ROOT/polecats"
-  git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>/dev/null \
-    || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch"
+  local worktree_error=""
+  if ! worktree_error="$(
+    git -C "$rpath" worktree add -b "$branch" "$worktree" "origin/$default_branch" 2>&1 \
+      || git -C "$rpath" worktree add -b "$branch" "$worktree" "$default_branch" 2>&1
+  )"; then
+    _RESLING_LAST_FAILURE_REASON_CODE="worktree-attach-failed"
+    _RESLING_LAST_FAILURE_DETAIL="${worktree_error:-git worktree add returned non-zero exit status}"
+    log_event "RESLING_SPAWN_FAILED polecat=$pname rig=$rig issue=#$issue_number branch=$branch source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" reason_code=worktree-attach-failed detail=\"$(_escape_quotes "${worktree_error:-git worktree add returned non-zero exit status}")\""
+    echo "[resling] dispatch failed ($source_event) for issue #$issue_number — ${worktree_error:-git worktree add returned non-zero exit status}" >&2
+    return 1
+  fi
 
   _ensure_context_file "$rig" >/dev/null
   if [[ -f "$rpath/CLAUDE.md" ]]; then
@@ -11428,6 +11523,8 @@ _resling_existing_issue() {
 
   local final_gate_reason=""
   if ! final_gate_reason=$(_resling_pre_dispatch_revalidate "$rig" "$repo" "$issue_number" "$source_pr"); then
+    _RESLING_LAST_FAILURE_REASON_CODE="final-gate"
+    _RESLING_LAST_FAILURE_DETAIL="$final_gate_reason"
     echo "[resling] dispatch-instant gate ($source_event) for issue #$issue_number — skipping: $final_gate_reason"
     log_event "RESLING_SKIP_FINAL_GATE issue=#$issue_number rig=$rig source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" source_pr=${source_pr:-none} skip_reason=\"$(_escape_quotes "$final_gate_reason")\""
     git -C "$rpath" worktree remove --force "$worktree" 2>/dev/null || rm -rf "$worktree"
@@ -11440,6 +11537,7 @@ RIG=$rig
 REPO=$repo
 ISSUE=$issue_number
 ISSUE_URL=https://github.com/${repo#https://github.com/}/issues/$issue_number
+ISSUE_TITLE=$(printf '%q' "$task")
 BRANCH=$branch
 WORKTREE=$worktree
 OUTPUT_LOG=$worktree/.sgt-agent-output.log
@@ -11465,6 +11563,8 @@ PSTATE
     if [[ "${tmux_error,,}" == *"command too long"* ]]; then
       dispatch_reason_code="command-too-long"
     fi
+    _RESLING_LAST_FAILURE_REASON_CODE="$dispatch_reason_code"
+    _RESLING_LAST_FAILURE_DETAIL="${tmux_error:-tmux new-session returned non-zero exit status}"
     _cleanup_failed_polecat_dispatch "$SGT_POLECATS/$pname" "$pname" "$rig" "$branch" "$session_name" "$worktree"
     log_event "RESLING_SPAWN_FAILED polecat=$pname rig=$rig issue=#$issue_number branch=$branch source_event=$source_event source_event_key=\"$(_escape_quotes "$source_event_key")\" reason_code=$dispatch_reason_code detail=\"$(_escape_quotes "${tmux_error:-tmux new-session returned non-zero exit status}")\""
     echo "[resling] dispatch failed ($source_event) for issue #$issue_number — ${tmux_error:-tmux new-session returned non-zero exit status}" >&2
