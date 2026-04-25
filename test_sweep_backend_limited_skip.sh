@@ -34,6 +34,9 @@ log_event() {
 _mayor_rig_manually_hibernated() { return 1; }
 _repo_owner_repo() { printf '%s\n' "${1#https://github.com/}"; }
 _escape_quotes() { printf '%s' "$1"; }
+_gh_issue_labels_live() {
+  gh issue view "$2" --repo "$1" --json labels --jq '.labels[].name'
+}
 _resling_find_existing_issue_polecat() { return 1; }
 _sweep_watchdog_find_open_pr_for_issue() { return 1; }
 _ai_backend_default() { echo "codex"; }

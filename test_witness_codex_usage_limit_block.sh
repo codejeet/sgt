@@ -18,6 +18,7 @@ extract_fn() {
 }
 
 eval "$(extract_fn _witness_record_backend_limit_followup)"
+eval "$(extract_fn _polecat_issue_title)"
 eval "$(extract_fn _polecat_output_log_path)"
 eval "$(extract_fn _witness_dead_polecat_backend_limit)"
 eval "$(extract_fn _witness_pr_meta)"
@@ -97,6 +98,24 @@ _ensure_labels_exist() {
   printf '%s\n' "$*" >> "$LABEL_FILE"
 }
 
+_workflow_backend_default() { echo "github"; }
+_forge_pr_find_by_head_tsv() { return 0; }
+_forge_issue_field() {
+  local _backend="$1" _repo="$2" issue="$3" field="$4"
+  if [[ "$field" == "title" ]]; then
+    gh issue view "$issue" --repo "$_repo" --json title --jq '.title // ""'
+    return
+  fi
+  return 1
+}
+_forge_issue_add_labels() {
+  local _backend="$1" _repo="$2" issue="$3" labels="$4"
+  printf '%s|%s\n' "$issue" "$labels" >> "$GH_EDIT_FILE"
+}
+_forge_issue_comment_add() {
+  local _backend="$1" repo="$2" issue="$3" body="$4"
+  gh issue comment "$issue" --repo "$repo" --body "$body"
+}
 _write_agent_heartbeat() { :; }
 _wake_refinery() { :; }
 _pr_head_sha() { echo "deadbeef"; }

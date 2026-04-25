@@ -43,11 +43,11 @@ args=" $* "
 pr_state="${SGT_TEST_PR_STATE:-OPEN}"
 pr_number="${SGT_TEST_PR_NUMBER:-123}"
 
-if [[ "$args" == *" pr list "* ]] && [[ "$args" == *" --json number,state,title "* ]]; then
+if [[ "$args" == *" pr list "* ]] && { [[ "$args" == *" --json number,state,title "* ]] || [[ "$args" == *" --json number,state,title,headRefOid "* ]]; }; then
   if [[ "$pr_state" == "NONE" ]]; then
     echo ""
   else
-    printf '%s\t%s\t%s\n' "$pr_number" "$pr_state" "Mock PR $pr_state"
+    printf '%s\t%s\t%s\t%s\n' "$pr_number" "$pr_state" "Mock PR $pr_state" "deadbeef"
   fi
   exit 0
 fi

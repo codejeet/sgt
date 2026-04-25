@@ -27,6 +27,7 @@ eval "$(extract_fn _polecat_created_age_seconds)"
 eval "$(extract_fn _polecat_session_root_pid)"
 eval "$(extract_fn _polecat_find_busy_child)"
 eval "$(extract_fn _polecat_runtime_classify)"
+eval "$(extract_fn _polecat_issue_title)"
 eval "$(extract_fn _witness_pr_meta)"
 eval "$(extract_fn _witness_loop)"
 eval "$(extract_fn _mayor_rig_activity_enabled)"
@@ -70,6 +71,20 @@ rig_path() {
 }
 
 _escape_quotes() { printf '%s' "$1"; }
+_workflow_backend_default() { echo "github"; }
+_forge_pr_find_by_head_tsv() { return 0; }
+_forge_issue_field() {
+  local _backend="$1" _repo="$2" issue="$3" field="$4"
+  if [[ "$field" == "title" ]]; then
+    gh issue view "$issue" --repo "$_repo" --json title --jq '.title // ""'
+    return
+  fi
+  return 1
+}
+_forge_issue_comment_add() {
+  local _backend="$1" repo="$2" issue="$3" body="$4"
+  gh issue comment "$issue" --repo "$repo" --body "$body"
+}
 _write_agent_heartbeat() { :; }
 _wake_refinery() { printf '%s\n' "$1|$2" >> "$WAKE_FILE"; }
 _ai_backend_default() { echo "codex"; }

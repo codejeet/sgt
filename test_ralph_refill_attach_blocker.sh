@@ -42,6 +42,11 @@ _context_append_acceptance_blocker() { :; }
 _context_python_bin() { return 1; }
 _context_index_build() { :; }
 _wake_mayor() { printf '%s\n' "$1" >> "$WAKE_FILE"; }
+_workflow_backend_default() { printf '%s\n' 'github'; }
+_forge_issue_comment_add() {
+  local _backend="$1" repo="$2" issue="$3" body="$4"
+  gh issue comment "$issue" --repo "$repo" --body "$body"
+}
 _acceptance_blocker_write() {
   printf '%s|%s|%s|%s\n' "$1" "$3" "$4" "blocker-ralph" >> "$BLOCKER_FILE"
   printf 'blocker-ralph\n'
