@@ -38,14 +38,16 @@ sgt context path <rig>
 sgt context add <rig> "Remember the deploy script expects staging secrets"
 sgt context index <rig>
 sgt context search <rig> "deploy script secrets"
+sgt code search <rig> "request retry backoff"
 ```
 
 Implementation details:
 - `sgt context path` prints the shared memory file path and creates a starter `SGT_CONTEXT.md` if missing.
-- `sgt context add` appends a timestamped durable note and opportunistically refreshes the local embedding index when Python and `OPENAI_API_KEY` are available.
-- `sgt context index` rebuilds embeddings with the OpenAI Embeddings API (default model: `text-embedding-3-small`) and persists them under `~/.sgt/context/<rig>/index.json`.
+- `sgt context add` appends a timestamped durable note and opportunistically refreshes the local embedding index when Python and `VOYAGE_API_KEY` are available.
+- `sgt context index` rebuilds embeddings with the Voyage embeddings API (default model: `voyage-4-lite`) and persists them under `~/.sgt/context/<rig>/index.json`.
 - `sgt context search` uses that local index plus a fresh query embedding to return the closest shared notes.
-- `OPENAI_API_KEY` is required for `sgt context index` and `sgt context search`; missing-key failures are explicit and non-destructive.
+- `sgt code search` builds or refreshes a tracked-code index with Voyage `voyage-code-3` embeddings and returns the closest code chunks.
+- `VOYAGE_API_KEY` is required for embedding-backed context and code search; missing-key failures are explicit and non-destructive.
 - If Python is unavailable, `add` still appends the note, while embedding-backed indexing/search fail explicitly.
 
 ## Repo Plans (SGT_PLAN.json) — deterministic parallel + sequential

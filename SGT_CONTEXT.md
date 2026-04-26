@@ -1734,3 +1734,6 @@ Required follow-up:
 
 ## 2026-04-02
 - 2026-04-02T05:26:50+02:00 — 2026-04-02 live Ralph/PMKB repro: repeated PMKB recovery is no longer just false-exhaustion. Direct refill/materialization is creating successor issues, but the newly attached polecats die within minutes with dead-session-missing-worktree, which drops active_polecats back below target and sends President/Mayor into the same pending-plan-underfilled refresh/wake loop. Concrete live sequence from trail: RESLING #1304 at 04:52:50, #1305 at 04:53:04, #1306 at 04:53:16; all three reached active-output, then #1306 auto-pruned dead-session-missing-worktree at 04:56:44, #1304 at 04:57:34, #1305 at 04:59:59; plan tick still reports tasks-exhausted-awaiting-acceptance while acceptance remains pending and continuation intent open.
+
+## 2026-04-25
+- 2026-04-25T10:24:28+02:00 — 2026-04-25 issue #402: witness resling authorization must not collapse GitHub label read failures into false RESLING_SKIP_UNAUTHORIZED; use REST/list fallback and emit label-read/authz-read failure details. Ralph/activity active-lane accounting should require live polecat state for the issue, and status surfaces should overlay live active_polecats instead of stale persisted rig-activity reasons.

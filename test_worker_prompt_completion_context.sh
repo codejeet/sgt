@@ -105,7 +105,89 @@ case "$cmd:$sub" in
         ;;
     esac
     ;;
-  issue:list|issue:edit|issue:comment|pr:view|pr:list|api:*)
+  api:*)
+    method="GET"
+    endpoint=""
+    input_file=""
+    if [[ "$sub" == repos/* ]]; then
+      endpoint="$sub"
+    fi
+    if [[ "$sub" == "--method" ]]; then
+      method="${1:-GET}"
+      shift || true
+    fi
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --method)
+          method="$2"
+          shift 2
+          ;;
+        --input)
+          input_file="$2"
+          shift 2
+          ;;
+        --jq)
+          shift 2
+          ;;
+        -f)
+          shift 2
+          ;;
+        --paginate)
+          shift
+          ;;
+        repos/*)
+          endpoint="$1"
+          shift
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [[ "$method" == "POST" && "$endpoint" == repos/*/issues && -n "$input_file" ]]; then
+      python3 - "$input_file" "$NEXT_FILE" "$ISSUES_DIR" "$endpoint" <<'PY'
+import json
+import os
+import shlex
+import sys
+
+payload_path, next_path, issues_dir, endpoint = sys.argv[1:5]
+try:
+    next_issue = int(open(next_path, "r", encoding="utf-8").read().strip())
+except Exception:
+    next_issue = 1
+with open(payload_path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+repo = endpoint[len("repos/"):-len("/issues")]
+title = payload.get("title") or ""
+body = payload.get("body") or ""
+labels = ",".join(payload.get("labels") or ["sgt-authorized"])
+with open(os.path.join(issues_dir, f"{next_issue}.env"), "w", encoding="utf-8") as fh:
+    for key, value in {
+        "STATE": "OPEN",
+        "TITLE": title,
+        "BODY": body,
+        "REPO": repo,
+        "LABELS": labels,
+    }.items():
+        fh.write(f"{key}={shlex.quote(str(value))}\n")
+with open(next_path, "w", encoding="utf-8") as fh:
+    fh.write(str(next_issue + 1))
+print(f"https://github.com/{repo}/issues/{next_issue}")
+PY
+    elif [[ "$method" == "GET" && "$endpoint" == repos/*/issues/* ]]; then
+      issue_number="${endpoint##*/}"
+      issue_file="$ISSUES_DIR/$issue_number.env"
+      [[ -f "$issue_file" ]] || exit 1
+      # shellcheck disable=SC1090
+      source "$issue_file"
+      IFS=',' read -r -a labels <<< "${LABELS:-sgt-authorized}"
+      for label in "${labels[@]}"; do
+        [[ -n "$label" ]] && printf '%s\n' "$label"
+      done
+    fi
+    ;;
+  issue:list|issue:edit|issue:comment|pr:view|pr:list)
     exit 0
     ;;
   *)
@@ -207,11 +289,13 @@ grep -q '\*\*Acceptance rollup\*\*: pending' "$first_claude" || { echo "missing 
 grep -q '\*\*Acceptance details\*\*: Fresh-state verification is still required after merges.' "$first_claude" || { echo "missing acceptance details in sling CLAUDE" >&2; exit 1; }
 grep -q '\*\*Unresolved acceptance blockers\*\*: yes (1 active)' "$first_claude" || { echo "missing acceptance blocker summary in sling CLAUDE" >&2; exit 1; }
 grep -q 'merged intermediate work is not rig completion' "$first_claude" || { echo "missing merged-work rule in sling CLAUDE" >&2; exit 1; }
+grep -q 'sgt code search demo "<query>"' "$first_claude" || { echo "missing code search tool info in sling CLAUDE" >&2; exit 1; }
 
 grep -q 'Rig Completion Context' "$first_prompt" || { echo "missing rig completion context in sling runtime prompt file" >&2; exit 1; }
 grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$first_prompt" || { echo "missing completion condition in sling runtime prompt file" >&2; exit 1; }
 grep -q 'Acceptance rollup' "$first_prompt" || { echo "missing acceptance rollup in sling runtime prompt file" >&2; exit 1; }
 grep -q 'Fresh-state verification is still required after merges.' "$first_prompt" || { echo "missing acceptance details in sling runtime prompt file" >&2; exit 1; }
+grep -q 'sgt code search demo "<query>"' "$first_prompt" || { echo "missing code search tool info in sling runtime prompt file" >&2; exit 1; }
 grep -q '\.sgt-polecat-prompt\.md' "$HOME/tmux.log" || { echo "expected tmux launch to reference prompt file for sling" >&2; exit 1; }
 if grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log"; then
   echo "expected tmux launch to avoid embedding full sling runtime prompt" >&2
@@ -233,11 +317,13 @@ grep -q '\*\*Acceptance status\*\*: pending' "$second_claude" || { echo "missing
 grep -q '\*\*Acceptance rollup\*\*: pending' "$second_claude" || { echo "missing acceptance rollup in resling CLAUDE" >&2; exit 1; }
 grep -q '\*\*Acceptance details\*\*: Fresh-state verification is still required after merges.' "$second_claude" || { echo "missing acceptance details in resling CLAUDE" >&2; exit 1; }
 grep -q '\*\*Unresolved acceptance blockers\*\*: yes (1 active)' "$second_claude" || { echo "missing acceptance blocker summary in resling CLAUDE" >&2; exit 1; }
+grep -q 'sgt code search demo "<query>"' "$second_claude" || { echo "missing code search tool info in resling CLAUDE" >&2; exit 1; }
 
 grep -q 'Rig Completion Context' "$second_prompt" || { echo "missing rig completion context in resling runtime prompt file" >&2; exit 1; }
 grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$second_prompt" || { echo "missing completion condition in resling runtime prompt file" >&2; exit 1; }
 grep -q 'Acceptance rollup' "$second_prompt" || { echo "missing acceptance rollup in resling runtime prompt file" >&2; exit 1; }
 grep -q 'Fresh-state verification is still required after merges.' "$second_prompt" || { echo "missing acceptance details in resling runtime prompt file" >&2; exit 1; }
+grep -q 'sgt code search demo "<query>"' "$second_prompt" || { echo "missing code search tool info in resling runtime prompt file" >&2; exit 1; }
 grep -q '\.sgt-polecat-prompt\.md' "$HOME/tmux.log" || { echo "expected tmux launch to reference prompt file for resling" >&2; exit 1; }
 if grep -q 'Run a fresh-state verification on latest main and confirm the workflow succeeds.' "$HOME/tmux.log"; then
   echo "expected tmux launch to avoid embedding full resling runtime prompt" >&2

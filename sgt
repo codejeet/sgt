@@ -2038,6 +2038,53 @@ _mayor_wake_reason_targets_rig() {
   [[ "$(_mayor_wake_reason_rig "$reason")" == "$rig" ]]
 }
 
+_github_open_pr_count_rest() {
+  local repo="${1:-}" owner_repo
+  [[ -n "$repo" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  timeout 20s gh api --paginate --method GET -f state=open -f per_page=100     "repos/$owner_repo/pulls" --jq '.[].number' 2>/dev/null | awk 'END { print NR + 0 }'
+}
+
+_github_open_issue_count_by_label_rest() {
+  local repo="${1:-}" label="${2:-}" owner_repo
+  local -a cmd
+  [[ -n "$repo" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  cmd=(timeout 20s gh api --paginate --method GET -f state=open -f per_page=100)
+  [[ -n "$label" ]] && cmd+=(-f "labels=$label")
+  "${cmd[@]}" "repos/$owner_repo/issues" --jq '.[] | select(has("pull_request") | not) | .number' 2>/dev/null | awk 'END { print NR + 0 }'
+}
+
+_github_issue_create_rest() {
+  local repo="${1:-}" title="${2:-}" body="${3:-}"
+  shift 3 || true
+  local owner_repo payload_file issue_url
+  [[ -n "$repo" && -n "$title" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  payload_file="$(mktemp)"
+  python3 - "$payload_file" "$title" "$body" "$@" <<'PYJSON'
+import json, sys
+path = sys.argv[1]
+title = sys.argv[2]
+body = sys.argv[3]
+labels = [x for x in sys.argv[4:] if x]
+payload = {"title": title, "body": body}
+if labels:
+    payload["labels"] = labels
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+PYJSON
+  issue_url="$(gh api --method POST "repos/$owner_repo/issues" --input "$payload_file" --jq '.html_url // ""' 2>/dev/null || true)"
+  rm -f "$payload_file"
+  [[ -n "$issue_url" ]] || return 1
+  printf '%s
+' "$issue_url"
+}
+
+
 _mayor_rig_activity_snapshot() {
   local rig="${1:-}" repo open_prs open_authorized active_polecats merge_queue pending_plan_requests plan_rollup plan_status actionable state reason pending_plan_target
   local ralph_enabled ralph_condition ralph_condition_status ralph_target _ralph_count_support ralph_state ralph_reason ralph_active_lanes ralph_admissible_lanes ralph_backlog_lanes ralph_support_lanes ralph_duplicate_lanes ralph_underfilled ralph_completion_blocked
@@ -2045,8 +2092,8 @@ _mayor_rig_activity_snapshot() {
   open_prs=0
   open_authorized=0
   if [[ -n "$repo" ]]; then
-    open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || true)"
-    open_authorized="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number --jq 'length' 2>/dev/null || true)"
+    open_prs="$(_github_open_pr_count_rest "$repo" 2>/dev/null || true)"
+    open_authorized="$(_github_open_issue_count_by_label_rest "$repo" "sgt-authorized" 2>/dev/null || true)"
   fi
   [[ "$open_prs" =~ ^[0-9]+$ ]] || open_prs=0
   [[ "$open_authorized" =~ ^[0-9]+$ ]] || open_authorized=0
@@ -3021,7 +3068,7 @@ _record_refill_attach_blocker() {
   blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
   if [[ -n "$blocker_id" ]]; then
     _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence" || true
-    if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
       _context_index_build "$rig" >/dev/null 2>&1 || true
     fi
     _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
@@ -5610,7 +5657,7 @@ _context_index_path() {
 }
 
 _context_embedding_model() {
-  local model="${SGT_CONTEXT_EMBED_MODEL:-text-embedding-3-small}"
+  local model="${SGT_CONTEXT_EMBED_MODEL:-voyage-4-lite}"
   echo "$model"
 }
 
@@ -5626,7 +5673,7 @@ _require_context_python() {
 }
 
 _require_context_api_key() {
-  [[ -n "${OPENAI_API_KEY:-}" ]] || die "OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'"
+  [[ -n "${VOYAGE_API_KEY:-}" ]] || die "VOYAGE_API_KEY is required for 'sgt context index' and 'sgt context search'"
 }
 
 _ensure_context_file() {
@@ -5650,6 +5697,7 @@ Useful commands:
 - sgt context add $rig "<note>" — append a durable note
 - sgt context search $rig "<query>" — semantic search over prior context
 - sgt context index $rig — rebuild the embedding index
+- sgt code search $rig "<query>" — semantic search over tracked code
 
 ## Notes
 
@@ -5682,7 +5730,7 @@ _context_index_build() {
   _require_context_api_key
   mkdir -p "$(dirname "$index_path")"
   model="$(_context_embedding_model)"
-  api_key="${OPENAI_API_KEY:-}"
+  api_key="${VOYAGE_API_KEY:-}"
   "$py_bin" - "$rig" "$context_file" "$index_path" "$model" "$api_key" <<'PY'
 import json
 import math
@@ -5712,9 +5760,9 @@ def _http_error_message(exc):
     return base
 
 def embed(texts):
-    payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
+    payload = json.dumps({"model": model, "input": texts, "input_type": "document"}).encode("utf-8")
     req = urllib.request.Request(
-        "https://api.openai.com/v1/embeddings",
+        "https://api.voyageai.com/v1/embeddings",
         data=payload,
         headers={
             "Content-Type": "application/json",
@@ -5762,7 +5810,8 @@ for entry, embedding in zip(entries, embeddings):
     entry["embedding"] = embedding
 
 doc = {
-    "version": 1,
+    "version": 2,
+    "provider": "voyage",
     "rig": rig,
     "model": model,
     "source_path": context_path,
@@ -5789,10 +5838,13 @@ PY
 }
 
 _context_index_is_fresh() {
-  local rig="${1:-}" context_file index_path
+  local rig="${1:-}" context_file index_path model
   context_file="$(_ensure_context_file "$rig")"
   index_path="$(_context_index_path "$rig")"
   [[ -f "$index_path" ]] || return 1
+  model="$(_context_embedding_model)"
+  grep -Fq '"provider": "voyage"' "$index_path" 2>/dev/null || return 1
+  grep -Fq "\"model\": \"$model\"" "$index_path" 2>/dev/null || return 1
   [[ "$index_path" -nt "$context_file" ]]
 }
 
@@ -5807,7 +5859,7 @@ _context_search_run() {
   py_bin="$(_require_context_python)"
   _require_context_api_key
   model="$(_context_embedding_model)"
-  api_key="${OPENAI_API_KEY:-}"
+  api_key="${VOYAGE_API_KEY:-}"
   retrying=0
   err_file="$(mktemp)"
   while true; do
@@ -5850,9 +5902,9 @@ if not entries:
     print(f"no indexed context entries for rig '{rig}'")
     raise SystemExit(0)
 
-payload = json.dumps({"model": model, "input": query}).encode("utf-8")
+payload = json.dumps({"model": model, "input": query, "input_type": "query"}).encode("utf-8")
 req = urllib.request.Request(
-    "https://api.openai.com/v1/embeddings",
+    "https://api.voyageai.com/v1/embeddings",
     data=payload,
     headers={
         "Content-Type": "application/json",
@@ -5948,7 +6000,7 @@ EOF
       ensure_init
       ensure_rig "$rig"
       _context_write_note "$rig" "$note" >/dev/null
-      if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+      if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
         if ! _context_index_build "$rig" >/dev/null; then
           warn "opportunistic context reindex failed for rig '$rig'; run 'sgt context index $rig' to refresh embeddings"
         fi
@@ -5972,6 +6024,486 @@ EOF
       ;;
     *)
       die "unknown context command: $sub (try: help, path, add, index, search)"
+      ;;
+  esac
+}
+
+_code_search_store_dir() {
+  local rig="${1:-}"
+  echo "$SGT_CONFIG/code-search/$rig"
+}
+
+_code_search_index_path() {
+  local rig="${1:-}"
+  echo "$(_code_search_store_dir "$rig")/index.json"
+}
+
+_code_search_embedding_model() {
+  local model="${SGT_CODE_EMBED_MODEL:-voyage-code-3}"
+  echo "$model"
+}
+
+_require_code_search_python() {
+  local py_bin
+  py_bin="$(_context_python_bin)"
+  [[ -n "$py_bin" ]] || die "python is required for 'sgt code' embeddings/indexing"
+  echo "$py_bin"
+}
+
+_require_code_search_api_key() {
+  [[ -n "${VOYAGE_API_KEY:-}" ]] || die "VOYAGE_API_KEY is required for 'sgt code index' and 'sgt code search'"
+}
+
+_code_search_index_build() {
+  local rig="${1:-}" rpath index_path py_bin model api_key
+  [[ -n "$rig" ]] || die "usage: sgt code index <rig>"
+  rpath="$(rig_path "$rig")"
+  index_path="$(_code_search_index_path "$rig")"
+  py_bin="$(_require_code_search_python)"
+  _require_code_search_api_key
+  mkdir -p "$(dirname "$index_path")"
+  model="$(_code_search_embedding_model)"
+  api_key="${VOYAGE_API_KEY:-}"
+  "$py_bin" - "$rig" "$rpath" "$index_path" "$model" "$api_key" <<'PY'
+import datetime
+import json
+import math
+import os
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+rig, repo_path, index_path, model, api_key = sys.argv[1:6]
+BATCH_SIZE = int(os.environ.get("SGT_CODE_SEARCH_BATCH_SIZE", "64"))
+MAX_CHARS = int(os.environ.get("SGT_CODE_SEARCH_CHUNK_CHARS", "4000"))
+OVERLAP_CHARS = int(os.environ.get("SGT_CODE_SEARCH_OVERLAP_CHARS", "400"))
+MAX_FILE_BYTES = int(os.environ.get("SGT_CODE_SEARCH_MAX_FILE_BYTES", "1000000"))
+
+SKIP_PARTS = {
+    ".git",
+    ".sgt",
+    ".omx",
+    ".codex",
+    "__pycache__",
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".venv",
+    "venv",
+    "target",
+}
+SKIP_SUFFIXES = {
+    ".7z",
+    ".a",
+    ".bmp",
+    ".bz2",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".lock",
+    ".mp3",
+    ".mp4",
+    ".o",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".so",
+    ".sqlite",
+    ".tar",
+    ".tgz",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".zip",
+}
+SKIP_NAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+}
+
+def _http_error_message(exc):
+    body = ""
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if raw:
+        try:
+            body = raw.decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = repr(raw)
+    base = f"embeddings request failed with HTTP {exc.code}"
+    if body:
+        return f"{base}: {body}"
+    return base
+
+def embed(texts, input_type):
+    if not texts:
+        return []
+    payload = json.dumps(
+        {"model": model, "input": texts, "input_type": input_type}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.voyageai.com/v1/embeddings",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(_http_error_message(exc))
+    data = body.get("data")
+    if not isinstance(data, list) or len(data) != len(texts):
+        raise SystemExit("unexpected embeddings response shape")
+    return [item.get("embedding") for item in data]
+
+def git_output(args):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_path, *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return b""
+    return proc.stdout
+
+def should_skip(rel):
+    norm = rel.replace("\\", "/")
+    parts = set(part for part in norm.split("/") if part)
+    name = os.path.basename(norm)
+    lower = name.lower()
+    if parts & SKIP_PARTS:
+        return True
+    if lower in SKIP_NAMES:
+        return True
+    if lower.endswith(".min.js") or lower.endswith(".min.css"):
+        return True
+    return any(lower.endswith(suffix) for suffix in SKIP_SUFFIXES)
+
+def line_chunks(text):
+    lines = text.splitlines()
+    current = []
+    current_start = 1
+    current_chars = 0
+    for lineno, line in enumerate(lines, start=1):
+        line_chars = len(line) + 1
+        if current and current_chars + line_chars > MAX_CHARS:
+            yield current_start, lineno - 1, "\n".join(current)
+            overlap = []
+            overlap_chars = 0
+            for prev in reversed(current):
+                if overlap_chars >= OVERLAP_CHARS:
+                    break
+                overlap.insert(0, prev)
+                overlap_chars += len(prev) + 1
+            current = [*overlap, line]
+            current_start = max(1, lineno - len(overlap))
+            current_chars = sum(len(part) + 1 for part in current)
+        else:
+            if not current:
+                current_start = lineno
+            current.append(line)
+            current_chars += line_chars
+    if current:
+        yield current_start, current_start + len(current) - 1, "\n".join(current)
+
+tracked = git_output(["ls-files", "-z"])
+if not tracked:
+    raise SystemExit(f"rig '{rig}' is not a git checkout or has no tracked files")
+
+source_head = git_output(["rev-parse", "HEAD"]).decode("utf-8", errors="replace").strip()
+source_dirty = bool(git_output(["status", "--porcelain", "--untracked-files=no"]).strip())
+
+entries = []
+indexed_files = 0
+skipped_files = 0
+for raw_rel in tracked.split(b"\0"):
+    if not raw_rel:
+        continue
+    rel = raw_rel.decode("utf-8", errors="replace")
+    if should_skip(rel):
+        skipped_files += 1
+        continue
+    full_path = os.path.join(repo_path, rel)
+    try:
+        st = os.stat(full_path)
+    except OSError:
+        skipped_files += 1
+        continue
+    if not os.path.isfile(full_path) or st.st_size > MAX_FILE_BYTES:
+        skipped_files += 1
+        continue
+    try:
+        raw = open(full_path, "rb").read()
+    except OSError:
+        skipped_files += 1
+        continue
+    if b"\0" in raw[:4096]:
+        skipped_files += 1
+        continue
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        skipped_files += 1
+        continue
+    indexed_files += 1
+    for start, end, chunk in line_chunks(text):
+        if not chunk.strip():
+            continue
+        entries.append(
+            {
+                "id": f"{rel}:{start}-{end}",
+                "path": rel,
+                "line_start": start,
+                "line_end": end,
+                "text": chunk,
+            }
+        )
+
+texts = [entry["text"] for entry in entries]
+embeddings = []
+for start in range(0, len(texts), BATCH_SIZE):
+    embeddings.extend(embed(texts[start:start + BATCH_SIZE], "document"))
+for entry, embedding in zip(entries, embeddings):
+    entry["embedding"] = embedding
+
+doc = {
+    "version": 1,
+    "provider": "voyage",
+    "kind": "code",
+    "rig": rig,
+    "model": model,
+    "source_path": repo_path,
+    "source_head": source_head,
+    "source_dirty": source_dirty,
+    "indexed_file_count": indexed_files,
+    "skipped_file_count": skipped_files,
+    "indexed_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "entries": entries,
+}
+
+index_dir = os.path.dirname(index_path) or "."
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=".code-index.", suffix=".json.tmp", dir=index_dir)
+try:
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, index_path)
+finally:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+print(index_path)
+PY
+}
+
+_code_search_index_is_fresh() {
+  local rig="${1:-}" rpath index_path py_bin model current_head dirty_state meta
+  rpath="$(rig_path "$rig")"
+  index_path="$(_code_search_index_path "$rig")"
+  [[ -f "$index_path" ]] || return 1
+  current_head="$(git -C "$rpath" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$current_head" ]] || return 1
+  dirty_state="$(git -C "$rpath" status --porcelain --untracked-files=no 2>/dev/null || true)"
+  [[ -z "$dirty_state" ]] || return 1
+  py_bin="$(_context_python_bin)"
+  [[ -n "$py_bin" ]] || return 1
+  model="$(_code_search_embedding_model)"
+  meta="$("$py_bin" - "$index_path" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+print("|".join([
+    doc.get("provider") or "",
+    doc.get("kind") or "",
+    doc.get("model") or "",
+    doc.get("source_head") or "",
+    "dirty" if doc.get("source_dirty") else "clean",
+]))
+PY
+)"
+  [[ "$meta" == "voyage|code|$model|$current_head|clean" ]]
+}
+
+_code_search_run() {
+  local rig="${1:-}" query="${2:-}" limit="${3:-8}" index_path py_bin model api_key search_rc err_file restore_errexit
+  [[ -n "$query" ]] || die "usage: sgt code search <rig> <query> [--limit N]"
+  [[ "$limit" =~ ^[0-9]+$ ]] || die "usage: sgt code search <rig> <query> [--limit N]"
+  if ! _code_search_index_is_fresh "$rig"; then
+    _code_search_index_build "$rig" >/dev/null
+  fi
+  index_path="$(_code_search_index_path "$rig")"
+  py_bin="$(_require_code_search_python)"
+  _require_code_search_api_key
+  model="$(_code_search_embedding_model)"
+  api_key="${VOYAGE_API_KEY:-}"
+  err_file="$(mktemp)"
+  restore_errexit="$(_shell_errexit_state)"
+  set +e
+  "$py_bin" - "$rig" "$index_path" "$model" "$api_key" "$query" "$limit" 2>"$err_file" <<'PY'
+import json
+import math
+import re
+import sys
+import urllib.error
+import urllib.request
+
+rig, index_path, model, api_key, query, limit_s = sys.argv[1:7]
+limit = int(limit_s)
+
+def _http_error_message(exc):
+    body = ""
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    if raw:
+        try:
+            body = raw.decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = repr(raw)
+    base = f"embeddings request failed with HTTP {exc.code}"
+    if body:
+        return f"{base}: {body}"
+    return base
+
+try:
+    with open(index_path, "r", encoding="utf-8") as fh:
+        index = json.load(fh)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"malformed code index at {index_path}: {exc}")
+
+entries = index.get("entries") or []
+if not entries:
+    print(f"no indexed code entries for rig '{rig}'")
+    raise SystemExit(0)
+
+payload = json.dumps({"model": model, "input": query, "input_type": "query"}).encode("utf-8")
+req = urllib.request.Request(
+    "https://api.voyageai.com/v1/embeddings",
+    data=payload,
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as exc:
+    raise SystemExit(_http_error_message(exc))
+query_embedding = (body.get("data") or [{}])[0].get("embedding")
+if not query_embedding:
+    raise SystemExit("unexpected embeddings response shape")
+
+def cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return -1.0
+    return dot / (na * nb)
+
+ranked = []
+for entry in entries:
+    emb = entry.get("embedding")
+    if not emb:
+        continue
+    ranked.append((cosine(query_embedding, emb), entry))
+
+ranked.sort(key=lambda item: item[0], reverse=True)
+top = ranked[:limit]
+if not top:
+    print(f"no indexed code entries for rig '{rig}'")
+    raise SystemExit(0)
+
+for score, entry in top:
+    path = entry.get("path") or "?"
+    start = entry.get("line_start") or "?"
+    end = entry.get("line_end") or start
+    text = re.sub(r"\s+", " ", entry.get("text") or "").strip()
+    if len(text) > 240:
+        text = text[:237] + "..."
+    print(f"{score:.3f}\t{path}:{start}-{end}\t{text}")
+PY
+  search_rc=$?
+  _shell_errexit_restore "$restore_errexit"
+  cat "$err_file" >&2
+  rm -f "$err_file"
+  return "$search_rc"
+}
+
+cmd_code() {
+  local sub="${1:-}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    ""|help|--help|-h)
+      cat <<EOF
+Usage: sgt code <command> [args]
+
+Commands:
+  index <rig>                         Rebuild the Voyage code embedding index
+  search <rig> <query> [--limit N]    Semantic search over tracked rig code
+EOF
+      ;;
+    index)
+      local rig="${1:-}"
+      [[ -n "$rig" ]] || die "usage: sgt code index <rig>"
+      ensure_init
+      ensure_rig "$rig"
+      _code_search_index_build "$rig"
+      ;;
+    search)
+      local rig="${1:-}" limit="8"
+      shift || true
+      [[ -n "$rig" ]] || die "usage: sgt code search <rig> <query> [--limit N]"
+      local -a query_parts=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --limit)
+            limit="${2:-}"
+            shift 2
+            ;;
+          *)
+            query_parts+=("$1")
+            shift
+            ;;
+        esac
+      done
+      local query="${query_parts[*]:-}"
+      [[ -n "$query" ]] || die "usage: sgt code search <rig> <query> [--limit N]"
+      ensure_init
+      ensure_rig "$rig"
+      _code_search_run "$rig" "$query" "$limit"
+      ;;
+    *)
+      die "unknown code command: $sub (try: help, index, search)"
       ;;
   esac
 }
@@ -6352,7 +6884,7 @@ _acceptance_blocker_list_active() {
       [[ -z "$rig_filter" || "${RIG:-}" == "$rig_filter" ]] || exit 0
       case "${STATUS:-open}" in
         open|needs-followup)
-          printf '%s|%s|%s|%s|%s|%s|%s\n' \
+          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
             "${BLOCKER_ID:-$blocker_id}" \
             "${RIG:-}" \
             "${STATUS:-open}" \
@@ -6547,8 +7079,8 @@ PY
 _mayor_rig_actionable_work_counts() {
   local rig="${1:-}" repo="${2:-}"
   local open_prs open_authorized open_polecats pending_plan_requests
-  open_prs="$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || true)"
-  open_authorized="$(gh issue list --repo "$repo" --state open --label "sgt-authorized" --json number --jq 'length' 2>/dev/null || true)"
+  open_prs="$(_github_open_pr_count_rest "$repo" 2>/dev/null || true)"
+  open_authorized="$(_github_open_issue_count_by_label_rest "$repo" "sgt-authorized" 2>/dev/null || true)"
   open_polecats="$(_active_polecat_count "$rig")"
   pending_plan_requests=0
   while IFS='|' read -r request_id request_rig _; do
@@ -7703,7 +8235,7 @@ cmd_create_plan() {
   _ensure_context_file "$rig" >/dev/null
   request_id="$(_plan_request_write "$rig" "$prompt" "$requester" "$prompt_source")"
   _context_append_plan_request "$rig" "$request_id" "$requester" "$prompt"
-  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+  if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
     _context_index_build "$rig" >/dev/null 2>&1 || true
   fi
   _wake_mayor "create-plan:${rig}:${request_id}"
@@ -7843,7 +8375,7 @@ cmd_create_blocker() {
     dedupe_key="${DEDUPE_KEY:-}"
   fi
   _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence"
-  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+  if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
     _context_index_build "$rig" >/dev/null 2>&1 || true
   fi
   _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
@@ -7901,7 +8433,7 @@ cmd_blocker_resolve() {
     _acceptance_blocker_update_field "$blocker_id" "RESOLUTION_NOTE" "$note"
   fi
   _context_append_acceptance_blocker_resolution "$blocker_id" "$rig" "$note"
-  if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+  if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
     _context_index_build "$rig" >/dev/null 2>&1 || true
   fi
   log_event "ACCEPTANCE_BLOCKER_RESOLVE rig=$rig blocker_id=$blocker_id title=\"$(_escape_quotes "$title")\""
@@ -8868,6 +9400,14 @@ rig_path() {
 
 # Check if an issue has the sgt-authorized label
 # Security gate can be disabled by setting: SGT_REQUIRE_AUTH_LABEL=0
+_github_issue_labels_rest() {
+  local repo="${1:-}" issue="${2:-}" owner_repo
+  [[ -n "$repo" && -n "$issue" ]] || return 1
+  owner_repo="$(_repo_owner_repo "$repo")"
+  [[ -n "$owner_repo" ]] || return 1
+  timeout 20s gh api "repos/$owner_repo/issues/$issue" --jq '.labels[]?.name // empty' 2>/dev/null || true
+}
+
 _has_sgt_authorized() {
   local repo="$1" issue="$2"
   if [[ "${SGT_REQUIRE_AUTH_LABEL:-1}" == "0" ]]; then
@@ -8875,7 +9415,7 @@ _has_sgt_authorized() {
   fi
   [[ -n "$issue" && "$issue" != "0" ]] || return 1
   local labels
-  labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)
+  labels="$(_github_issue_labels_rest "$repo" "$issue" 2>/dev/null || true)"
   echo "$labels" | grep -qx "sgt-authorized"
 }
 
@@ -8883,7 +9423,7 @@ _issue_has_label() {
   local repo="${1:-}" issue="${2:-}" label="${3:-}"
   [[ -n "$repo" && -n "$issue" && -n "$label" ]] || return 1
   local labels
-  labels=$(gh issue view "$issue" --repo "$repo" --json labels --jq '.labels[].name' 2>/dev/null || true)
+  labels="$(_github_issue_labels_rest "$repo" "$issue" 2>/dev/null || true)"
   echo "$labels" | grep -qx "$label"
 }
 
@@ -9102,9 +9642,9 @@ cmd_sling() {
   info "creating issue on $(basename "$repo")..."
   labels+=("sgt-authorized")
   _ensure_labels_exist "$repo" "${labels[@]}" || die "failed to ensure labels on $repo"
-  local label_args=""
+  local -a label_args=()
   for l in "${labels[@]+"${labels[@]}"}"; do
-    label_args="$label_args --label $l"
+    label_args+=("$l")
   done
 
   local dispatch_cooldown duplicate_issue
@@ -9176,11 +9716,8 @@ cmd_sling() {
 
 *Created by sgt — polecat: `%s`*
 *Branch: `%s`*' "$task" "$pname" "$branch"
-  issue_url=$(gh issue create \
-    --repo "$repo" \
-    --title "$task" \
-    --body "$issue_body" \
-    $label_args 2>&1) || die "failed to create issue: $issue_url"
+  issue_url="$(_github_issue_create_rest "$repo" "$task" "$issue_body" "${label_args[@]+"${label_args[@]}"}" 2>/dev/null || true)"
+  [[ -n "$issue_url" ]] || die "failed to create issue via REST"
 
   issue_number=$(echo "$issue_url" | grep -oP '/issues/\K[0-9]+')
   _SGT_LAST_SLING_ISSUE_NUMBER="$issue_number"
@@ -10890,15 +11427,31 @@ _polecat_output_log_path() {
 
 _witness_dead_polecat_backend_limit() {
   local backend="${1:-}" output_log="${2:-}" worktree="${3:-}"
-  local log_path match_text
-  [[ "$backend" == "codex" ]] || return 1
+  local log_path head_chunk match_text
   log_path="$(_polecat_output_log_path "$output_log" "$worktree")"
   [[ -n "$log_path" && -f "$log_path" ]] || return 1
-  match_text="You've hit your usage limit"
-  if head -c 16384 "$log_path" 2>/dev/null | grep -a -F -q "$match_text"; then
-    printf '%s|%s|%s\n' "codex_usage_limit" "$backend" "$match_text"
-    return 0
+  head_chunk="$(head -c 32768 "$log_path" 2>/dev/null || true)"
+
+  if [[ "$backend" == "codex" ]]; then
+    for match_text in "You've hit your usage limit" "Quota exceeded. Check your plan and billing details."; do
+      if grep -a -F -q "$match_text" <<< "$head_chunk"; then
+        printf '%s|%s|%s
+' "codex_usage_limit" "$backend" "$match_text"
+        return 0
+      fi
+    done
   fi
+
+  if [[ "$backend" == "claude" ]]; then
+    for match_text in "Your account does not have access to Claude Code." "Please run /login."; do
+      if grep -a -F -q "$match_text" <<< "$head_chunk"; then
+        printf '%s|%s|%s
+' "claude_access_denied" "$backend" "$match_text"
+        return 0
+      fi
+    done
+  fi
+
   return 1
 }
 
@@ -11916,6 +12469,8 @@ You are fixing CI for an existing PR.
 Read `SGT_CONTEXT.md` before you start. If you need prior rig memory, use:
 - `sgt context search $rig "<query>"`
 - `sgt context add $rig "<note>"`
+If you need to locate relevant code or tests, use:
+- `sgt code search $rig "<query>"`
 
 - Repo: $repo
 - Rig: $rig
@@ -11959,7 +12514,7 @@ SIG=$sig
 PSTATE
 
   tmux new-session -d -s "$fix_session" -c "$worktree" \
-    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
+    "$( _ai_cmd "$(_ai_backend_default)" "Read CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Use 'sgt code search ${rig} \"<query>\"' to locate relevant code, tests, or call sites. Fix CI for PR #$pr on branch $branch. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit and push to the same branch. Do not open a new PR." ); echo '[SGT] ci-fix polecat exited'; sgt _wake-refinery '${rig}' 'ci-fix-done:${fix_polecat}:#${issue}' 2>/dev/null"
 
   # Auto-accept Claude Code workspace trust dialog if it appears
   if [[ "$(_ai_backend_default)" == "claude" ]]; then
@@ -14570,7 +15125,7 @@ _witness_record_stalled_followup() {
   blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
   if [[ -n "$blocker_id" ]]; then
     _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence" || true
-    if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
       _context_index_build "$rig" >/dev/null 2>&1 || true
     fi
     _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
@@ -14614,7 +15169,7 @@ _witness_record_backend_limit_followup() {
   blocker_id="$(_acceptance_blocker_write "$rig" "$evidence" "$requester" "$reason_code" 2>/dev/null || true)"
   if [[ -n "$blocker_id" ]]; then
     _context_append_acceptance_blocker "$rig" "$blocker_id" "$requester" "$title" "$evidence" || true
-    if [[ -n "${OPENAI_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
+    if [[ -n "${VOYAGE_API_KEY:-}" ]] && [[ -n "$(_context_python_bin)" ]]; then
       _context_index_build "$rig" >/dev/null 2>&1 || true
     fi
     _wake_mayor "acceptance-blocker:${rig}:${blocker_id}"
@@ -16673,6 +17228,7 @@ Useful commands:
 - `sgt context search <rig> "<query>"` — semantic search over prior shared context
 - `sgt context add <rig> "<note>"` — append a durable project note
 - `sgt context index <rig>` — rebuild the embedding index manually
+- `sgt code search <rig> "<query>"` — semantic search over tracked code
 
 ## Workflow
 
@@ -16764,7 +17320,7 @@ _build_polecat_runtime_prompt() {
   local prompt readme_prompt completion_context
   readme_prompt="$(_polecat_readme_prompt "$rpath")"
   completion_context="$(_worker_plan_completion_context_md "$rig")"
-  prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Your task is described in GitHub issue #${issue}. The issue title is: ${task}. Work on branch ${branch}. Pay close attention to any 'Rig Completion Context' section in CLAUDE.md; merged intermediate work is not enough when plan acceptance is still pending or blocked. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue}."
+  prompt="Read the CLAUDE.md and SGT_CONTEXT.md in this directory before you start. Search shared rig context first with 'sgt context search ${rig} \"<query>\"' for any questions, unknowns, or prior decisions instead of guessing. Use 'sgt code search ${rig} \"<query>\"' for semantic code search when locating relevant implementation, tests, or call sites. Your task is described in GitHub issue #${issue}. The issue title is: ${task}. Work on branch ${branch}. Pay close attention to any 'Rig Completion Context' section in CLAUDE.md; merged intermediate work is not enough when plan acceptance is still pending or blocked. Before you finish, add any durable project context you learned with 'sgt context add ${rig} \"<note>\"'. When done, commit your changes, push the branch, and open a PR that closes #${issue}."
   if [[ -n "$completion_context" ]]; then
     prompt+=$'\n\n---\nRig Completion Context\n\n'"$completion_context"
   fi
@@ -16807,6 +17363,7 @@ You are polecat \`$pname\`, an ephemeral coding agent.
 
 - Read \`SGT_CONTEXT.md\` before you start
 - Search prior context with \`sgt context search $rig "<query>"\`
+- Search the codebase semantically with \`sgt code search $rig "<query>"\`
 - Append durable shared notes with \`sgt context add $rig "<note>"\`
 - Before task completion, make sure any durable project context worth keeping has been added
 
@@ -16849,6 +17406,7 @@ Core Commands:
   rig list                      List registered rigs
   rig remove <name>             Remove a rig
   context <subcommand>          Shared per-rig memory (path, add, index, search)
+  code <subcommand>             Semantic code search (index, search)
   create plan <rig> <prompt>    Store a durable planning request and wake the mayor
     --file <path>                 Read the planning prompt/spec from a file
     --agent <openclaw-id>         Requester id for mayor clarification routing
@@ -16955,8 +17513,9 @@ Environment:
   SGT_MAYOR_DECISION_LOG_ALERT_COOLDOWN  Suppress repeated mayor decision-log failure notifications for N seconds (default: 600, set 0 to disable)
   SGT_AI_BACKEND        AI backend: claude|codex (default: claude)
   NO_COLOR              Disable ANSI color output
-  OPENAI_API_KEY        Required for 'sgt context index/search' embeddings
-  SGT_CONTEXT_EMBED_MODEL  OpenAI embedding model for shared memory (default: text-embedding-3-small)
+  VOYAGE_API_KEY        Required for embedding-backed context/code search
+  SGT_CONTEXT_EMBED_MODEL  Voyage embedding model for shared memory (default: voyage-4-lite)
+  SGT_CODE_EMBED_MODEL  Voyage embedding model for code search (default: voyage-code-3)
   SGT_WEB_REPO_DIR      Repo checkout to treat as canonical Web UI source
   SGT_WEB_LIVE_DIR      Live served Web UI tree (default: /root/sgt/web)
   SGT_WEB_SESSION_NAME  tmux session name for live Web UI (default: sgt-web)
@@ -16969,6 +17528,7 @@ Examples:
   sgt context path myapp
   sgt context add myapp "Remember to keep deploy scripts idempotent"
   sgt context search myapp "deploy scripts"
+  sgt code search myapp "request retry backoff"
   sgt create plan myapp "Implement multi-tenant billing and rollout safely"
   sgt create plan myapp --file /tmp/spec.md
   cat whitepaper.md | sgt create plan myapp -
@@ -17021,6 +17581,7 @@ main() {
       esac
       ;;
     context)        cmd_context "$@" ;;
+    code)           cmd_code "$@" ;;
     create)
       local sub="${1:-}"
       shift 2>/dev/null || true

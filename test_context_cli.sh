@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_context_cli.sh — Validate context CLI help/syntax, missing-key failures, and malformed-index recovery.
+# test_context_cli.sh — Validate context/code search CLI help/syntax, missing-key failures, and malformed-index recovery.
 
 set -euo pipefail
 
@@ -48,7 +48,7 @@ _real_urlopen = urllib.request.urlopen
 
 def _mock_urlopen(req, timeout=60):
     url = getattr(req, "full_url", "")
-    if url == "https://api.openai.com/v1/embeddings":
+    if url == "https://api.voyageai.com/v1/embeddings":
         payload = json.loads(req.data.decode("utf-8"))
         input_value = payload.get("input")
         if isinstance(input_value, list):
@@ -58,7 +58,11 @@ def _mock_urlopen(req, timeout=60):
         log_path = os.environ.get("MOCK_EMBED_LOG")
         if log_path:
             with open(log_path, "a", encoding="utf-8") as fh:
-                fh.write(f"{len(texts)}\n")
+                fh.write(json.dumps({
+                    "count": len(texts),
+                    "model": payload.get("model"),
+                    "input_type": payload.get("input_type"),
+                }) + "\n")
         if os.environ.get("MOCK_EMBED_FORCE_ERROR") == "1":
             body = b'{"error":{"message":"mock embeddings failed"}}'
             raise urllib.error.HTTPError(url, 400, "Bad Request", hdrs=None, fp=io.BytesIO(body))
@@ -105,7 +109,7 @@ run_cmd_mock_embeddings() {
     HOME="$TMP_HOME" \
     PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     TERM="${TERM:-xterm}" \
-    OPENAI_API_KEY="test-key" \
+    VOYAGE_API_KEY="test-key" \
     PYTHONPATH="$MOCK_PYTHONPATH" \
     bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
   rc=$?
@@ -126,7 +130,7 @@ run_cmd_mock_embeddings_env() {
     HOME="$TMP_HOME" \
     PATH="$TMP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
     TERM="${TERM:-xterm}" \
-    OPENAI_API_KEY="test-key" \
+    VOYAGE_API_KEY="test-key" \
     PYTHONPATH="$MOCK_PYTHONPATH" \
     $extra_env \
     bash --noprofile --norc -c "$command" >"$out_file" 2>"$err_file"
@@ -194,8 +198,15 @@ HTTPFAIL_RC="$(mktemp)"
 ADDWARN_OUT="$(mktemp)"
 ADDWARN_ERR="$(mktemp)"
 ADDWARN_RC="$(mktemp)"
+CODE_OUT="$(mktemp)"
+CODE_ERR="$(mktemp)"
+CODE_RC="$(mktemp)"
+CODE_LOG="$(mktemp)"
+CODEMISS_OUT="$(mktemp)"
+CODEMISS_ERR="$(mktemp)"
+CODEMISS_RC="$(mktemp)"
 
-trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC" "$BATCH_OUT" "$BATCH_ERR" "$BATCH_RC" "$BATCH_LOG" "$HTTPFAIL_OUT" "$HTTPFAIL_ERR" "$HTTPFAIL_RC" "$ADDWARN_OUT" "$ADDWARN_ERR" "$ADDWARN_RC"' EXIT
+trap 'rm -rf "$TMP_HOME" "$BASE_OUT" "$BASE_ERR" "$BASE_RC" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC" "$HELPWORD_OUT" "$HELPWORD_ERR" "$HELPWORD_RC" "$BAD_OUT" "$BAD_ERR" "$BAD_RC" "$PATH_OUT" "$PATH_ERR" "$PATH_RC" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC" "$BATCH_OUT" "$BATCH_ERR" "$BATCH_RC" "$BATCH_LOG" "$HTTPFAIL_OUT" "$HTTPFAIL_ERR" "$HTTPFAIL_RC" "$ADDWARN_OUT" "$ADDWARN_ERR" "$ADDWARN_RC" "$CODE_OUT" "$CODE_ERR" "$CODE_RC" "$CODE_LOG" "$CODEMISS_OUT" "$CODEMISS_ERR" "$CODEMISS_RC"' EXIT
 
 run_cmd "sgt context" "$BASE_OUT" "$BASE_ERR" "$BASE_RC"
 run_cmd "sgt context --help" "$HELPFLAG_OUT" "$HELPFLAG_ERR" "$HELPFLAG_RC"
@@ -238,17 +249,31 @@ check_equals "sgt context path writes no stderr" "$(wc -c <"$PATH_ERR" | tr -d '
 check_file_contains "context path points at repo-local file" "$PATH_OUT" '/sgt/rigs/demo/SGT_CONTEXT\.md$'
 
 run_cmd "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown'" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC"
-check_equals "sgt context add exits 0 without OPENAI_API_KEY" "$(cat "$INDEX_RC")" "0"
+check_equals "sgt context add exits 0 without VOYAGE_API_KEY" "$(cat "$INDEX_RC")" "0"
 
 run_cmd "sgt context index demo" "$INDEX_OUT" "$INDEX_ERR" "$INDEX_RC"
 run_cmd "sgt context search demo 'watchdog cooldown'" "$SEARCH_OUT" "$SEARCH_ERR" "$SEARCH_RC"
 
-check_file_contains "context index without OPENAI_API_KEY exits 1" "$INDEX_RC" '^1$'
-check_file_contains "context search without OPENAI_API_KEY exits 1" "$SEARCH_RC" '^1$'
+check_file_contains "context index without VOYAGE_API_KEY exits 1" "$INDEX_RC" '^1$'
+check_file_contains "context search without VOYAGE_API_KEY exits 1" "$SEARCH_RC" '^1$'
 check_equals "context index without key writes no stdout" "$(wc -c <"$INDEX_OUT" | tr -d ' ')" "0"
 check_equals "context search without key writes no stdout" "$(wc -c <"$SEARCH_OUT" | tr -d ' ')" "0"
-check_file_contains "context index missing key error is explicit" "$INDEX_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
-check_file_contains "context search missing key error is explicit" "$SEARCH_ERR" "^sgt: OPENAI_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+check_file_contains "context index missing key error is explicit" "$INDEX_ERR" "^sgt: VOYAGE_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+check_file_contains "context search missing key error is explicit" "$SEARCH_ERR" "^sgt: VOYAGE_API_KEY is required for 'sgt context index' and 'sgt context search'$"
+
+run_cmd "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && git -C \"\$HOME/sgt/rigs/demo\" init -q && printf '%s\n' 'retry backoff implementation' > \"\$HOME/sgt/rigs/demo/retry.sh\" && git -C \"\$HOME/sgt/rigs/demo\" add retry.sh && sgt code search demo 'retry backoff'" "$CODEMISS_OUT" "$CODEMISS_ERR" "$CODEMISS_RC"
+
+check_file_contains "code search without VOYAGE_API_KEY exits 1" "$CODEMISS_RC" '^1$'
+check_equals "code search without key writes no stdout" "$(wc -c <"$CODEMISS_OUT" | tr -d ' ')" "0"
+check_file_contains "code search missing key error is explicit" "$CODEMISS_ERR" "^sgt: VOYAGE_API_KEY is required for 'sgt code index' and 'sgt code search'$"
+
+run_cmd_mock_embeddings_env "MOCK_EMBED_LOG=$CODE_LOG" "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && git -C \"\$HOME/sgt/rigs/demo\" init -q && printf '%s\n' 'retry backoff implementation' > \"\$HOME/sgt/rigs/demo/retry.sh\" && git -C \"\$HOME/sgt/rigs/demo\" add retry.sh && sgt code search demo 'retry backoff' --limit 1" "$CODE_OUT" "$CODE_ERR" "$CODE_RC"
+
+check_file_contains "code search exits 0 with Voyage mock" "$CODE_RC" '^0$'
+check_file_contains "code search returns tracked code file" "$CODE_OUT" 'retry\.sh:1-1'
+check_file_contains "code search uses voyage-code-3" "$CODE_LOG" '"model": "voyage-code-3"'
+check_file_contains "code index uses document input type" "$CODE_LOG" '"input_type": "document"'
+check_file_contains "code query uses query input type" "$CODE_LOG" '"input_type": "query"'
 
 run_cmd_mock_embeddings "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown' >/dev/null && sgt context index demo >/dev/null && printf '%s' '}{broken-json' >> \"\$HOME/sgt/.sgt/context/demo/index.json\" && sgt context search demo 'watchdog cooldown'" "$RECOVER_OUT" "$RECOVER_ERR" "$RECOVER_RC"
 
@@ -260,8 +285,8 @@ run_cmd_mock_embeddings_env "MOCK_EMBED_LOG=$BATCH_LOG" "sgt init >/dev/null && 
 
 check_file_contains "context index batches oversized corpora exits 0" "$BATCH_RC" '^0$'
 check_file_contains "context index batching preserves entry order" "$BATCH_OUT" 'verified-order'
-check_file_contains "context index batching uses a 512-sized chunk" "$BATCH_LOG" '^512$'
-check_file_contains "context index batching uses a final small chunk" "$BATCH_LOG" '^3$'
+check_file_contains "context index batching uses a 512-sized chunk" "$BATCH_LOG" '"count": 512'
+check_file_contains "context index batching uses a final small chunk" "$BATCH_LOG" '"count": 3'
 
 run_cmd_mock_embeddings_env "MOCK_EMBED_FORCE_ERROR=1" "sgt init >/dev/null && mkdir -p \"\$HOME/sgt/.sgt/rigs\" \"\$HOME/sgt/rigs/demo\" && printf '%s\n' 'https://github.com/acme/demo' > \"\$HOME/sgt/.sgt/rigs/demo\" && sgt context add demo 'remember the watchdog cooldown' >/dev/null && sgt context index demo" "$HTTPFAIL_OUT" "$HTTPFAIL_ERR" "$HTTPFAIL_RC"
 
